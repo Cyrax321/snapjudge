@@ -1206,3 +1206,607 @@ static unsigned getTreeInflateDynamic(HuffmanTree* tree_ll, HuffmanTree* tree_d,
   }
 
   lodepng_free(bitlen_cl);
+  lodepng_free(bitlen_ll);
+  lodepng_free(bitlen_d);
+  HuffmanTree_cleanup(&tree_cl);
+
+  return error;
+}
+
+/*inflate a block with dynamic of fixed Huffman tree. btype must be 1 or 2.*/
+static unsigned inflateHuffmanBlock(ucvector* out, LodePNGBitReader* reader,
+                                    unsigned btype, size_t max_output_size) {
+  unsigned error = 0;
+  HuffmanTree tree_ll; /*the huffman tree for literal and length codes*/
+  HuffmanTree tree_d; /*the huffman tree for distance codes*/
+  const size_t reserved_size = 260; /* must be at least 258 for max length, and a few extra for adding a few extra literals */
+  int done = 0;
+
+  if(!ucvector_reserve(out, out->size + reserved_size)) return 83; /*alloc fail*/
+
+  HuffmanTree_init(&tree_ll);
+  HuffmanTree_init(&tree_d);
+
+  if(btype == 1) error = getTreeInflateFixed(&tree_ll, &tree_d);
+  else /*if(btype == 2)*/ error = getTreeInflateDynamic(&tree_ll, &tree_d, reader);
+
+
+  while(!error && !done) /*decode all symbols until end reached, breaks at end code*/ {
+    /*code_ll is literal, length or end code*/
+    unsigned code_ll;
+    /* ensure enough bits for 2 huffman code reads (15 bits each): if the first is a literal, a second literal is read at once. This
+    appears to be slightly faster, than ensuring 20 bits here for 1 huffman symbol and the potential 5 extra bits for the length symbol.*/
+    ensureBits32(reader, 30);
+    code_ll = huffmanDecodeSymbol(reader, &tree_ll);
+    if(code_ll <= 255) {
+      /*slightly faster code path if multiple literals in a row*/
+      out->data[out->size++] = (unsigned char)code_ll;
+      code_ll = huffmanDecodeSymbol(reader, &tree_ll);
+    }
+    if(code_ll <= 255) /*literal symbol*/ {
+      out->data[out->size++] = (unsigned char)code_ll;
+    } else if(code_ll >= FIRST_LENGTH_CODE_INDEX && code_ll <= LAST_LENGTH_CODE_INDEX) /*length code*/ {
+      unsigned code_d, distance;
+      unsigned numextrabits_l, numextrabits_d; /*extra bits for length and distance*/
+      size_t start, backward, length;
+
+      /*part 1: get length base*/
+      length = LENGTHBASE[code_ll - FIRST_LENGTH_CODE_INDEX];
+
+      /*part 2: get extra bits and add the value of that to length*/
+      numextrabits_l = LENGTHEXTRA[code_ll - FIRST_LENGTH_CODE_INDEX];
+      if(numextrabits_l != 0) {
+        /* bits already ensured above */
+        ensureBits25(reader, 5);
+        length += readBits(reader, numextrabits_l);
+      }
+
+      /*part 3: get distance code*/
+      ensureBits32(reader, 28); /* up to 15 for the huffman symbol, up to 13 for the extra bits */
+      code_d = huffmanDecodeSymbol(reader, &tree_d);
+      if(code_d > 29) {
+        if(code_d <= 31) {
+          ERROR_BREAK(18); /*error: invalid distance code (30-31 are never used)*/
+        } else /* if(code_d == INVALIDSYMBOL) */{
+          ERROR_BREAK(16); /*error: tried to read disallowed huffman symbol*/
+        }
+      }
+      distance = DISTANCEBASE[code_d];
+
+      /*part 4: get extra bits from distance*/
+      numextrabits_d = DISTANCEEXTRA[code_d];
+      if(numextrabits_d != 0) {
+        /* bits already ensured above */
+        distance += readBits(reader, numextrabits_d);
+      }
+
+      /*part 5: fill in all the out[n] values based on the length and dist*/
+      start = out->size;
+      if(distance > start) ERROR_BREAK(52); /*too long backward distance*/
+      backward = start - distance;
+
+      out->size += length;
+      if(distance < length) {
+        size_t forward;
+        lodepng_memcpy(out->data + start, out->data + backward, distance);
+        start += distance;
+        for(forward = distance; forward < length; ++forward) {
+          out->data[start++] = out->data[backward++];
+        }
+      } else {
+        lodepng_memcpy(out->data + start, out->data + backward, length);
+      }
+    } else if(code_ll == 256) {
+      done = 1; /*end code, finish the loop*/
+    } else /*if(code_ll == INVALIDSYMBOL)*/ {
+      ERROR_BREAK(16); /*error: tried to read disallowed huffman symbol*/
+    }
+    if(out->allocsize - out->size < reserved_size) {
+      if(!ucvector_reserve(out, out->size + reserved_size)) ERROR_BREAK(83); /*alloc fail*/
+    }
+    /*check if any of the ensureBits above went out of bounds*/
+    if(reader->bp > reader->bitsize) {
+      /*return error code 10 or 11 depending on the situation that happened in huffmanDecodeSymbol
+      (10=no endcode, 11=wrong jump outside of tree)*/
+      /* TODO: revise error codes 10,11,50: the above comment is no longer valid */
+      ERROR_BREAK(51); /*error, bit pointer jumps past memory*/
+    }
+    if(max_output_size && out->size > max_output_size) {
+      ERROR_BREAK(109); /*error, larger than max size*/
+    }
+  }
+
+  HuffmanTree_cleanup(&tree_ll);
+  HuffmanTree_cleanup(&tree_d);
+
+  return error;
+}
+
+static unsigned inflateNoCompression(ucvector* out, LodePNGBitReader* reader,
+                                     const LodePNGDecompressSettings* settings) {
+  size_t bytepos;
+  size_t size = reader->size;
+  unsigned LEN, NLEN, error = 0;
+
+  /*go to first boundary of byte*/
+  bytepos = (reader->bp + 7u) >> 3u;
+
+  /*read LEN (2 bytes) and NLEN (2 bytes)*/
+  if(bytepos + 4 >= size) return 52; /*error, bit pointer will jump past memory*/
+  LEN = (unsigned)reader->data[bytepos] + ((unsigned)reader->data[bytepos + 1] << 8u); bytepos += 2;
+  NLEN = (unsigned)reader->data[bytepos] + ((unsigned)reader->data[bytepos + 1] << 8u); bytepos += 2;
+
+  /*check if 16-bit NLEN is really the one's complement of LEN*/
+  if(!settings->ignore_nlen && LEN + NLEN != 65535) {
+    return 21; /*error: NLEN is not one's complement of LEN*/
+  }
+
+  if(!ucvector_resize(out, out->size + LEN)) return 83; /*alloc fail*/
+
+  /*read the literal data: LEN bytes are now stored in the out buffer*/
+  if(bytepos + LEN > size) return 23; /*error: reading outside of in buffer*/
+
+  /*out->data can be NULL (when LEN is zero), and arithmetic on NULL ptr is undefined*/
+  if (LEN) {
+    lodepng_memcpy(out->data + out->size - LEN, reader->data + bytepos, LEN);
+    bytepos += LEN;
+  }
+
+  reader->bp = bytepos << 3u;
+
+  return error;
+}
+
+static unsigned lodepng_inflatev(ucvector* out,
+                                 const unsigned char* in, size_t insize,
+                                 const LodePNGDecompressSettings* settings) {
+  unsigned BFINAL = 0;
+  LodePNGBitReader reader;
+  unsigned error = LodePNGBitReader_init(&reader, in, insize);
+
+  if(error) return error;
+
+  while(!BFINAL) {
+    unsigned BTYPE;
+    if(reader.bitsize - reader.bp < 3) return 52; /*error, bit pointer will jump past memory*/
+    ensureBits9(&reader, 3);
+    BFINAL = readBits(&reader, 1);
+    BTYPE = readBits(&reader, 2);
+
+    if(BTYPE == 3) return 20; /*error: invalid BTYPE*/
+    else if(BTYPE == 0) error = inflateNoCompression(out, &reader, settings); /*no compression*/
+    else error = inflateHuffmanBlock(out, &reader, BTYPE, settings->max_output_size); /*compression, BTYPE 01 or 10*/
+    if(!error && settings->max_output_size && out->size > settings->max_output_size) error = 109;
+    if(error) break;
+  }
+
+  return error;
+}
+
+unsigned lodepng_inflate(unsigned char** out, size_t* outsize,
+                         const unsigned char* in, size_t insize,
+                         const LodePNGDecompressSettings* settings) {
+  ucvector v = ucvector_init(*out, *outsize);
+  unsigned error = lodepng_inflatev(&v, in, insize, settings);
+  *out = v.data;
+  *outsize = v.size;
+  return error;
+}
+
+static unsigned inflatev(ucvector* out, const unsigned char* in, size_t insize,
+                        const LodePNGDecompressSettings* settings) {
+  if(settings->custom_inflate) {
+    unsigned error = settings->custom_inflate(&out->data, &out->size, in, insize, settings);
+    out->allocsize = out->size;
+    if(error) {
+      /*the custom inflate is allowed to have its own error codes, however, we translate it to code 110*/
+      error = 110;
+      /*if there's a max output size, and the custom zlib returned error, then indicate that error instead*/
+      if(settings->max_output_size && out->size > settings->max_output_size) error = 109;
+    }
+    return error;
+  } else {
+    return lodepng_inflatev(out, in, insize, settings);
+  }
+}
+
+#endif /*LODEPNG_COMPILE_DECODER*/
+
+#ifdef LODEPNG_COMPILE_ENCODER
+
+/* ////////////////////////////////////////////////////////////////////////// */
+/* / Deflator (Compressor)                                                  / */
+/* ////////////////////////////////////////////////////////////////////////// */
+
+static const unsigned MAX_SUPPORTED_DEFLATE_LENGTH = 258;
+
+/*search the index in the array, that has the largest value smaller than or equal to the given value,
+given array must be sorted (if no value is smaller, it returns the size of the given array)*/
+static size_t searchCodeIndex(const unsigned* array, size_t array_size, size_t value) {
+  /*binary search (only small gain over linear). TODO: use CPU log2 instruction for getting symbols instead*/
+  size_t left = 1;
+  size_t right = array_size - 1;
+
+  while(left <= right) {
+    size_t mid = (left + right) >> 1;
+    if(array[mid] >= value) right = mid - 1;
+    else left = mid + 1;
+  }
+  if(left >= array_size || array[left] > value) left--;
+  return left;
+}
+
+static void addLengthDistance(uivector* values, size_t length, size_t distance) {
+  /*values in encoded vector are those used by deflate:
+  0-255: literal bytes
+  256: end
+  257-285: length/distance pair (length code, followed by extra length bits, distance code, extra distance bits)
+  286-287: invalid*/
+
+  unsigned length_code = (unsigned)searchCodeIndex(LENGTHBASE, 29, length);
+  unsigned extra_length = (unsigned)(length - LENGTHBASE[length_code]);
+  unsigned dist_code = (unsigned)searchCodeIndex(DISTANCEBASE, 30, distance);
+  unsigned extra_distance = (unsigned)(distance - DISTANCEBASE[dist_code]);
+
+  size_t pos = values->size;
+  /*TODO: return error when this fails (out of memory)*/
+  unsigned ok = uivector_resize(values, values->size + 4);
+  if(ok) {
+    values->data[pos + 0] = length_code + FIRST_LENGTH_CODE_INDEX;
+    values->data[pos + 1] = extra_length;
+    values->data[pos + 2] = dist_code;
+    values->data[pos + 3] = extra_distance;
+  }
+}
+
+/*3 bytes of data get encoded into two bytes. The hash cannot use more than 3
+bytes as input because 3 is the minimum match length for deflate*/
+static const unsigned HASH_NUM_VALUES = 65536;
+static const unsigned HASH_BIT_MASK = 65535; /*HASH_NUM_VALUES - 1, but C90 does not like that as initializer*/
+
+typedef struct Hash {
+  int* head; /*hash value to head circular pos - can be outdated if went around window*/
+  /*circular pos to prev circular pos*/
+  unsigned short* chain;
+  int* val; /*circular pos to hash value*/
+
+  /*TODO: do this not only for zeros but for any repeated byte. However for PNG
+  it's always going to be the zeros that dominate, so not important for PNG*/
+  int* headz; /*similar to head, but for chainz*/
+  unsigned short* chainz; /*those with same amount of zeros*/
+  unsigned short* zeros; /*length of zeros streak, used as a second hash chain*/
+} Hash;
+
+static unsigned hash_init(Hash* hash, unsigned windowsize) {
+  unsigned i;
+  hash->head = (int*)lodepng_malloc(sizeof(int) * HASH_NUM_VALUES);
+  hash->val = (int*)lodepng_malloc(sizeof(int) * windowsize);
+  hash->chain = (unsigned short*)lodepng_malloc(sizeof(unsigned short) * windowsize);
+
+  hash->zeros = (unsigned short*)lodepng_malloc(sizeof(unsigned short) * windowsize);
+  hash->headz = (int*)lodepng_malloc(sizeof(int) * (MAX_SUPPORTED_DEFLATE_LENGTH + 1));
+  hash->chainz = (unsigned short*)lodepng_malloc(sizeof(unsigned short) * windowsize);
+
+  if(!hash->head || !hash->chain || !hash->val  || !hash->headz|| !hash->chainz || !hash->zeros) {
+    return 83; /*alloc fail*/
+  }
+
+  /*initialize hash table*/
+  for(i = 0; i != HASH_NUM_VALUES; ++i) hash->head[i] = -1;
+  for(i = 0; i != windowsize; ++i) hash->val[i] = -1;
+  for(i = 0; i != windowsize; ++i) hash->chain[i] = i; /*same value as index indicates uninitialized*/
+
+  for(i = 0; i <= MAX_SUPPORTED_DEFLATE_LENGTH; ++i) hash->headz[i] = -1;
+  for(i = 0; i != windowsize; ++i) hash->chainz[i] = i; /*same value as index indicates uninitialized*/
+
+  return 0;
+}
+
+static void hash_cleanup(Hash* hash) {
+  lodepng_free(hash->head);
+  lodepng_free(hash->val);
+  lodepng_free(hash->chain);
+
+  lodepng_free(hash->zeros);
+  lodepng_free(hash->headz);
+  lodepng_free(hash->chainz);
+}
+
+
+
+static unsigned getHash(const unsigned char* data, size_t size, size_t pos) {
+  unsigned result = 0;
+  if(pos + 2 < size) {
+    /*A simple shift and xor hash is used. Since the data of PNGs is dominated
+    by zeroes due to the filters, a better hash does not have a significant
+    effect on speed in traversing the chain, and causes more time spend on
+    calculating the hash.*/
+    result ^= ((unsigned)data[pos + 0] << 0u);
+    result ^= ((unsigned)data[pos + 1] << 4u);
+    result ^= ((unsigned)data[pos + 2] << 8u);
+  } else {
+    size_t amount, i;
+    if(pos >= size) return 0;
+    amount = size - pos;
+    for(i = 0; i != amount; ++i) result ^= ((unsigned)data[pos + i] << (i * 8u));
+  }
+  return result & HASH_BIT_MASK;
+}
+
+static unsigned countZeros(const unsigned char* data, size_t size, size_t pos) {
+  const unsigned char* start = data + pos;
+  const unsigned char* end = start + MAX_SUPPORTED_DEFLATE_LENGTH;
+  if(end > data + size) end = data + size;
+  data = start;
+  while(data != end && *data == 0) ++data;
+  /*subtracting two addresses returned as 32-bit number (max value is MAX_SUPPORTED_DEFLATE_LENGTH)*/
+  return (unsigned)(data - start);
+}
+
+/*wpos = pos & (windowsize - 1)*/
+static void updateHashChain(Hash* hash, size_t wpos, unsigned hashval, unsigned short numzeros) {
+  hash->val[wpos] = (int)hashval;
+  if(hash->head[hashval] != -1) hash->chain[wpos] = hash->head[hashval];
+  hash->head[hashval] = (int)wpos;
+
+  hash->zeros[wpos] = numzeros;
+  if(hash->headz[numzeros] != -1) hash->chainz[wpos] = hash->headz[numzeros];
+  hash->headz[numzeros] = (int)wpos;
+}
+
+/*
+LZ77-encode the data. Return value is error code. The input are raw bytes, the output
+is in the form of unsigned integers with codes representing for example literal bytes, or
+length/distance pairs.
+It uses a hash table technique to let it encode faster. When doing LZ77 encoding, a
+sliding window (of windowsize) is used, and all past bytes in that window can be used as
+the "dictionary". A brute force search through all possible distances would be slow, and
+this hash technique is one out of several ways to speed this up.
+*/
+static unsigned encodeLZ77(uivector* out, Hash* hash,
+                           const unsigned char* in, size_t inpos, size_t insize, unsigned windowsize,
+                           unsigned minmatch, unsigned nicematch, unsigned lazymatching) {
+  size_t pos;
+  unsigned i, error = 0;
+  /*for large window lengths, assume the user wants no compression loss. Otherwise, max hash chain length speedup.*/
+  unsigned maxchainlength = windowsize >= 8192 ? windowsize : windowsize / 8u;
+  unsigned maxlazymatch = windowsize >= 8192 ? MAX_SUPPORTED_DEFLATE_LENGTH : 64;
+
+  unsigned usezeros = 1; /*not sure if setting it to false for windowsize < 8192 is better or worse*/
+  unsigned numzeros = 0;
+
+  unsigned offset; /*the offset represents the distance in LZ77 terminology*/
+  unsigned length;
+  unsigned lazy = 0;
+  unsigned lazylength = 0, lazyoffset = 0;
+  unsigned hashval;
+  unsigned current_offset, current_length;
+  unsigned prev_offset;
+  const unsigned char *lastptr, *foreptr, *backptr;
+  unsigned hashpos;
+
+  if(windowsize == 0 || windowsize > 32768) return 60; /*error: windowsize smaller/larger than allowed*/
+  if((windowsize & (windowsize - 1)) != 0) return 90; /*error: must be power of two*/
+
+  if(nicematch > MAX_SUPPORTED_DEFLATE_LENGTH) nicematch = MAX_SUPPORTED_DEFLATE_LENGTH;
+
+  for(pos = inpos; pos < insize; ++pos) {
+    size_t wpos = pos & (windowsize - 1); /*position for in 'circular' hash buffers*/
+    unsigned chainlength = 0;
+
+    hashval = getHash(in, insize, pos);
+
+    if(usezeros && hashval == 0) {
+      if(numzeros == 0) numzeros = countZeros(in, insize, pos);
+      else if(pos + numzeros > insize || in[pos + numzeros - 1] != 0) --numzeros;
+    } else {
+      numzeros = 0;
+    }
+
+    updateHashChain(hash, wpos, hashval, numzeros);
+
+    /*the length and offset found for the current position*/
+    length = 0;
+    offset = 0;
+
+    hashpos = hash->chain[wpos];
+
+    lastptr = &in[insize < pos + MAX_SUPPORTED_DEFLATE_LENGTH ? insize : pos + MAX_SUPPORTED_DEFLATE_LENGTH];
+
+    /*search for the longest string*/
+    prev_offset = 0;
+    for(;;) {
+      if(chainlength++ >= maxchainlength) break;
+      current_offset = (unsigned)(hashpos <= wpos ? wpos - hashpos : wpos - hashpos + windowsize);
+
+      if(current_offset < prev_offset) break; /*stop when went completely around the circular buffer*/
+      prev_offset = current_offset;
+      if(current_offset > 0) {
+        /*test the next characters*/
+        foreptr = &in[pos];
+        backptr = &in[pos - current_offset];
+
+        /*common case in PNGs is lots of zeros. Quickly skip over them as a speedup*/
+        if(numzeros >= 3) {
+          unsigned skip = hash->zeros[hashpos];
+          if(skip > numzeros) skip = numzeros;
+          backptr += skip;
+          foreptr += skip;
+        }
+
+        while(foreptr != lastptr && *backptr == *foreptr) /*maximum supported length by deflate is max length*/ {
+          ++backptr;
+          ++foreptr;
+        }
+        current_length = (unsigned)(foreptr - &in[pos]);
+
+        if(current_length > length) {
+          length = current_length; /*the longest length*/
+          offset = current_offset; /*the offset that is related to this longest length*/
+          /*jump out once a length of max length is found (speed gain). This also jumps
+          out if length is MAX_SUPPORTED_DEFLATE_LENGTH*/
+          if(current_length >= nicematch) break;
+        }
+      }
+
+      if(hashpos == hash->chain[hashpos]) break;
+
+      if(numzeros >= 3 && length > numzeros) {
+        hashpos = hash->chainz[hashpos];
+        if(hash->zeros[hashpos] != numzeros) break;
+      } else {
+        hashpos = hash->chain[hashpos];
+        /*outdated hash value, happens if particular value was not encountered in whole last window*/
+        if(hash->val[hashpos] != (int)hashval) break;
+      }
+    }
+
+    if(lazymatching) {
+      if(!lazy && length >= 3 && length <= maxlazymatch && length < MAX_SUPPORTED_DEFLATE_LENGTH) {
+        lazy = 1;
+        lazylength = length;
+        lazyoffset = offset;
+        continue; /*try the next byte*/
+      }
+      if(lazy) {
+        lazy = 0;
+        if(pos == 0) ERROR_BREAK(81);
+        if(length > lazylength + 1) {
+          /*push the previous character as literal*/
+          if(!uivector_push_back(out, in[pos - 1])) ERROR_BREAK(83 /*alloc fail*/);
+        } else {
+          length = lazylength;
+          offset = lazyoffset;
+          hash->head[hashval] = -1; /*the same hashchain update will be done, this ensures no wrong alteration*/
+          hash->headz[numzeros] = -1; /*idem*/
+          --pos;
+        }
+      }
+    }
+    if(length >= 3 && offset > windowsize) ERROR_BREAK(86 /*too big (or overflown negative) offset*/);
+
+    /*encode it as length/distance pair or literal value*/
+    if(length < 3) /*only lengths of 3 or higher are supported as length/distance pair*/ {
+      if(!uivector_push_back(out, in[pos])) ERROR_BREAK(83 /*alloc fail*/);
+    } else if(length < minmatch || (length == 3 && offset > 4096)) {
+      /*compensate for the fact that longer offsets have more extra bits, a
+      length of only 3 may be not worth it then*/
+      if(!uivector_push_back(out, in[pos])) ERROR_BREAK(83 /*alloc fail*/);
+    } else {
+      addLengthDistance(out, length, offset);
+      for(i = 1; i < length; ++i) {
+        ++pos;
+        wpos = pos & (windowsize - 1);
+        hashval = getHash(in, insize, pos);
+        if(usezeros && hashval == 0) {
+          if(numzeros == 0) numzeros = countZeros(in, insize, pos);
+          else if(pos + numzeros > insize || in[pos + numzeros - 1] != 0) --numzeros;
+        } else {
+          numzeros = 0;
+        }
+        updateHashChain(hash, wpos, hashval, numzeros);
+      }
+    }
+  } /*end of the loop through each character of input*/
+
+  return error;
+}
+
+/* /////////////////////////////////////////////////////////////////////////// */
+
+static unsigned deflateNoCompression(ucvector* out, const unsigned char* data, size_t datasize) {
+  /*non compressed deflate block data: 1 bit BFINAL,2 bits BTYPE,(5 bits): it jumps to start of next byte,
+  2 bytes LEN, 2 bytes NLEN, LEN bytes literal DATA*/
+
+  size_t i, numdeflateblocks = (datasize + 65534u) / 65535u;
+  size_t datapos = 0;
+  for(i = 0; i != numdeflateblocks; ++i) {
+    unsigned BFINAL, BTYPE, LEN, NLEN;
+    unsigned char firstbyte;
+    size_t pos = out->size;
+
+    BFINAL = (i == numdeflateblocks - 1);
+    BTYPE = 0;
+
+    LEN = 65535;
+    if(datasize - datapos < 65535u) LEN = (unsigned)datasize - (unsigned)datapos;
+    NLEN = 65535 - LEN;
+
+    if(!ucvector_resize(out, out->size + LEN + 5)) return 83; /*alloc fail*/
+
+    firstbyte = (unsigned char)(BFINAL + ((BTYPE & 1u) << 1u) + ((BTYPE & 2u) << 1u));
+    out->data[pos + 0] = firstbyte;
+    out->data[pos + 1] = (unsigned char)(LEN & 255);
+    out->data[pos + 2] = (unsigned char)(LEN >> 8u);
+    out->data[pos + 3] = (unsigned char)(NLEN & 255);
+    out->data[pos + 4] = (unsigned char)(NLEN >> 8u);
+    lodepng_memcpy(out->data + pos + 5, data + datapos, LEN);
+    datapos += LEN;
+  }
+
+  return 0;
+}
+
+/*
+write the lz77-encoded data, which has lit, len and dist codes, to compressed stream using huffman trees.
+tree_ll: the tree for lit and len codes.
+tree_d: the tree for distance codes.
+*/
+static void writeLZ77data(LodePNGBitWriter* writer, const uivector* lz77_encoded,
+                          const HuffmanTree* tree_ll, const HuffmanTree* tree_d) {
+  size_t i = 0;
+  for(i = 0; i != lz77_encoded->size; ++i) {
+    unsigned val = lz77_encoded->data[i];
+    writeBitsReversed(writer, tree_ll->codes[val], tree_ll->lengths[val]);
+    if(val > 256) /*for a length code, 3 more things have to be added*/ {
+      unsigned length_index = val - FIRST_LENGTH_CODE_INDEX;
+      unsigned n_length_extra_bits = LENGTHEXTRA[length_index];
+      unsigned length_extra_bits = lz77_encoded->data[++i];
+
+      unsigned distance_code = lz77_encoded->data[++i];
+
+      unsigned distance_index = distance_code;
+      unsigned n_distance_extra_bits = DISTANCEEXTRA[distance_index];
+      unsigned distance_extra_bits = lz77_encoded->data[++i];
+
+      writeBits(writer, length_extra_bits, n_length_extra_bits);
+      writeBitsReversed(writer, tree_d->codes[distance_code], tree_d->lengths[distance_code]);
+      writeBits(writer, distance_extra_bits, n_distance_extra_bits);
+    }
+  }
+}
+
+/*Deflate for a block of type "dynamic", that is, with freely, optimally, created huffman trees*/
+static unsigned deflateDynamic(LodePNGBitWriter* writer, Hash* hash,
+                               const unsigned char* data, size_t datapos, size_t dataend,
+                               const LodePNGCompressSettings* settings, unsigned final) {
+  unsigned error = 0;
+
+  /*
+  A block is compressed as follows: The PNG data is lz77 encoded, resulting in
+  literal bytes and length/distance pairs. This is then huffman compressed with
+  two huffman trees. One huffman tree is used for the lit and len values ("ll"),
+  another huffman tree is used for the dist values ("d"). These two trees are
+  stored using their code lengths, and to compress even more these code lengths
+  are also run-length encoded and huffman compressed. This gives a huffman tree
+  of code lengths "cl". The code lengths used to describe this third tree are
+  the code length code lengths ("clcl").
+  */
+
+  /*The lz77 encoded data, represented with integers since there will also be length and distance codes in it*/
+  uivector lz77_encoded;
+  HuffmanTree tree_ll; /*tree for lit,len values*/
+  HuffmanTree tree_d; /*tree for distance codes*/
+  HuffmanTree tree_cl; /*tree for encoding the code lengths representing tree_ll and tree_d*/
+  unsigned* frequencies_ll = 0; /*frequency of lit,len codes*/
+  unsigned* frequencies_d = 0; /*frequency of dist codes*/
+  unsigned* frequencies_cl = 0; /*frequency of code length codes*/
+  unsigned* bitlen_lld = 0; /*lit,len,dist code lengths (int bits), literally (without repeat codes).*/
+  unsigned* bitlen_lld_e = 0; /*bitlen_lld encoded with repeat codes (this is a rudimentary run length compression)*/
+  size_t datasize = dataend - datapos;
+
+  /*
+  If we could call "bitlen_cl" the the code length code lengths ("clcl"), that is the bit lengths of codes to represent
+  tree_cl in CLCL_ORDER, then due to the huffman compression of huffman tree representations ("two levels"), there are
+  some analogies:
+  bitlen_lld is to tree_cl what data is to tree_ll and tree_d.
