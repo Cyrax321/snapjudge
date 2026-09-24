@@ -2998,3 +2998,603 @@ inline size_t mmap::size() const { return size_; }
 inline const char *mmap::data() const {
   return is_open_empty_file ? "" : static_cast<const char *>(addr_);
 }
+
+inline void mmap::close() {
+#if defined(_WIN32)
+  if (addr_) {
+    ::UnmapViewOfFile(addr_);
+    addr_ = nullptr;
+  }
+
+  if (hMapping_) {
+    ::CloseHandle(hMapping_);
+    hMapping_ = NULL;
+  }
+
+  if (hFile_ != INVALID_HANDLE_VALUE) {
+    ::CloseHandle(hFile_);
+    hFile_ = INVALID_HANDLE_VALUE;
+  }
+
+  is_open_empty_file = false;
+#else
+  if (addr_ != nullptr) {
+    munmap(addr_, size_);
+    addr_ = nullptr;
+  }
+
+  if (fd_ != -1) {
+    ::close(fd_);
+    fd_ = -1;
+  }
+#endif
+  size_ = 0;
+}
+inline int close_socket(socket_t sock) {
+#ifdef _WIN32
+  return closesocket(sock);
+#else
+  return close(sock);
+#endif
+}
+
+template <typename T> inline ssize_t handle_EINTR(T fn) {
+  ssize_t res = 0;
+  while (true) {
+    res = fn();
+    if (res < 0 && errno == EINTR) {
+      std::this_thread::sleep_for(std::chrono::microseconds{1});
+      continue;
+    }
+    break;
+  }
+  return res;
+}
+
+inline ssize_t read_socket(socket_t sock, void *ptr, size_t size, int flags) {
+  return handle_EINTR([&]() {
+    return recv(sock,
+#ifdef _WIN32
+                static_cast<char *>(ptr), static_cast<int>(size),
+#else
+                ptr, size,
+#endif
+                flags);
+  });
+}
+
+inline ssize_t send_socket(socket_t sock, const void *ptr, size_t size,
+                           int flags) {
+  return handle_EINTR([&]() {
+    return send(sock,
+#ifdef _WIN32
+                static_cast<const char *>(ptr), static_cast<int>(size),
+#else
+                ptr, size,
+#endif
+                flags);
+  });
+}
+
+inline ssize_t select_read(socket_t sock, time_t sec, time_t usec) {
+#ifdef CPPHTTPLIB_USE_POLL
+  struct pollfd pfd_read;
+  pfd_read.fd = sock;
+  pfd_read.events = POLLIN;
+
+  auto timeout = static_cast<int>(sec * 1000 + usec / 1000);
+
+  return handle_EINTR([&]() { return poll(&pfd_read, 1, timeout); });
+#else
+#ifndef _WIN32
+  if (sock >= FD_SETSIZE) { return -1; }
+#endif
+
+  fd_set fds;
+  FD_ZERO(&fds);
+  FD_SET(sock, &fds);
+
+  timeval tv;
+  tv.tv_sec = static_cast<long>(sec);
+  tv.tv_usec = static_cast<decltype(tv.tv_usec)>(usec);
+
+  return handle_EINTR([&]() {
+    return select(static_cast<int>(sock + 1), &fds, nullptr, nullptr, &tv);
+  });
+#endif
+}
+
+inline ssize_t select_write(socket_t sock, time_t sec, time_t usec) {
+#ifdef CPPHTTPLIB_USE_POLL
+  struct pollfd pfd_read;
+  pfd_read.fd = sock;
+  pfd_read.events = POLLOUT;
+
+  auto timeout = static_cast<int>(sec * 1000 + usec / 1000);
+
+  return handle_EINTR([&]() { return poll(&pfd_read, 1, timeout); });
+#else
+#ifndef _WIN32
+  if (sock >= FD_SETSIZE) { return -1; }
+#endif
+
+  fd_set fds;
+  FD_ZERO(&fds);
+  FD_SET(sock, &fds);
+
+  timeval tv;
+  tv.tv_sec = static_cast<long>(sec);
+  tv.tv_usec = static_cast<decltype(tv.tv_usec)>(usec);
+
+  return handle_EINTR([&]() {
+    return select(static_cast<int>(sock + 1), nullptr, &fds, nullptr, &tv);
+  });
+#endif
+}
+
+inline Error wait_until_socket_is_ready(socket_t sock, time_t sec,
+                                        time_t usec) {
+#ifdef CPPHTTPLIB_USE_POLL
+  struct pollfd pfd_read;
+  pfd_read.fd = sock;
+  pfd_read.events = POLLIN | POLLOUT;
+
+  auto timeout = static_cast<int>(sec * 1000 + usec / 1000);
+
+  auto poll_res = handle_EINTR([&]() { return poll(&pfd_read, 1, timeout); });
+
+  if (poll_res == 0) { return Error::ConnectionTimeout; }
+
+  if (poll_res > 0 && pfd_read.revents & (POLLIN | POLLOUT)) {
+    auto error = 0;
+    socklen_t len = sizeof(error);
+    auto res = getsockopt(sock, SOL_SOCKET, SO_ERROR,
+                          reinterpret_cast<char *>(&error), &len);
+    auto successful = res >= 0 && !error;
+    return successful ? Error::Success : Error::Connection;
+  }
+
+  return Error::Connection;
+#else
+#ifndef _WIN32
+  if (sock >= FD_SETSIZE) { return Error::Connection; }
+#endif
+
+  fd_set fdsr;
+  FD_ZERO(&fdsr);
+  FD_SET(sock, &fdsr);
+
+  auto fdsw = fdsr;
+  auto fdse = fdsr;
+
+  timeval tv;
+  tv.tv_sec = static_cast<long>(sec);
+  tv.tv_usec = static_cast<decltype(tv.tv_usec)>(usec);
+
+  auto ret = handle_EINTR([&]() {
+    return select(static_cast<int>(sock + 1), &fdsr, &fdsw, &fdse, &tv);
+  });
+
+  if (ret == 0) { return Error::ConnectionTimeout; }
+
+  if (ret > 0 && (FD_ISSET(sock, &fdsr) || FD_ISSET(sock, &fdsw))) {
+    auto error = 0;
+    socklen_t len = sizeof(error);
+    auto res = getsockopt(sock, SOL_SOCKET, SO_ERROR,
+                          reinterpret_cast<char *>(&error), &len);
+    auto successful = res >= 0 && !error;
+    return successful ? Error::Success : Error::Connection;
+  }
+  return Error::Connection;
+#endif
+}
+
+inline bool is_socket_alive(socket_t sock) {
+  const auto val = detail::select_read(sock, 0, 0);
+  if (val == 0) {
+    return true;
+  } else if (val < 0 && errno == EBADF) {
+    return false;
+  }
+  char buf[1];
+  return detail::read_socket(sock, &buf[0], sizeof(buf), MSG_PEEK) > 0;
+}
+
+class SocketStream final : public Stream {
+public:
+  SocketStream(socket_t sock, time_t read_timeout_sec, time_t read_timeout_usec,
+               time_t write_timeout_sec, time_t write_timeout_usec);
+  ~SocketStream() override;
+
+  bool is_readable() const override;
+  bool is_writable() const override;
+  ssize_t read(char *ptr, size_t size) override;
+  ssize_t write(const char *ptr, size_t size) override;
+  void get_remote_ip_and_port(std::string &ip, int &port) const override;
+  void get_local_ip_and_port(std::string &ip, int &port) const override;
+  socket_t socket() const override;
+
+private:
+  socket_t sock_;
+  time_t read_timeout_sec_;
+  time_t read_timeout_usec_;
+  time_t write_timeout_sec_;
+  time_t write_timeout_usec_;
+
+  std::vector<char> read_buff_;
+  size_t read_buff_off_ = 0;
+  size_t read_buff_content_size_ = 0;
+
+  static const size_t read_buff_size_ = 1024l * 4;
+};
+
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+class SSLSocketStream final : public Stream {
+public:
+  SSLSocketStream(socket_t sock, SSL *ssl, time_t read_timeout_sec,
+                  time_t read_timeout_usec, time_t write_timeout_sec,
+                  time_t write_timeout_usec);
+  ~SSLSocketStream() override;
+
+  bool is_readable() const override;
+  bool is_writable() const override;
+  ssize_t read(char *ptr, size_t size) override;
+  ssize_t write(const char *ptr, size_t size) override;
+  void get_remote_ip_and_port(std::string &ip, int &port) const override;
+  void get_local_ip_and_port(std::string &ip, int &port) const override;
+  socket_t socket() const override;
+
+private:
+  socket_t sock_;
+  SSL *ssl_;
+  time_t read_timeout_sec_;
+  time_t read_timeout_usec_;
+  time_t write_timeout_sec_;
+  time_t write_timeout_usec_;
+};
+#endif
+
+inline bool keep_alive(const std::atomic<socket_t> &svr_sock, socket_t sock,
+                       time_t keep_alive_timeout_sec) {
+  using namespace std::chrono;
+
+  const auto interval_usec =
+      CPPHTTPLIB_KEEPALIVE_TIMEOUT_CHECK_INTERVAL_USECOND;
+
+  // Avoid expensive `steady_clock::now()` call for the first time
+  if (select_read(sock, 0, interval_usec) > 0) { return true; }
+
+  const auto start = steady_clock::now() - microseconds{interval_usec};
+  const auto timeout = seconds{keep_alive_timeout_sec};
+
+  while (true) {
+    if (svr_sock == INVALID_SOCKET) {
+      break; // Server socket is closed
+    }
+
+    auto val = select_read(sock, 0, interval_usec);
+    if (val < 0) {
+      break; // Ssocket error
+    } else if (val == 0) {
+      if (steady_clock::now() - start > timeout) {
+        break; // Timeout
+      }
+    } else {
+      return true; // Ready for read
+    }
+
+    std::this_thread::sleep_for(microseconds{interval_usec});
+  }
+
+  return false;
+}
+
+template <typename T>
+inline bool
+process_server_socket_core(const std::atomic<socket_t> &svr_sock, socket_t sock,
+                           size_t keep_alive_max_count,
+                           time_t keep_alive_timeout_sec, T callback) {
+  assert(keep_alive_max_count > 0);
+  auto ret = false;
+  auto count = keep_alive_max_count;
+  while (count > 0 && keep_alive(svr_sock, sock, keep_alive_timeout_sec)) {
+    auto close_connection = count == 1;
+    auto connection_closed = false;
+    ret = callback(close_connection, connection_closed);
+    if (!ret || connection_closed) { break; }
+    count--;
+  }
+  return ret;
+}
+
+template <typename T>
+inline bool
+process_server_socket(const std::atomic<socket_t> &svr_sock, socket_t sock,
+                      size_t keep_alive_max_count,
+                      time_t keep_alive_timeout_sec, time_t read_timeout_sec,
+                      time_t read_timeout_usec, time_t write_timeout_sec,
+                      time_t write_timeout_usec, T callback) {
+  return process_server_socket_core(
+      svr_sock, sock, keep_alive_max_count, keep_alive_timeout_sec,
+      [&](bool close_connection, bool &connection_closed) {
+        SocketStream strm(sock, read_timeout_sec, read_timeout_usec,
+                          write_timeout_sec, write_timeout_usec);
+        return callback(strm, close_connection, connection_closed);
+      });
+}
+
+inline bool process_client_socket(socket_t sock, time_t read_timeout_sec,
+                                  time_t read_timeout_usec,
+                                  time_t write_timeout_sec,
+                                  time_t write_timeout_usec,
+                                  std::function<bool(Stream &)> callback) {
+  SocketStream strm(sock, read_timeout_sec, read_timeout_usec,
+                    write_timeout_sec, write_timeout_usec);
+  return callback(strm);
+}
+
+inline int shutdown_socket(socket_t sock) {
+#ifdef _WIN32
+  return shutdown(sock, SD_BOTH);
+#else
+  return shutdown(sock, SHUT_RDWR);
+#endif
+}
+
+inline std::string escape_abstract_namespace_unix_domain(const std::string &s) {
+  if (s.size() > 1 && s[0] == '\0') {
+    auto ret = s;
+    ret[0] = '@';
+    return ret;
+  }
+  return s;
+}
+
+inline std::string
+unescape_abstract_namespace_unix_domain(const std::string &s) {
+  if (s.size() > 1 && s[0] == '@') {
+    auto ret = s;
+    ret[0] = '\0';
+    return ret;
+  }
+  return s;
+}
+
+template <typename BindOrConnect>
+socket_t create_socket(const std::string &host, const std::string &ip, int port,
+                       int address_family, int socket_flags, bool tcp_nodelay,
+                       bool ipv6_v6only, SocketOptions socket_options,
+                       BindOrConnect bind_or_connect) {
+  // Get address info
+  const char *node = nullptr;
+  struct addrinfo hints;
+  struct addrinfo *result;
+
+  memset(&hints, 0, sizeof(struct addrinfo));
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_protocol = IPPROTO_IP;
+
+  if (!ip.empty()) {
+    node = ip.c_str();
+    // Ask getaddrinfo to convert IP in c-string to address
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_flags = AI_NUMERICHOST;
+  } else {
+    if (!host.empty()) { node = host.c_str(); }
+    hints.ai_family = address_family;
+    hints.ai_flags = socket_flags;
+  }
+
+#ifndef _WIN32
+  if (hints.ai_family == AF_UNIX) {
+    const auto addrlen = host.length();
+    if (addrlen > sizeof(sockaddr_un::sun_path)) { return INVALID_SOCKET; }
+
+#ifdef SOCK_CLOEXEC
+    auto sock = socket(hints.ai_family, hints.ai_socktype | SOCK_CLOEXEC,
+                       hints.ai_protocol);
+#else
+    auto sock = socket(hints.ai_family, hints.ai_socktype, hints.ai_protocol);
+#endif
+
+    if (sock != INVALID_SOCKET) {
+      sockaddr_un addr{};
+      addr.sun_family = AF_UNIX;
+
+      auto unescaped_host = unescape_abstract_namespace_unix_domain(host);
+      std::copy(unescaped_host.begin(), unescaped_host.end(), addr.sun_path);
+
+      hints.ai_addr = reinterpret_cast<sockaddr *>(&addr);
+      hints.ai_addrlen = static_cast<socklen_t>(
+          sizeof(addr) - sizeof(addr.sun_path) + addrlen);
+
+#ifndef SOCK_CLOEXEC
+      fcntl(sock, F_SETFD, FD_CLOEXEC);
+#endif
+
+      if (socket_options) { socket_options(sock); }
+
+      bool dummy;
+      if (!bind_or_connect(sock, hints, dummy)) {
+        close_socket(sock);
+        sock = INVALID_SOCKET;
+      }
+    }
+    return sock;
+  }
+#endif
+
+  auto service = std::to_string(port);
+
+  if (getaddrinfo(node, service.c_str(), &hints, &result)) {
+#if defined __linux__ && !defined __ANDROID__
+    res_init();
+#endif
+    return INVALID_SOCKET;
+  }
+  auto se = detail::scope_exit([&] { freeaddrinfo(result); });
+
+  for (auto rp = result; rp; rp = rp->ai_next) {
+    // Create a socket
+#ifdef _WIN32
+    auto sock =
+        WSASocketW(rp->ai_family, rp->ai_socktype, rp->ai_protocol, nullptr, 0,
+                   WSA_FLAG_NO_HANDLE_INHERIT | WSA_FLAG_OVERLAPPED);
+    /**
+     * Since the WSA_FLAG_NO_HANDLE_INHERIT is only supported on Windows 7 SP1
+     * and above the socket creation fails on older Windows Systems.
+     *
+     * Let's try to create a socket the old way in this case.
+     *
+     * Reference:
+     * https://docs.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsasocketa
+     *
+     * WSA_FLAG_NO_HANDLE_INHERIT:
+     * This flag is supported on Windows 7 with SP1, Windows Server 2008 R2 with
+     * SP1, and later
+     *
+     */
+    if (sock == INVALID_SOCKET) {
+      sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+    }
+#else
+
+#ifdef SOCK_CLOEXEC
+    auto sock =
+        socket(rp->ai_family, rp->ai_socktype | SOCK_CLOEXEC, rp->ai_protocol);
+#else
+    auto sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+#endif
+
+#endif
+    if (sock == INVALID_SOCKET) { continue; }
+
+#if !defined _WIN32 && !defined SOCK_CLOEXEC
+    if (fcntl(sock, F_SETFD, FD_CLOEXEC) == -1) {
+      close_socket(sock);
+      continue;
+    }
+#endif
+
+    if (tcp_nodelay) {
+      auto opt = 1;
+#ifdef _WIN32
+      setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
+                 reinterpret_cast<const char *>(&opt), sizeof(opt));
+#else
+      setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
+                 reinterpret_cast<const void *>(&opt), sizeof(opt));
+#endif
+    }
+
+    if (rp->ai_family == AF_INET6) {
+      auto opt = ipv6_v6only ? 1 : 0;
+#ifdef _WIN32
+      setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY,
+                 reinterpret_cast<const char *>(&opt), sizeof(opt));
+#else
+      setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY,
+                 reinterpret_cast<const void *>(&opt), sizeof(opt));
+#endif
+    }
+
+    if (socket_options) { socket_options(sock); }
+
+    // bind or connect
+    auto quit = false;
+    if (bind_or_connect(sock, *rp, quit)) { return sock; }
+
+    close_socket(sock);
+
+    if (quit) { break; }
+  }
+
+  return INVALID_SOCKET;
+}
+
+inline void set_nonblocking(socket_t sock, bool nonblocking) {
+#ifdef _WIN32
+  auto flags = nonblocking ? 1UL : 0UL;
+  ioctlsocket(sock, FIONBIO, &flags);
+#else
+  auto flags = fcntl(sock, F_GETFL, 0);
+  fcntl(sock, F_SETFL,
+        nonblocking ? (flags | O_NONBLOCK) : (flags & (~O_NONBLOCK)));
+#endif
+}
+
+inline bool is_connection_error() {
+#ifdef _WIN32
+  return WSAGetLastError() != WSAEWOULDBLOCK;
+#else
+  return errno != EINPROGRESS;
+#endif
+}
+
+inline bool bind_ip_address(socket_t sock, const std::string &host) {
+  struct addrinfo hints;
+  struct addrinfo *result;
+
+  memset(&hints, 0, sizeof(struct addrinfo));
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_protocol = 0;
+
+  if (getaddrinfo(host.c_str(), "0", &hints, &result)) { return false; }
+  auto se = detail::scope_exit([&] { freeaddrinfo(result); });
+
+  auto ret = false;
+  for (auto rp = result; rp; rp = rp->ai_next) {
+    const auto &ai = *rp;
+    if (!::bind(sock, ai.ai_addr, static_cast<socklen_t>(ai.ai_addrlen))) {
+      ret = true;
+      break;
+    }
+  }
+
+  return ret;
+}
+
+#if !defined _WIN32 && !defined ANDROID && !defined _AIX && !defined __MVS__
+#define USE_IF2IP
+#endif
+
+#ifdef USE_IF2IP
+inline std::string if2ip(int address_family, const std::string &ifn) {
+  struct ifaddrs *ifap;
+  getifaddrs(&ifap);
+  auto se = detail::scope_exit([&] { freeifaddrs(ifap); });
+
+  std::string addr_candidate;
+  for (auto ifa = ifap; ifa; ifa = ifa->ifa_next) {
+    if (ifa->ifa_addr && ifn == ifa->ifa_name &&
+        (AF_UNSPEC == address_family ||
+         ifa->ifa_addr->sa_family == address_family)) {
+      if (ifa->ifa_addr->sa_family == AF_INET) {
+        auto sa = reinterpret_cast<struct sockaddr_in *>(ifa->ifa_addr);
+        char buf[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, &sa->sin_addr, buf, INET_ADDRSTRLEN)) {
+          return std::string(buf, INET_ADDRSTRLEN);
+        }
+      } else if (ifa->ifa_addr->sa_family == AF_INET6) {
+        auto sa = reinterpret_cast<struct sockaddr_in6 *>(ifa->ifa_addr);
+        if (!IN6_IS_ADDR_LINKLOCAL(&sa->sin6_addr)) {
+          char buf[INET6_ADDRSTRLEN] = {};
+          if (inet_ntop(AF_INET6, &sa->sin6_addr, buf, INET6_ADDRSTRLEN)) {
+            // equivalent to mac's IN6_IS_ADDR_UNIQUE_LOCAL
+            auto s6_addr_head = sa->sin6_addr.s6_addr[0];
+            if (s6_addr_head == 0xfc || s6_addr_head == 0xfd) {
+              addr_candidate = std::string(buf, INET6_ADDRSTRLEN);
+            } else {
+              return std::string(buf, INET6_ADDRSTRLEN);
+            }
+          }
+        }
+      }
+    }
+  }
+  return addr_candidate;
+}
+#endif
+
+inline socket_t create_client_socket(
