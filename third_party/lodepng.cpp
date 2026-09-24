@@ -6038,3 +6038,607 @@ static unsigned addChunk_sBIT(ucvector* out, const LodePNGInfo* info) {
     if(info->sbit_r == 0 || info->sbit_g == 0 || info->sbit_b == 0 || info->sbit_a == 0 ||
        info->sbit_r > bitdepth || info->sbit_g > bitdepth ||
        info->sbit_b > bitdepth || info->sbit_a > bitdepth) {
+      return 115;
+    }
+    CERROR_TRY_RETURN(lodepng_chunk_init(&chunk, out, 4, "sBIT"));
+    chunk[8] = info->sbit_r;
+    chunk[9] = info->sbit_g;
+    chunk[10] = info->sbit_b;
+    chunk[11] = info->sbit_a;
+  }
+  if(chunk) lodepng_chunk_generate_crc(chunk);
+  return 0;
+}
+
+#endif /*LODEPNG_COMPILE_ANCILLARY_CHUNKS*/
+
+static void filterScanline(unsigned char* out, const unsigned char* scanline, const unsigned char* prevline,
+                           size_t length, size_t bytewidth, unsigned char filterType) {
+  size_t i;
+  switch(filterType) {
+    case 0: /*None*/
+      for(i = 0; i != length; ++i) out[i] = scanline[i];
+      break;
+    case 1: /*Sub*/
+      for(i = 0; i != bytewidth; ++i) out[i] = scanline[i];
+      for(i = bytewidth; i < length; ++i) out[i] = scanline[i] - scanline[i - bytewidth];
+      break;
+    case 2: /*Up*/
+      if(prevline) {
+        for(i = 0; i != length; ++i) out[i] = scanline[i] - prevline[i];
+      } else {
+        for(i = 0; i != length; ++i) out[i] = scanline[i];
+      }
+      break;
+    case 3: /*Average*/
+      if(prevline) {
+        for(i = 0; i != bytewidth; ++i) out[i] = scanline[i] - (prevline[i] >> 1);
+        for(i = bytewidth; i < length; ++i) out[i] = scanline[i] - ((scanline[i - bytewidth] + prevline[i]) >> 1);
+      } else {
+        for(i = 0; i != bytewidth; ++i) out[i] = scanline[i];
+        for(i = bytewidth; i < length; ++i) out[i] = scanline[i] - (scanline[i - bytewidth] >> 1);
+      }
+      break;
+    case 4: /*Paeth*/
+      if(prevline) {
+        /*paethPredictor(0, prevline[i], 0) is always prevline[i]*/
+        for(i = 0; i != bytewidth; ++i) out[i] = (scanline[i] - prevline[i]);
+        for(i = bytewidth; i < length; ++i) {
+          out[i] = (scanline[i] - paethPredictor(scanline[i - bytewidth], prevline[i], prevline[i - bytewidth]));
+        }
+      } else {
+        for(i = 0; i != bytewidth; ++i) out[i] = scanline[i];
+        /*paethPredictor(scanline[i - bytewidth], 0, 0) is always scanline[i - bytewidth]*/
+        for(i = bytewidth; i < length; ++i) out[i] = (scanline[i] - scanline[i - bytewidth]);
+      }
+      break;
+    default: return; /*invalid filter type given*/
+  }
+}
+
+/* integer binary logarithm, max return value is 31 */
+static size_t ilog2(size_t i) {
+  size_t result = 0;
+  if(i >= 65536) { result += 16; i >>= 16; }
+  if(i >= 256) { result += 8; i >>= 8; }
+  if(i >= 16) { result += 4; i >>= 4; }
+  if(i >= 4) { result += 2; i >>= 2; }
+  if(i >= 2) { result += 1; /*i >>= 1;*/ }
+  return result;
+}
+
+/* integer approximation for i * log2(i), helper function for LFS_ENTROPY */
+static size_t ilog2i(size_t i) {
+  size_t l;
+  if(i == 0) return 0;
+  l = ilog2(i);
+  /* approximate i*log2(i): l is integer logarithm, ((i - (1u << l)) << 1u)
+  linearly approximates the missing fractional part multiplied by i */
+  return i * l + ((i - (((size_t)1) << l)) << 1u);
+}
+
+static unsigned filter(unsigned char* out, const unsigned char* in, unsigned w, unsigned h,
+                       const LodePNGColorMode* color, const LodePNGEncoderSettings* settings) {
+  /*
+  For PNG filter method 0
+  out must be a buffer with as size: h + (w * h * bpp + 7u) / 8u, because there are
+  the scanlines with 1 extra byte per scanline
+  */
+
+  unsigned bpp = lodepng_get_bpp(color);
+  /*the width of a scanline in bytes, not including the filter type*/
+  size_t linebytes = lodepng_get_raw_size_idat(w, 1, bpp) - 1u;
+
+  /*bytewidth is used for filtering, is 1 when bpp < 8, number of bytes per pixel otherwise*/
+  size_t bytewidth = (bpp + 7u) / 8u;
+  const unsigned char* prevline = 0;
+  unsigned x, y;
+  unsigned error = 0;
+  LodePNGFilterStrategy strategy = settings->filter_strategy;
+
+  if(settings->filter_palette_zero && (color->colortype == LCT_PALETTE || color->bitdepth < 8)) {
+    /*if the filter_palette_zero setting is enabled, override the filter strategy with
+    zero for all scanlines for palette and less-than-8-bitdepth images*/
+    strategy = LFS_ZERO;
+  }
+
+  if(bpp == 0) return 31; /*error: invalid color type*/
+
+  if(strategy >= LFS_ZERO && strategy <= LFS_FOUR) {
+    unsigned char type = (unsigned char)strategy;
+    for(y = 0; y != h; ++y) {
+      size_t outindex = (1 + linebytes) * y; /*the extra filterbyte added to each row*/
+      size_t inindex = linebytes * y;
+      out[outindex] = type; /*filter type byte*/
+      filterScanline(&out[outindex + 1], &in[inindex], prevline, linebytes, bytewidth, type);
+      prevline = &in[inindex];
+    }
+  } else if(strategy == LFS_MINSUM) {
+    /*adaptive filtering: independently for each row, try all five filter types and select the one that produces the
+    smallest sum of absolute values per row.*/
+    unsigned char* attempt[5]; /*five filtering attempts, one for each filter type*/
+    size_t smallest = 0;
+    unsigned char type, bestType = 0;
+
+    for(type = 0; type != 5; ++type) {
+      attempt[type] = (unsigned char*)lodepng_malloc(linebytes);
+      if(!attempt[type]) error = 83; /*alloc fail*/
+    }
+
+    if(!error) {
+      for(y = 0; y != h; ++y) {
+        /*try the 5 filter types*/
+        for(type = 0; type != 5; ++type) {
+          size_t sum = 0;
+          filterScanline(attempt[type], &in[y * linebytes], prevline, linebytes, bytewidth, type);
+
+          /*calculate the sum of the result*/
+          if(type == 0) {
+            for(x = 0; x != linebytes; ++x) sum += (unsigned char)(attempt[type][x]);
+          } else {
+            for(x = 0; x != linebytes; ++x) {
+              /*For differences, each byte should be treated as signed, values above 127 are negative
+              (converted to signed char). Filtertype 0 isn't a difference though, so use unsigned there.
+              This means filtertype 0 is almost never chosen, but that is justified.*/
+              unsigned char s = attempt[type][x];
+              sum += s < 128 ? s : (255U - s);
+            }
+          }
+
+          /*check if this is smallest sum (or if type == 0 it's the first case so always store the values)*/
+          if(type == 0 || sum < smallest) {
+            bestType = type;
+            smallest = sum;
+          }
+        }
+
+        prevline = &in[y * linebytes];
+
+        /*now fill the out values*/
+        out[y * (linebytes + 1)] = bestType; /*the first byte of a scanline will be the filter type*/
+        for(x = 0; x != linebytes; ++x) out[y * (linebytes + 1) + 1 + x] = attempt[bestType][x];
+      }
+    }
+
+    for(type = 0; type != 5; ++type) lodepng_free(attempt[type]);
+  } else if(strategy == LFS_ENTROPY) {
+    unsigned char* attempt[5]; /*five filtering attempts, one for each filter type*/
+    size_t bestSum = 0;
+    unsigned type, bestType = 0;
+    unsigned count[256];
+
+    for(type = 0; type != 5; ++type) {
+      attempt[type] = (unsigned char*)lodepng_malloc(linebytes);
+      if(!attempt[type]) error = 83; /*alloc fail*/
+    }
+
+    if(!error) {
+      for(y = 0; y != h; ++y) {
+        /*try the 5 filter types*/
+        for(type = 0; type != 5; ++type) {
+          size_t sum = 0;
+          filterScanline(attempt[type], &in[y * linebytes], prevline, linebytes, bytewidth, type);
+          lodepng_memset(count, 0, 256 * sizeof(*count));
+          for(x = 0; x != linebytes; ++x) ++count[attempt[type][x]];
+          ++count[type]; /*the filter type itself is part of the scanline*/
+          for(x = 0; x != 256; ++x) {
+            sum += ilog2i(count[x]);
+          }
+          /*check if this is smallest sum (or if type == 0 it's the first case so always store the values)*/
+          if(type == 0 || sum > bestSum) {
+            bestType = type;
+            bestSum = sum;
+          }
+        }
+
+        prevline = &in[y * linebytes];
+
+        /*now fill the out values*/
+        out[y * (linebytes + 1)] = bestType; /*the first byte of a scanline will be the filter type*/
+        for(x = 0; x != linebytes; ++x) out[y * (linebytes + 1) + 1 + x] = attempt[bestType][x];
+      }
+    }
+
+    for(type = 0; type != 5; ++type) lodepng_free(attempt[type]);
+  } else if(strategy == LFS_PREDEFINED) {
+    for(y = 0; y != h; ++y) {
+      size_t outindex = (1 + linebytes) * y; /*the extra filterbyte added to each row*/
+      size_t inindex = linebytes * y;
+      unsigned char type = settings->predefined_filters[y];
+      out[outindex] = type; /*filter type byte*/
+      filterScanline(&out[outindex + 1], &in[inindex], prevline, linebytes, bytewidth, type);
+      prevline = &in[inindex];
+    }
+  } else if(strategy == LFS_BRUTE_FORCE) {
+    /*brute force filter chooser.
+    deflate the scanline after every filter attempt to see which one deflates best.
+    This is very slow and gives only slightly smaller, sometimes even larger, result*/
+    size_t size[5];
+    unsigned char* attempt[5]; /*five filtering attempts, one for each filter type*/
+    size_t smallest = 0;
+    unsigned type = 0, bestType = 0;
+    unsigned char* dummy;
+    LodePNGCompressSettings zlibsettings;
+    lodepng_memcpy(&zlibsettings, &settings->zlibsettings, sizeof(LodePNGCompressSettings));
+    /*use fixed tree on the attempts so that the tree is not adapted to the filtertype on purpose,
+    to simulate the true case where the tree is the same for the whole image. Sometimes it gives
+    better result with dynamic tree anyway. Using the fixed tree sometimes gives worse, but in rare
+    cases better compression. It does make this a bit less slow, so it's worth doing this.*/
+    zlibsettings.btype = 1;
+    /*a custom encoder likely doesn't read the btype setting and is optimized for complete PNG
+    images only, so disable it*/
+    zlibsettings.custom_zlib = 0;
+    zlibsettings.custom_deflate = 0;
+    for(type = 0; type != 5; ++type) {
+      attempt[type] = (unsigned char*)lodepng_malloc(linebytes);
+      if(!attempt[type]) error = 83; /*alloc fail*/
+    }
+    if(!error) {
+      for(y = 0; y != h; ++y) /*try the 5 filter types*/ {
+        for(type = 0; type != 5; ++type) {
+          unsigned testsize = (unsigned)linebytes;
+          /*if(testsize > 8) testsize /= 8;*/ /*it already works good enough by testing a part of the row*/
+
+          filterScanline(attempt[type], &in[y * linebytes], prevline, linebytes, bytewidth, type);
+          size[type] = 0;
+          dummy = 0;
+          zlib_compress(&dummy, &size[type], attempt[type], testsize, &zlibsettings);
+          lodepng_free(dummy);
+          /*check if this is smallest size (or if type == 0 it's the first case so always store the values)*/
+          if(type == 0 || size[type] < smallest) {
+            bestType = type;
+            smallest = size[type];
+          }
+        }
+        prevline = &in[y * linebytes];
+        out[y * (linebytes + 1)] = bestType; /*the first byte of a scanline will be the filter type*/
+        for(x = 0; x != linebytes; ++x) out[y * (linebytes + 1) + 1 + x] = attempt[bestType][x];
+      }
+    }
+    for(type = 0; type != 5; ++type) lodepng_free(attempt[type]);
+  }
+  else return 88; /* unknown filter strategy */
+
+  return error;
+}
+
+static void addPaddingBits(unsigned char* out, const unsigned char* in,
+                           size_t olinebits, size_t ilinebits, unsigned h) {
+  /*The opposite of the removePaddingBits function
+  olinebits must be >= ilinebits*/
+  unsigned y;
+  size_t diff = olinebits - ilinebits;
+  size_t obp = 0, ibp = 0; /*bit pointers*/
+  for(y = 0; y != h; ++y) {
+    size_t x;
+    for(x = 0; x < ilinebits; ++x) {
+      unsigned char bit = readBitFromReversedStream(&ibp, in);
+      setBitOfReversedStream(&obp, out, bit);
+    }
+    /*obp += diff; --> no, fill in some value in the padding bits too, to avoid
+    "Use of uninitialised value of size ###" warning from valgrind*/
+    for(x = 0; x != diff; ++x) setBitOfReversedStream(&obp, out, 0);
+  }
+}
+
+/*
+in: non-interlaced image with size w*h
+out: the same pixels, but re-ordered according to PNG's Adam7 interlacing, with
+ no padding bits between scanlines, but between reduced images so that each
+ reduced image starts at a byte.
+bpp: bits per pixel
+there are no padding bits, not between scanlines, not between reduced images
+in has the following size in bits: w * h * bpp.
+out is possibly bigger due to padding bits between reduced images
+NOTE: comments about padding bits are only relevant if bpp < 8
+*/
+static void Adam7_interlace(unsigned char* out, const unsigned char* in, unsigned w, unsigned h, unsigned bpp) {
+  unsigned passw[7], passh[7];
+  size_t filter_passstart[8], padded_passstart[8], passstart[8];
+  unsigned i;
+
+  Adam7_getpassvalues(passw, passh, filter_passstart, padded_passstart, passstart, w, h, bpp);
+
+  if(bpp >= 8) {
+    for(i = 0; i != 7; ++i) {
+      unsigned x, y, b;
+      size_t bytewidth = bpp / 8u;
+      for(y = 0; y < passh[i]; ++y)
+      for(x = 0; x < passw[i]; ++x) {
+        size_t pixelinstart = ((ADAM7_IY[i] + y * ADAM7_DY[i]) * w + ADAM7_IX[i] + x * ADAM7_DX[i]) * bytewidth;
+        size_t pixeloutstart = passstart[i] + (y * passw[i] + x) * bytewidth;
+        for(b = 0; b < bytewidth; ++b) {
+          out[pixeloutstart + b] = in[pixelinstart + b];
+        }
+      }
+    }
+  } else /*bpp < 8: Adam7 with pixels < 8 bit is a bit trickier: with bit pointers*/ {
+    for(i = 0; i != 7; ++i) {
+      unsigned x, y, b;
+      unsigned ilinebits = bpp * passw[i];
+      unsigned olinebits = bpp * w;
+      size_t obp, ibp; /*bit pointers (for out and in buffer)*/
+      for(y = 0; y < passh[i]; ++y)
+      for(x = 0; x < passw[i]; ++x) {
+        ibp = (ADAM7_IY[i] + y * ADAM7_DY[i]) * olinebits + (ADAM7_IX[i] + x * ADAM7_DX[i]) * bpp;
+        obp = (8 * passstart[i]) + (y * ilinebits + x * bpp);
+        for(b = 0; b < bpp; ++b) {
+          unsigned char bit = readBitFromReversedStream(&ibp, in);
+          setBitOfReversedStream(&obp, out, bit);
+        }
+      }
+    }
+  }
+}
+
+/*out must be buffer big enough to contain uncompressed IDAT chunk data, and in must contain the full image.
+return value is error**/
+static unsigned preProcessScanlines(unsigned char** out, size_t* outsize, const unsigned char* in,
+                                    unsigned w, unsigned h,
+                                    const LodePNGInfo* info_png, const LodePNGEncoderSettings* settings) {
+  /*
+  This function converts the pure 2D image with the PNG's colortype, into filtered-padded-interlaced data. Steps:
+  *) if no Adam7: 1) add padding bits (= possible extra bits per scanline if bpp < 8) 2) filter
+  *) if adam7: 1) Adam7_interlace 2) 7x add padding bits 3) 7x filter
+  */
+  size_t bpp = lodepng_get_bpp(&info_png->color);
+  unsigned error = 0;
+  if(info_png->interlace_method == 0) {
+    /*image size plus an extra byte per scanline + possible padding bits*/
+    *outsize = (size_t)h + ((size_t)h * (((size_t)w * bpp + 7u) / 8u));
+    *out = (unsigned char*)lodepng_malloc(*outsize);
+    if(!(*out) && (*outsize)) error = 83; /*alloc fail*/
+
+    if(!error) {
+      /*non multiple of 8 bits per scanline, padding bits needed per scanline*/
+      if(bpp < 8 && (size_t)w * bpp != (((size_t)w * bpp + 7u) / 8u) * 8u) {
+        unsigned char* padded = (unsigned char*)lodepng_malloc(h * ((w * bpp + 7u) / 8u));
+        if(!padded) error = 83; /*alloc fail*/
+        if(!error) {
+          addPaddingBits(padded, in, (((size_t)w * bpp + 7u) / 8u) * 8u, (size_t)w * bpp, h);
+          error = filter(*out, padded, w, h, &info_png->color, settings);
+        }
+        lodepng_free(padded);
+      } else {
+        /*we can immediately filter into the out buffer, no other steps needed*/
+        error = filter(*out, in, w, h, &info_png->color, settings);
+      }
+    }
+  } else /*interlace_method is 1 (Adam7)*/ {
+    unsigned passw[7], passh[7];
+    size_t filter_passstart[8], padded_passstart[8], passstart[8];
+    unsigned char* adam7;
+
+    Adam7_getpassvalues(passw, passh, filter_passstart, padded_passstart, passstart, w, h, (unsigned)bpp);
+
+    *outsize = filter_passstart[7]; /*image size plus an extra byte per scanline + possible padding bits*/
+    *out = (unsigned char*)lodepng_malloc(*outsize);
+    if(!(*out)) error = 83; /*alloc fail*/
+
+    adam7 = (unsigned char*)lodepng_malloc(passstart[7]);
+    if(!adam7 && passstart[7]) error = 83; /*alloc fail*/
+
+    if(!error) {
+      unsigned i;
+
+      Adam7_interlace(adam7, in, w, h, (unsigned)bpp);
+      for(i = 0; i != 7; ++i) {
+        if(bpp < 8) {
+          unsigned char* padded = (unsigned char*)lodepng_malloc(padded_passstart[i + 1] - padded_passstart[i]);
+          if(!padded) ERROR_BREAK(83); /*alloc fail*/
+          addPaddingBits(padded, &adam7[passstart[i]],
+                         (((size_t)passw[i] * bpp + 7u) / 8u) * 8u, (size_t)passw[i] * bpp, passh[i]);
+          error = filter(&(*out)[filter_passstart[i]], padded,
+                         passw[i], passh[i], &info_png->color, settings);
+          lodepng_free(padded);
+        } else {
+          error = filter(&(*out)[filter_passstart[i]], &adam7[padded_passstart[i]],
+                         passw[i], passh[i], &info_png->color, settings);
+        }
+
+        if(error) break;
+      }
+    }
+
+    lodepng_free(adam7);
+  }
+
+  return error;
+}
+
+#ifdef LODEPNG_COMPILE_ANCILLARY_CHUNKS
+static unsigned addUnknownChunks(ucvector* out, unsigned char* data, size_t datasize) {
+  unsigned char* inchunk = data;
+  while((size_t)(inchunk - data) < datasize) {
+    CERROR_TRY_RETURN(lodepng_chunk_append(&out->data, &out->size, inchunk));
+    out->allocsize = out->size; /*fix the allocsize again*/
+    inchunk = lodepng_chunk_next(inchunk, data + datasize);
+  }
+  return 0;
+}
+
+static unsigned isGrayICCProfile(const unsigned char* profile, unsigned size) {
+  /*
+  It is a gray profile if bytes 16-19 are "GRAY", rgb profile if bytes 16-19
+  are "RGB ". We do not perform any full parsing of the ICC profile here, other
+  than check those 4 bytes to grayscale profile. Other than that, validity of
+  the profile is not checked. This is needed only because the PNG specification
+  requires using a non-gray color model if there is an ICC profile with "RGB "
+  (sadly limiting compression opportunities if the input data is grayscale RGB
+  data), and requires using a gray color model if it is "GRAY".
+  */
+  if(size < 20) return 0;
+  return profile[16] == 'G' &&  profile[17] == 'R' &&  profile[18] == 'A' &&  profile[19] == 'Y';
+}
+
+static unsigned isRGBICCProfile(const unsigned char* profile, unsigned size) {
+  /* See comment in isGrayICCProfile*/
+  if(size < 20) return 0;
+  return profile[16] == 'R' &&  profile[17] == 'G' &&  profile[18] == 'B' &&  profile[19] == ' ';
+}
+#endif /*LODEPNG_COMPILE_ANCILLARY_CHUNKS*/
+
+unsigned lodepng_encode(unsigned char** out, size_t* outsize,
+                        const unsigned char* image, unsigned w, unsigned h,
+                        LodePNGState* state) {
+  unsigned char* data = 0; /*uncompressed version of the IDAT chunk data*/
+  size_t datasize = 0;
+  ucvector outv = ucvector_init(NULL, 0);
+  LodePNGInfo info;
+  const LodePNGInfo* info_png = &state->info_png;
+  LodePNGColorMode auto_color;
+  unsigned error = 0;
+
+  lodepng_info_init(&info);
+  lodepng_color_mode_init(&auto_color);
+
+  /*provide some proper output values if error will happen*/
+  *out = 0;
+  *outsize = 0;
+
+  /*check input values validity*/
+  if((info_png->color.colortype == LCT_PALETTE || state->encoder.force_palette)
+      && (info_png->color.palettesize == 0 || info_png->color.palettesize > 256)) {
+    /*this error is returned even if auto_convert is enabled and thus encoder could
+    generate the palette by itself: while allowing this could be possible in theory,
+    it may complicate the code or edge cases, and always requiring to give a palette
+    when setting this color type is a simpler contract*/
+    error = 68; /*invalid palette size, it is only allowed to be 1-256*/
+    goto cleanup;
+  }
+  if(state->encoder.zlibsettings.btype > 2) {
+    error = 61; /*error: invalid btype*/
+    goto cleanup;
+  }
+  if(info_png->interlace_method > 1) {
+    error = 71; /*error: invalid interlace mode*/
+    goto cleanup;
+  }
+  error = checkColorValidity(info_png->color.colortype, info_png->color.bitdepth);
+  if(error) goto cleanup; /*error: invalid color type given*/
+  error = checkColorValidity(state->info_raw.colortype, state->info_raw.bitdepth);
+  if(error) goto cleanup; /*error: invalid color type given*/
+
+  /* color convert and compute scanline filter types */
+  CERROR_TRY_RETURN(lodepng_info_copy(&info, &state->info_png));
+  if(state->encoder.auto_convert) {
+    LodePNGColorStats stats;
+    unsigned allow_convert = 1;
+    lodepng_color_stats_init(&stats);
+#ifdef LODEPNG_COMPILE_ANCILLARY_CHUNKS
+    if(info_png->iccp_defined &&
+        isGrayICCProfile(info_png->iccp_profile, info_png->iccp_profile_size)) {
+      /*the PNG specification does not allow to use palette with a GRAY ICC profile, even
+      if the palette has only gray colors, so disallow it.*/
+      stats.allow_palette = 0;
+    }
+    if(info_png->iccp_defined &&
+        isRGBICCProfile(info_png->iccp_profile, info_png->iccp_profile_size)) {
+      /*the PNG specification does not allow to use grayscale color with RGB ICC profile, so disallow gray.*/
+      stats.allow_greyscale = 0;
+    }
+#endif /* LODEPNG_COMPILE_ANCILLARY_CHUNKS */
+    error = lodepng_compute_color_stats(&stats, image, w, h, &state->info_raw);
+    if(error) goto cleanup;
+#ifdef LODEPNG_COMPILE_ANCILLARY_CHUNKS
+    if(info_png->background_defined) {
+      /*the background chunk's color must be taken into account as well*/
+      unsigned r = 0, g = 0, b = 0;
+      LodePNGColorMode mode16 = lodepng_color_mode_make(LCT_RGB, 16);
+      lodepng_convert_rgb(&r, &g, &b,
+          info_png->background_r, info_png->background_g, info_png->background_b, &mode16, &info_png->color);
+      error = lodepng_color_stats_add(&stats, r, g, b, 65535);
+      if(error) goto cleanup;
+    }
+#endif /* LODEPNG_COMPILE_ANCILLARY_CHUNKS */
+    error = auto_choose_color(&auto_color, &state->info_raw, &stats);
+    if(error) goto cleanup;
+#ifdef LODEPNG_COMPILE_ANCILLARY_CHUNKS
+    if(info_png->sbit_defined) {
+      /*if sbit is defined, due to strict requirements of which sbit values can be present for which color modes,
+      auto_convert can't be done in many cases. However, do support a few cases here.
+      TODO: more conversions may be possible, and it may also be possible to get a more appropriate color type out of
+            auto_choose_color if knowledge about sbit is used beforehand
+      */
+      unsigned sbit_max = LODEPNG_MAX(LODEPNG_MAX(LODEPNG_MAX(info_png->sbit_r, info_png->sbit_g),
+                           info_png->sbit_b), info_png->sbit_a);
+      unsigned equal = (!info_png->sbit_g || info_png->sbit_g == info_png->sbit_r)
+                    && (!info_png->sbit_b || info_png->sbit_b == info_png->sbit_r)
+                    && (!info_png->sbit_a || info_png->sbit_a == info_png->sbit_r);
+      allow_convert = 0;
+      if(info.color.colortype == LCT_PALETTE &&
+         auto_color.colortype == LCT_PALETTE) {
+        /* input and output are palette, and in this case it may happen that palette data is
+        expected to be copied from info_raw into the info_png */
+        allow_convert = 1;
+      }
+      /*going from 8-bit RGB to palette (or 16-bit as long as sbit_max <= 8) is possible
+      since both are 8-bit RGB for sBIT's purposes*/
+      if(info.color.colortype == LCT_RGB &&
+         auto_color.colortype == LCT_PALETTE && sbit_max <= 8) {
+        allow_convert = 1;
+      }
+      /*going from 8-bit RGBA to palette is also ok but only if sbit_a is exactly 8*/
+      if(info.color.colortype == LCT_RGBA && auto_color.colortype == LCT_PALETTE &&
+         info_png->sbit_a == 8 && sbit_max <= 8) {
+        allow_convert = 1;
+      }
+      /*going from 16-bit RGB(A) to 8-bit RGB(A) is ok if all sbit values are <= 8*/
+      if((info.color.colortype == LCT_RGB || info.color.colortype == LCT_RGBA) && info.color.bitdepth == 16 &&
+         auto_color.colortype == info.color.colortype && auto_color.bitdepth == 8 &&
+         sbit_max <= 8) {
+        allow_convert = 1;
+      }
+      /*going to less channels is ok if all bit values are equal (all possible values in sbit,
+        as well as the chosen bitdepth of the result). Due to how auto_convert works,
+        we already know that auto_color.colortype has less than or equal amount of channels than
+        info.colortype. Palette is not used here. This conversion is not allowed if
+        info_png->sbit_r < auto_color.bitdepth, because specifically for alpha, non-presence of
+        an sbit value heavily implies that alpha's bit depth is equal to the PNG bit depth (rather
+        than the bit depths set in the r, g and b sbit values, by how the PNG specification describes
+        handling tRNS chunk case with sBIT), so be conservative here about ignoring user input.*/
+      if(info.color.colortype != LCT_PALETTE && auto_color.colortype != LCT_PALETTE &&
+         equal && info_png->sbit_r == auto_color.bitdepth) {
+        allow_convert = 1;
+      }
+    }
+#endif
+    if(state->encoder.force_palette) {
+      if(info.color.colortype != LCT_GREY && info.color.colortype != LCT_GREY_ALPHA &&
+         (auto_color.colortype == LCT_GREY || auto_color.colortype == LCT_GREY_ALPHA)) {
+        /*user specifically forced a PLTE palette, so cannot convert to grayscale types because
+        the PNG specification only allows writing a suggested palette in PLTE for truecolor types*/
+        allow_convert = 0;
+      }
+    }
+    if(allow_convert) {
+      lodepng_color_mode_copy(&info.color, &auto_color);
+#ifdef LODEPNG_COMPILE_ANCILLARY_CHUNKS
+      /*also convert the background chunk*/
+      if(info_png->background_defined) {
+        if(lodepng_convert_rgb(&info.background_r, &info.background_g, &info.background_b,
+            info_png->background_r, info_png->background_g, info_png->background_b, &info.color, &info_png->color)) {
+          error = 104;
+          goto cleanup;
+        }
+      }
+#endif /* LODEPNG_COMPILE_ANCILLARY_CHUNKS */
+    }
+  }
+#ifdef LODEPNG_COMPILE_ANCILLARY_CHUNKS
+  if(info_png->iccp_defined) {
+    unsigned gray_icc = isGrayICCProfile(info_png->iccp_profile, info_png->iccp_profile_size);
+    unsigned rgb_icc = isRGBICCProfile(info_png->iccp_profile, info_png->iccp_profile_size);
+    unsigned gray_png = info.color.colortype == LCT_GREY || info.color.colortype == LCT_GREY_ALPHA;
+    if(!gray_icc && !rgb_icc) {
+      error = 100; /* Disallowed profile color type for PNG */
+      goto cleanup;
+    }
+    if(gray_icc != gray_png) {
+      /*Not allowed to use RGB/RGBA/palette with GRAY ICC profile or vice versa,
+      or in case of auto_convert, it wasn't possible to find appropriate model*/
+      error = state->encoder.auto_convert ? 102 : 101;
+      goto cleanup;
+    }
+  }
+#endif /*LODEPNG_COMPILE_ANCILLARY_CHUNKS*/
