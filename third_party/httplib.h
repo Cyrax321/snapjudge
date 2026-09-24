@@ -1798,3 +1798,603 @@ public:
                 Progress progress);
   Result Delete(const std::string &path, const Headers &headers,
                 const char *body, size_t content_length,
+                const std::string &content_type);
+  Result Delete(const std::string &path, const Headers &headers,
+                const char *body, size_t content_length,
+                const std::string &content_type, Progress progress);
+  Result Delete(const std::string &path, const std::string &body,
+                const std::string &content_type);
+  Result Delete(const std::string &path, const std::string &body,
+                const std::string &content_type, Progress progress);
+  Result Delete(const std::string &path, const Headers &headers,
+                const std::string &body, const std::string &content_type);
+  Result Delete(const std::string &path, const Headers &headers,
+                const std::string &body, const std::string &content_type,
+                Progress progress);
+
+  Result Options(const std::string &path);
+  Result Options(const std::string &path, const Headers &headers);
+
+  bool send(Request &req, Response &res, Error &error);
+  Result send(const Request &req);
+
+  void stop();
+
+  std::string host() const;
+  int port() const;
+
+  size_t is_socket_open() const;
+  socket_t socket() const;
+
+  void set_hostname_addr_map(std::map<std::string, std::string> addr_map);
+
+  void set_default_headers(Headers headers);
+
+  void
+  set_header_writer(std::function<ssize_t(Stream &, Headers &)> const &writer);
+
+  void set_address_family(int family);
+  void set_tcp_nodelay(bool on);
+  void set_socket_options(SocketOptions socket_options);
+
+  void set_connection_timeout(time_t sec, time_t usec = 0);
+  template <class Rep, class Period>
+  void
+  set_connection_timeout(const std::chrono::duration<Rep, Period> &duration);
+
+  void set_read_timeout(time_t sec, time_t usec = 0);
+  template <class Rep, class Period>
+  void set_read_timeout(const std::chrono::duration<Rep, Period> &duration);
+
+  void set_write_timeout(time_t sec, time_t usec = 0);
+  template <class Rep, class Period>
+  void set_write_timeout(const std::chrono::duration<Rep, Period> &duration);
+
+  void set_basic_auth(const std::string &username, const std::string &password);
+  void set_bearer_token_auth(const std::string &token);
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+  void set_digest_auth(const std::string &username,
+                       const std::string &password);
+#endif
+
+  void set_keep_alive(bool on);
+  void set_follow_location(bool on);
+
+  void set_url_encode(bool on);
+
+  void set_compress(bool on);
+
+  void set_decompress(bool on);
+
+  void set_interface(const std::string &intf);
+
+  void set_proxy(const std::string &host, int port);
+  void set_proxy_basic_auth(const std::string &username,
+                            const std::string &password);
+  void set_proxy_bearer_token_auth(const std::string &token);
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+  void set_proxy_digest_auth(const std::string &username,
+                             const std::string &password);
+#endif
+
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+  void enable_server_certificate_verification(bool enabled);
+  void enable_server_hostname_verification(bool enabled);
+  void set_server_certificate_verifier(std::function<bool(SSL *ssl)> verifier);
+#endif
+
+  void set_logger(Logger logger);
+
+  // SSL
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+  void set_ca_cert_path(const std::string &ca_cert_file_path,
+                        const std::string &ca_cert_dir_path = std::string());
+
+  void set_ca_cert_store(X509_STORE *ca_cert_store);
+  void load_ca_cert_store(const char *ca_cert, std::size_t size);
+
+  long get_openssl_verify_result() const;
+
+  SSL_CTX *ssl_context() const;
+#endif
+
+private:
+  std::unique_ptr<ClientImpl> cli_;
+
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+  bool is_ssl_ = false;
+#endif
+};
+
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+class SSLServer : public Server {
+public:
+  SSLServer(const char *cert_path, const char *private_key_path,
+            const char *client_ca_cert_file_path = nullptr,
+            const char *client_ca_cert_dir_path = nullptr,
+            const char *private_key_password = nullptr);
+
+  SSLServer(X509 *cert, EVP_PKEY *private_key,
+            X509_STORE *client_ca_cert_store = nullptr);
+
+  SSLServer(
+      const std::function<bool(SSL_CTX &ssl_ctx)> &setup_ssl_ctx_callback);
+
+  ~SSLServer() override;
+
+  bool is_valid() const override;
+
+  SSL_CTX *ssl_context() const;
+
+  void update_certs(X509 *cert, EVP_PKEY *private_key,
+                    X509_STORE *client_ca_cert_store = nullptr);
+
+private:
+  bool process_and_close_socket(socket_t sock) override;
+
+  SSL_CTX *ctx_;
+  std::mutex ctx_mutex_;
+};
+
+class SSLClient final : public ClientImpl {
+public:
+  explicit SSLClient(const std::string &host);
+
+  explicit SSLClient(const std::string &host, int port);
+
+  explicit SSLClient(const std::string &host, int port,
+                     const std::string &client_cert_path,
+                     const std::string &client_key_path,
+                     const std::string &private_key_password = std::string());
+
+  explicit SSLClient(const std::string &host, int port, X509 *client_cert,
+                     EVP_PKEY *client_key,
+                     const std::string &private_key_password = std::string());
+
+  ~SSLClient() override;
+
+  bool is_valid() const override;
+
+  void set_ca_cert_store(X509_STORE *ca_cert_store);
+  void load_ca_cert_store(const char *ca_cert, std::size_t size);
+
+  long get_openssl_verify_result() const;
+
+  SSL_CTX *ssl_context() const;
+
+private:
+  bool create_and_connect_socket(Socket &socket, Error &error) override;
+  void shutdown_ssl(Socket &socket, bool shutdown_gracefully) override;
+  void shutdown_ssl_impl(Socket &socket, bool shutdown_gracefully);
+
+  bool process_socket(const Socket &socket,
+                      std::function<bool(Stream &strm)> callback) override;
+  bool is_ssl() const override;
+
+  bool connect_with_proxy(Socket &sock, Response &res, bool &success,
+                          Error &error);
+  bool initialize_ssl(Socket &socket, Error &error);
+
+  bool load_certs();
+
+  bool verify_host(X509 *server_cert) const;
+  bool verify_host_with_subject_alt_name(X509 *server_cert) const;
+  bool verify_host_with_common_name(X509 *server_cert) const;
+  bool check_host_name(const char *pattern, size_t pattern_len) const;
+
+  SSL_CTX *ctx_;
+  std::mutex ctx_mutex_;
+  std::once_flag initialize_cert_;
+
+  std::vector<std::string> host_components_;
+
+  long verify_result_ = 0;
+
+  friend class ClientImpl;
+};
+#endif
+
+/*
+ * Implementation of template methods.
+ */
+
+namespace detail {
+
+template <typename T, typename U>
+inline void duration_to_sec_and_usec(const T &duration, U callback) {
+  auto sec = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
+  auto usec = std::chrono::duration_cast<std::chrono::microseconds>(
+                  duration - std::chrono::seconds(sec))
+                  .count();
+  callback(static_cast<time_t>(sec), static_cast<time_t>(usec));
+}
+
+inline uint64_t get_header_value_u64(const Headers &headers,
+                                     const std::string &key, uint64_t def,
+                                     size_t id) {
+  auto rng = headers.equal_range(key);
+  auto it = rng.first;
+  std::advance(it, static_cast<ssize_t>(id));
+  if (it != rng.second) {
+    return std::strtoull(it->second.data(), nullptr, 10);
+  }
+  return def;
+}
+
+} // namespace detail
+
+inline uint64_t Request::get_header_value_u64(const std::string &key,
+                                              uint64_t def, size_t id) const {
+  return detail::get_header_value_u64(headers, key, def, id);
+}
+
+inline uint64_t Response::get_header_value_u64(const std::string &key,
+                                               uint64_t def, size_t id) const {
+  return detail::get_header_value_u64(headers, key, def, id);
+}
+
+inline void default_socket_options(socket_t sock) {
+  int opt = 1;
+#ifdef _WIN32
+  setsockopt(sock, SOL_SOCKET, SO_REUSEADDR,
+             reinterpret_cast<const char *>(&opt), sizeof(opt));
+  setsockopt(sock, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+             reinterpret_cast<const char *>(&opt), sizeof(opt));
+#else
+#ifdef SO_REUSEPORT
+  setsockopt(sock, SOL_SOCKET, SO_REUSEPORT,
+             reinterpret_cast<const void *>(&opt), sizeof(opt));
+#else
+  setsockopt(sock, SOL_SOCKET, SO_REUSEADDR,
+             reinterpret_cast<const void *>(&opt), sizeof(opt));
+#endif
+#endif
+}
+
+inline const char *status_message(int status) {
+  switch (status) {
+  case StatusCode::Continue_100: return "Continue";
+  case StatusCode::SwitchingProtocol_101: return "Switching Protocol";
+  case StatusCode::Processing_102: return "Processing";
+  case StatusCode::EarlyHints_103: return "Early Hints";
+  case StatusCode::OK_200: return "OK";
+  case StatusCode::Created_201: return "Created";
+  case StatusCode::Accepted_202: return "Accepted";
+  case StatusCode::NonAuthoritativeInformation_203:
+    return "Non-Authoritative Information";
+  case StatusCode::NoContent_204: return "No Content";
+  case StatusCode::ResetContent_205: return "Reset Content";
+  case StatusCode::PartialContent_206: return "Partial Content";
+  case StatusCode::MultiStatus_207: return "Multi-Status";
+  case StatusCode::AlreadyReported_208: return "Already Reported";
+  case StatusCode::IMUsed_226: return "IM Used";
+  case StatusCode::MultipleChoices_300: return "Multiple Choices";
+  case StatusCode::MovedPermanently_301: return "Moved Permanently";
+  case StatusCode::Found_302: return "Found";
+  case StatusCode::SeeOther_303: return "See Other";
+  case StatusCode::NotModified_304: return "Not Modified";
+  case StatusCode::UseProxy_305: return "Use Proxy";
+  case StatusCode::unused_306: return "unused";
+  case StatusCode::TemporaryRedirect_307: return "Temporary Redirect";
+  case StatusCode::PermanentRedirect_308: return "Permanent Redirect";
+  case StatusCode::BadRequest_400: return "Bad Request";
+  case StatusCode::Unauthorized_401: return "Unauthorized";
+  case StatusCode::PaymentRequired_402: return "Payment Required";
+  case StatusCode::Forbidden_403: return "Forbidden";
+  case StatusCode::NotFound_404: return "Not Found";
+  case StatusCode::MethodNotAllowed_405: return "Method Not Allowed";
+  case StatusCode::NotAcceptable_406: return "Not Acceptable";
+  case StatusCode::ProxyAuthenticationRequired_407:
+    return "Proxy Authentication Required";
+  case StatusCode::RequestTimeout_408: return "Request Timeout";
+  case StatusCode::Conflict_409: return "Conflict";
+  case StatusCode::Gone_410: return "Gone";
+  case StatusCode::LengthRequired_411: return "Length Required";
+  case StatusCode::PreconditionFailed_412: return "Precondition Failed";
+  case StatusCode::PayloadTooLarge_413: return "Payload Too Large";
+  case StatusCode::UriTooLong_414: return "URI Too Long";
+  case StatusCode::UnsupportedMediaType_415: return "Unsupported Media Type";
+  case StatusCode::RangeNotSatisfiable_416: return "Range Not Satisfiable";
+  case StatusCode::ExpectationFailed_417: return "Expectation Failed";
+  case StatusCode::ImATeapot_418: return "I'm a teapot";
+  case StatusCode::MisdirectedRequest_421: return "Misdirected Request";
+  case StatusCode::UnprocessableContent_422: return "Unprocessable Content";
+  case StatusCode::Locked_423: return "Locked";
+  case StatusCode::FailedDependency_424: return "Failed Dependency";
+  case StatusCode::TooEarly_425: return "Too Early";
+  case StatusCode::UpgradeRequired_426: return "Upgrade Required";
+  case StatusCode::PreconditionRequired_428: return "Precondition Required";
+  case StatusCode::TooManyRequests_429: return "Too Many Requests";
+  case StatusCode::RequestHeaderFieldsTooLarge_431:
+    return "Request Header Fields Too Large";
+  case StatusCode::UnavailableForLegalReasons_451:
+    return "Unavailable For Legal Reasons";
+  case StatusCode::NotImplemented_501: return "Not Implemented";
+  case StatusCode::BadGateway_502: return "Bad Gateway";
+  case StatusCode::ServiceUnavailable_503: return "Service Unavailable";
+  case StatusCode::GatewayTimeout_504: return "Gateway Timeout";
+  case StatusCode::HttpVersionNotSupported_505:
+    return "HTTP Version Not Supported";
+  case StatusCode::VariantAlsoNegotiates_506: return "Variant Also Negotiates";
+  case StatusCode::InsufficientStorage_507: return "Insufficient Storage";
+  case StatusCode::LoopDetected_508: return "Loop Detected";
+  case StatusCode::NotExtended_510: return "Not Extended";
+  case StatusCode::NetworkAuthenticationRequired_511:
+    return "Network Authentication Required";
+
+  default:
+  case StatusCode::InternalServerError_500: return "Internal Server Error";
+  }
+}
+
+inline std::string get_bearer_token_auth(const Request &req) {
+  if (req.has_header("Authorization")) {
+    static std::string BearerHeaderPrefix = "Bearer ";
+    return req.get_header_value("Authorization")
+        .substr(BearerHeaderPrefix.length());
+  }
+  return "";
+}
+
+template <class Rep, class Period>
+inline Server &
+Server::set_read_timeout(const std::chrono::duration<Rep, Period> &duration) {
+  detail::duration_to_sec_and_usec(
+      duration, [&](time_t sec, time_t usec) { set_read_timeout(sec, usec); });
+  return *this;
+}
+
+template <class Rep, class Period>
+inline Server &
+Server::set_write_timeout(const std::chrono::duration<Rep, Period> &duration) {
+  detail::duration_to_sec_and_usec(
+      duration, [&](time_t sec, time_t usec) { set_write_timeout(sec, usec); });
+  return *this;
+}
+
+template <class Rep, class Period>
+inline Server &
+Server::set_idle_interval(const std::chrono::duration<Rep, Period> &duration) {
+  detail::duration_to_sec_and_usec(
+      duration, [&](time_t sec, time_t usec) { set_idle_interval(sec, usec); });
+  return *this;
+}
+
+inline std::string to_string(const Error error) {
+  switch (error) {
+  case Error::Success: return "Success (no error)";
+  case Error::Connection: return "Could not establish connection";
+  case Error::BindIPAddress: return "Failed to bind IP address";
+  case Error::Read: return "Failed to read connection";
+  case Error::Write: return "Failed to write connection";
+  case Error::ExceedRedirectCount: return "Maximum redirect count exceeded";
+  case Error::Canceled: return "Connection handling canceled";
+  case Error::SSLConnection: return "SSL connection failed";
+  case Error::SSLLoadingCerts: return "SSL certificate loading failed";
+  case Error::SSLServerVerification: return "SSL server verification failed";
+  case Error::SSLServerHostnameVerification:
+    return "SSL server hostname verification failed";
+  case Error::UnsupportedMultipartBoundaryChars:
+    return "Unsupported HTTP multipart boundary characters";
+  case Error::Compression: return "Compression failed";
+  case Error::ConnectionTimeout: return "Connection timed out";
+  case Error::ProxyConnection: return "Proxy connection failed";
+  case Error::Unknown: return "Unknown";
+  default: break;
+  }
+
+  return "Invalid";
+}
+
+inline std::ostream &operator<<(std::ostream &os, const Error &obj) {
+  os << to_string(obj);
+  os << " (" << static_cast<std::underlying_type<Error>::type>(obj) << ')';
+  return os;
+}
+
+inline uint64_t Result::get_request_header_value_u64(const std::string &key,
+                                                     uint64_t def,
+                                                     size_t id) const {
+  return detail::get_header_value_u64(request_headers_, key, def, id);
+}
+
+template <class Rep, class Period>
+inline void ClientImpl::set_connection_timeout(
+    const std::chrono::duration<Rep, Period> &duration) {
+  detail::duration_to_sec_and_usec(duration, [&](time_t sec, time_t usec) {
+    set_connection_timeout(sec, usec);
+  });
+}
+
+template <class Rep, class Period>
+inline void ClientImpl::set_read_timeout(
+    const std::chrono::duration<Rep, Period> &duration) {
+  detail::duration_to_sec_and_usec(
+      duration, [&](time_t sec, time_t usec) { set_read_timeout(sec, usec); });
+}
+
+template <class Rep, class Period>
+inline void ClientImpl::set_write_timeout(
+    const std::chrono::duration<Rep, Period> &duration) {
+  detail::duration_to_sec_and_usec(
+      duration, [&](time_t sec, time_t usec) { set_write_timeout(sec, usec); });
+}
+
+template <class Rep, class Period>
+inline void Client::set_connection_timeout(
+    const std::chrono::duration<Rep, Period> &duration) {
+  cli_->set_connection_timeout(duration);
+}
+
+template <class Rep, class Period>
+inline void
+Client::set_read_timeout(const std::chrono::duration<Rep, Period> &duration) {
+  cli_->set_read_timeout(duration);
+}
+
+template <class Rep, class Period>
+inline void
+Client::set_write_timeout(const std::chrono::duration<Rep, Period> &duration) {
+  cli_->set_write_timeout(duration);
+}
+
+/*
+ * Forward declarations and types that will be part of the .h file if split into
+ * .h + .cc.
+ */
+
+std::string hosted_at(const std::string &hostname);
+
+void hosted_at(const std::string &hostname, std::vector<std::string> &addrs);
+
+std::string append_query_params(const std::string &path, const Params &params);
+
+std::pair<std::string, std::string> make_range_header(const Ranges &ranges);
+
+std::pair<std::string, std::string>
+make_basic_authentication_header(const std::string &username,
+                                 const std::string &password,
+                                 bool is_proxy = false);
+
+namespace detail {
+
+struct FileStat {
+  FileStat(const std::string &path);
+  bool is_file() const;
+  bool is_dir() const;
+
+private:
+  struct stat st_;
+  int ret_ = -1;
+};
+
+std::string encode_query_param(const std::string &value);
+
+std::string decode_url(const std::string &s, bool convert_plus_to_space);
+
+void read_file(const std::string &path, std::string &out);
+
+std::string trim_copy(const std::string &s);
+
+void divide(
+    const char *data, std::size_t size, char d,
+    std::function<void(const char *, std::size_t, const char *, std::size_t)>
+        fn);
+
+void divide(
+    const std::string &str, char d,
+    std::function<void(const char *, std::size_t, const char *, std::size_t)>
+        fn);
+
+void split(const char *b, const char *e, char d,
+           std::function<void(const char *, const char *)> fn);
+
+void split(const char *b, const char *e, char d, size_t m,
+           std::function<void(const char *, const char *)> fn);
+
+bool process_client_socket(socket_t sock, time_t read_timeout_sec,
+                           time_t read_timeout_usec, time_t write_timeout_sec,
+                           time_t write_timeout_usec,
+                           std::function<bool(Stream &)> callback);
+
+socket_t create_client_socket(const std::string &host, const std::string &ip,
+                              int port, int address_family, bool tcp_nodelay,
+                              bool ipv6_v6only, SocketOptions socket_options,
+                              time_t connection_timeout_sec,
+                              time_t connection_timeout_usec,
+                              time_t read_timeout_sec, time_t read_timeout_usec,
+                              time_t write_timeout_sec,
+                              time_t write_timeout_usec,
+                              const std::string &intf, Error &error);
+
+const char *get_header_value(const Headers &headers, const std::string &key,
+                             const char *def, size_t id);
+
+std::string params_to_query_str(const Params &params);
+
+void parse_query_text(const char *data, std::size_t size, Params &params);
+
+void parse_query_text(const std::string &s, Params &params);
+
+bool parse_multipart_boundary(const std::string &content_type,
+                              std::string &boundary);
+
+bool parse_range_header(const std::string &s, Ranges &ranges);
+
+int close_socket(socket_t sock);
+
+ssize_t send_socket(socket_t sock, const void *ptr, size_t size, int flags);
+
+ssize_t read_socket(socket_t sock, void *ptr, size_t size, int flags);
+
+enum class EncodingType { None = 0, Gzip, Brotli };
+
+EncodingType encoding_type(const Request &req, const Response &res);
+
+class BufferStream final : public Stream {
+public:
+  BufferStream() = default;
+  ~BufferStream() override = default;
+
+  bool is_readable() const override;
+  bool is_writable() const override;
+  ssize_t read(char *ptr, size_t size) override;
+  ssize_t write(const char *ptr, size_t size) override;
+  void get_remote_ip_and_port(std::string &ip, int &port) const override;
+  void get_local_ip_and_port(std::string &ip, int &port) const override;
+  socket_t socket() const override;
+
+  const std::string &get_buffer() const;
+
+private:
+  std::string buffer;
+  size_t position = 0;
+};
+
+class compressor {
+public:
+  virtual ~compressor() = default;
+
+  typedef std::function<bool(const char *data, size_t data_len)> Callback;
+  virtual bool compress(const char *data, size_t data_length, bool last,
+                        Callback callback) = 0;
+};
+
+class decompressor {
+public:
+  virtual ~decompressor() = default;
+
+  virtual bool is_valid() const = 0;
+
+  typedef std::function<bool(const char *data, size_t data_len)> Callback;
+  virtual bool decompress(const char *data, size_t data_length,
+                          Callback callback) = 0;
+};
+
+class nocompressor final : public compressor {
+public:
+  ~nocompressor() override = default;
+
+  bool compress(const char *data, size_t data_length, bool /*last*/,
+                Callback callback) override;
+};
+
+#ifdef CPPHTTPLIB_ZLIB_SUPPORT
+class gzip_compressor final : public compressor {
+public:
+  gzip_compressor();
+  ~gzip_compressor() override;
+
+  bool compress(const char *data, size_t data_length, bool last,
+                Callback callback) override;
+
+private:
+  bool is_valid_ = false;
+  z_stream strm_;
+};
+
+class gzip_decompressor final : public decompressor {
+public:
+  gzip_decompressor();
+  ~gzip_decompressor() override;
+
