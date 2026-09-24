@@ -22418,3 +22418,593 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         return *this;
     }
 
+    /// @brief add an object to an array
+    /// @sa https://json.nlohmann.me/api/basic_json/push_back/
+    void push_back(const basic_json& val)
+    {
+        // push_back only works for null objects or arrays
+        if (JSON_HEDLEY_UNLIKELY(!(is_null() || is_array())))
+        {
+            JSON_THROW(type_error::create(308, detail::concat("cannot use push_back() with ", type_name()), this));
+        }
+
+        // transform null object into an array
+        if (is_null())
+        {
+            m_data.m_type = value_t::array;
+            m_data.m_value = value_t::array;
+            assert_invariant();
+        }
+
+        // add element to array
+        const auto old_capacity = m_data.m_value.array->capacity();
+        m_data.m_value.array->push_back(val);
+        set_parent(m_data.m_value.array->back(), old_capacity);
+    }
+
+    /// @brief add an object to an array
+    /// @sa https://json.nlohmann.me/api/basic_json/operator+=/
+    reference operator+=(const basic_json& val)
+    {
+        push_back(val);
+        return *this;
+    }
+
+    /// @brief add an object to an object
+    /// @sa https://json.nlohmann.me/api/basic_json/push_back/
+    void push_back(const typename object_t::value_type& val)
+    {
+        // push_back only works for null objects or objects
+        if (JSON_HEDLEY_UNLIKELY(!(is_null() || is_object())))
+        {
+            JSON_THROW(type_error::create(308, detail::concat("cannot use push_back() with ", type_name()), this));
+        }
+
+        // transform null object into an object
+        if (is_null())
+        {
+            m_data.m_type = value_t::object;
+            m_data.m_value = value_t::object;
+            assert_invariant();
+        }
+
+        // add element to object
+        auto res = m_data.m_value.object->insert(val);
+        set_parent(res.first->second);
+    }
+
+    /// @brief add an object to an object
+    /// @sa https://json.nlohmann.me/api/basic_json/operator+=/
+    reference operator+=(const typename object_t::value_type& val)
+    {
+        push_back(val);
+        return *this;
+    }
+
+    /// @brief add an object to an object
+    /// @sa https://json.nlohmann.me/api/basic_json/push_back/
+    void push_back(initializer_list_t init)
+    {
+        if (is_object() && init.size() == 2 && (*init.begin())->is_string())
+        {
+            basic_json&& key = init.begin()->moved_or_copied();
+            push_back(typename object_t::value_type(
+                          std::move(key.get_ref<string_t&>()), (init.begin() + 1)->moved_or_copied()));
+        }
+        else
+        {
+            push_back(basic_json(init));
+        }
+    }
+
+    /// @brief add an object to an object
+    /// @sa https://json.nlohmann.me/api/basic_json/operator+=/
+    reference operator+=(initializer_list_t init)
+    {
+        push_back(init);
+        return *this;
+    }
+
+    /// @brief add an object to an array
+    /// @sa https://json.nlohmann.me/api/basic_json/emplace_back/
+    template<class... Args>
+    reference emplace_back(Args&& ... args)
+    {
+        // emplace_back only works for null objects or arrays
+        if (JSON_HEDLEY_UNLIKELY(!(is_null() || is_array())))
+        {
+            JSON_THROW(type_error::create(311, detail::concat("cannot use emplace_back() with ", type_name()), this));
+        }
+
+        // transform null object into an array
+        if (is_null())
+        {
+            m_data.m_type = value_t::array;
+            m_data.m_value = value_t::array;
+            assert_invariant();
+        }
+
+        // add element to array (perfect forwarding)
+        const auto old_capacity = m_data.m_value.array->capacity();
+        m_data.m_value.array->emplace_back(std::forward<Args>(args)...);
+        return set_parent(m_data.m_value.array->back(), old_capacity);
+    }
+
+    /// @brief add an object to an object if key does not exist
+    /// @sa https://json.nlohmann.me/api/basic_json/emplace/
+    template<class... Args>
+    std::pair<iterator, bool> emplace(Args&& ... args)
+    {
+        // emplace only works for null objects or arrays
+        if (JSON_HEDLEY_UNLIKELY(!(is_null() || is_object())))
+        {
+            JSON_THROW(type_error::create(311, detail::concat("cannot use emplace() with ", type_name()), this));
+        }
+
+        // transform null object into an object
+        if (is_null())
+        {
+            m_data.m_type = value_t::object;
+            m_data.m_value = value_t::object;
+            assert_invariant();
+        }
+
+        // add element to array (perfect forwarding)
+        auto res = m_data.m_value.object->emplace(std::forward<Args>(args)...);
+        set_parent(res.first->second);
+
+        // create result iterator and set iterator to the result of emplace
+        auto it = begin();
+        it.m_it.object_iterator = res.first;
+
+        // return pair of iterator and boolean
+        return {it, res.second};
+    }
+
+    /// Helper for insertion of an iterator
+    /// @note: This uses std::distance to support GCC 4.8,
+    ///        see https://github.com/nlohmann/json/pull/1257
+    template<typename... Args>
+    iterator insert_iterator(const_iterator pos, Args&& ... args)
+    {
+        iterator result(this);
+        JSON_ASSERT(m_data.m_value.array != nullptr);
+
+        auto insert_pos = std::distance(m_data.m_value.array->begin(), pos.m_it.array_iterator);
+        m_data.m_value.array->insert(pos.m_it.array_iterator, std::forward<Args>(args)...);
+        result.m_it.array_iterator = m_data.m_value.array->begin() + insert_pos;
+
+        // This could have been written as:
+        // result.m_it.array_iterator = m_data.m_value.array->insert(pos.m_it.array_iterator, cnt, val);
+        // but the return value of insert is missing in GCC 4.8, so it is written this way instead.
+
+        set_parents();
+        return result;
+    }
+
+    /// @brief inserts element into array
+    /// @sa https://json.nlohmann.me/api/basic_json/insert/
+    iterator insert(const_iterator pos, const basic_json& val)
+    {
+        // insert only works for arrays
+        if (JSON_HEDLEY_LIKELY(is_array()))
+        {
+            // check if iterator pos fits to this JSON value
+            if (JSON_HEDLEY_UNLIKELY(pos.m_object != this))
+            {
+                JSON_THROW(invalid_iterator::create(202, "iterator does not fit current value", this));
+            }
+
+            // insert to array and return iterator
+            return insert_iterator(pos, val);
+        }
+
+        JSON_THROW(type_error::create(309, detail::concat("cannot use insert() with ", type_name()), this));
+    }
+
+    /// @brief inserts element into array
+    /// @sa https://json.nlohmann.me/api/basic_json/insert/
+    iterator insert(const_iterator pos, basic_json&& val)
+    {
+        return insert(pos, val);
+    }
+
+    /// @brief inserts copies of element into array
+    /// @sa https://json.nlohmann.me/api/basic_json/insert/
+    iterator insert(const_iterator pos, size_type cnt, const basic_json& val)
+    {
+        // insert only works for arrays
+        if (JSON_HEDLEY_LIKELY(is_array()))
+        {
+            // check if iterator pos fits to this JSON value
+            if (JSON_HEDLEY_UNLIKELY(pos.m_object != this))
+            {
+                JSON_THROW(invalid_iterator::create(202, "iterator does not fit current value", this));
+            }
+
+            // insert to array and return iterator
+            return insert_iterator(pos, cnt, val);
+        }
+
+        JSON_THROW(type_error::create(309, detail::concat("cannot use insert() with ", type_name()), this));
+    }
+
+    /// @brief inserts range of elements into array
+    /// @sa https://json.nlohmann.me/api/basic_json/insert/
+    iterator insert(const_iterator pos, const_iterator first, const_iterator last)
+    {
+        // insert only works for arrays
+        if (JSON_HEDLEY_UNLIKELY(!is_array()))
+        {
+            JSON_THROW(type_error::create(309, detail::concat("cannot use insert() with ", type_name()), this));
+        }
+
+        // check if iterator pos fits to this JSON value
+        if (JSON_HEDLEY_UNLIKELY(pos.m_object != this))
+        {
+            JSON_THROW(invalid_iterator::create(202, "iterator does not fit current value", this));
+        }
+
+        // check if range iterators belong to the same JSON object
+        if (JSON_HEDLEY_UNLIKELY(first.m_object != last.m_object))
+        {
+            JSON_THROW(invalid_iterator::create(210, "iterators do not fit", this));
+        }
+
+        if (JSON_HEDLEY_UNLIKELY(first.m_object == this))
+        {
+            JSON_THROW(invalid_iterator::create(211, "passed iterators may not belong to container", this));
+        }
+
+        // insert to array and return iterator
+        return insert_iterator(pos, first.m_it.array_iterator, last.m_it.array_iterator);
+    }
+
+    /// @brief inserts elements from initializer list into array
+    /// @sa https://json.nlohmann.me/api/basic_json/insert/
+    iterator insert(const_iterator pos, initializer_list_t ilist)
+    {
+        // insert only works for arrays
+        if (JSON_HEDLEY_UNLIKELY(!is_array()))
+        {
+            JSON_THROW(type_error::create(309, detail::concat("cannot use insert() with ", type_name()), this));
+        }
+
+        // check if iterator pos fits to this JSON value
+        if (JSON_HEDLEY_UNLIKELY(pos.m_object != this))
+        {
+            JSON_THROW(invalid_iterator::create(202, "iterator does not fit current value", this));
+        }
+
+        // insert to array and return iterator
+        return insert_iterator(pos, ilist.begin(), ilist.end());
+    }
+
+    /// @brief inserts range of elements into object
+    /// @sa https://json.nlohmann.me/api/basic_json/insert/
+    void insert(const_iterator first, const_iterator last)
+    {
+        // insert only works for objects
+        if (JSON_HEDLEY_UNLIKELY(!is_object()))
+        {
+            JSON_THROW(type_error::create(309, detail::concat("cannot use insert() with ", type_name()), this));
+        }
+
+        // check if range iterators belong to the same JSON object
+        if (JSON_HEDLEY_UNLIKELY(first.m_object != last.m_object))
+        {
+            JSON_THROW(invalid_iterator::create(210, "iterators do not fit", this));
+        }
+
+        // passed iterators must belong to objects
+        if (JSON_HEDLEY_UNLIKELY(!first.m_object->is_object()))
+        {
+            JSON_THROW(invalid_iterator::create(202, "iterators first and last must point to objects", this));
+        }
+
+        m_data.m_value.object->insert(first.m_it.object_iterator, last.m_it.object_iterator);
+    }
+
+    /// @brief updates a JSON object from another object, overwriting existing keys
+    /// @sa https://json.nlohmann.me/api/basic_json/update/
+    void update(const_reference j, bool merge_objects = false)
+    {
+        update(j.begin(), j.end(), merge_objects);
+    }
+
+    /// @brief updates a JSON object from another object, overwriting existing keys
+    /// @sa https://json.nlohmann.me/api/basic_json/update/
+    void update(const_iterator first, const_iterator last, bool merge_objects = false)
+    {
+        // implicitly convert null value to an empty object
+        if (is_null())
+        {
+            m_data.m_type = value_t::object;
+            m_data.m_value.object = create<object_t>();
+            assert_invariant();
+        }
+
+        if (JSON_HEDLEY_UNLIKELY(!is_object()))
+        {
+            JSON_THROW(type_error::create(312, detail::concat("cannot use update() with ", type_name()), this));
+        }
+
+        // check if range iterators belong to the same JSON object
+        if (JSON_HEDLEY_UNLIKELY(first.m_object != last.m_object))
+        {
+            JSON_THROW(invalid_iterator::create(210, "iterators do not fit", this));
+        }
+
+        // passed iterators must belong to objects
+        if (JSON_HEDLEY_UNLIKELY(!first.m_object->is_object()))
+        {
+            JSON_THROW(type_error::create(312, detail::concat("cannot use update() with ", first.m_object->type_name()), first.m_object));
+        }
+
+        for (auto it = first; it != last; ++it)
+        {
+            if (merge_objects && it.value().is_object())
+            {
+                auto it2 = m_data.m_value.object->find(it.key());
+                if (it2 != m_data.m_value.object->end())
+                {
+                    it2->second.update(it.value(), true);
+                    continue;
+                }
+            }
+            m_data.m_value.object->operator[](it.key()) = it.value();
+#if JSON_DIAGNOSTICS
+            m_data.m_value.object->operator[](it.key()).m_parent = this;
+#endif
+        }
+    }
+
+    /// @brief exchanges the values
+    /// @sa https://json.nlohmann.me/api/basic_json/swap/
+    void swap(reference other) noexcept (
+        std::is_nothrow_move_constructible<value_t>::value&&
+        std::is_nothrow_move_assignable<value_t>::value&&
+        std::is_nothrow_move_constructible<json_value>::value&& // NOLINT(cppcoreguidelines-noexcept-swap,performance-noexcept-swap)
+        std::is_nothrow_move_assignable<json_value>::value
+    )
+    {
+        std::swap(m_data.m_type, other.m_data.m_type);
+        std::swap(m_data.m_value, other.m_data.m_value);
+
+        set_parents();
+        other.set_parents();
+        assert_invariant();
+    }
+
+    /// @brief exchanges the values
+    /// @sa https://json.nlohmann.me/api/basic_json/swap/
+    friend void swap(reference left, reference right) noexcept (
+        std::is_nothrow_move_constructible<value_t>::value&&
+        std::is_nothrow_move_assignable<value_t>::value&&
+        std::is_nothrow_move_constructible<json_value>::value&& // NOLINT(cppcoreguidelines-noexcept-swap,performance-noexcept-swap)
+        std::is_nothrow_move_assignable<json_value>::value
+    )
+    {
+        left.swap(right);
+    }
+
+    /// @brief exchanges the values
+    /// @sa https://json.nlohmann.me/api/basic_json/swap/
+    void swap(array_t& other) // NOLINT(bugprone-exception-escape,cppcoreguidelines-noexcept-swap,performance-noexcept-swap)
+    {
+        // swap only works for arrays
+        if (JSON_HEDLEY_LIKELY(is_array()))
+        {
+            using std::swap;
+            swap(*(m_data.m_value.array), other);
+        }
+        else
+        {
+            JSON_THROW(type_error::create(310, detail::concat("cannot use swap(array_t&) with ", type_name()), this));
+        }
+    }
+
+    /// @brief exchanges the values
+    /// @sa https://json.nlohmann.me/api/basic_json/swap/
+    void swap(object_t& other) // NOLINT(bugprone-exception-escape,cppcoreguidelines-noexcept-swap,performance-noexcept-swap)
+    {
+        // swap only works for objects
+        if (JSON_HEDLEY_LIKELY(is_object()))
+        {
+            using std::swap;
+            swap(*(m_data.m_value.object), other);
+        }
+        else
+        {
+            JSON_THROW(type_error::create(310, detail::concat("cannot use swap(object_t&) with ", type_name()), this));
+        }
+    }
+
+    /// @brief exchanges the values
+    /// @sa https://json.nlohmann.me/api/basic_json/swap/
+    void swap(string_t& other) // NOLINT(bugprone-exception-escape,cppcoreguidelines-noexcept-swap,performance-noexcept-swap)
+    {
+        // swap only works for strings
+        if (JSON_HEDLEY_LIKELY(is_string()))
+        {
+            using std::swap;
+            swap(*(m_data.m_value.string), other);
+        }
+        else
+        {
+            JSON_THROW(type_error::create(310, detail::concat("cannot use swap(string_t&) with ", type_name()), this));
+        }
+    }
+
+    /// @brief exchanges the values
+    /// @sa https://json.nlohmann.me/api/basic_json/swap/
+    void swap(binary_t& other) // NOLINT(bugprone-exception-escape,cppcoreguidelines-noexcept-swap,performance-noexcept-swap)
+    {
+        // swap only works for strings
+        if (JSON_HEDLEY_LIKELY(is_binary()))
+        {
+            using std::swap;
+            swap(*(m_data.m_value.binary), other);
+        }
+        else
+        {
+            JSON_THROW(type_error::create(310, detail::concat("cannot use swap(binary_t&) with ", type_name()), this));
+        }
+    }
+
+    /// @brief exchanges the values
+    /// @sa https://json.nlohmann.me/api/basic_json/swap/
+    void swap(typename binary_t::container_type& other) // NOLINT(bugprone-exception-escape)
+    {
+        // swap only works for strings
+        if (JSON_HEDLEY_LIKELY(is_binary()))
+        {
+            using std::swap;
+            swap(*(m_data.m_value.binary), other);
+        }
+        else
+        {
+            JSON_THROW(type_error::create(310, detail::concat("cannot use swap(binary_t::container_type&) with ", type_name()), this));
+        }
+    }
+
+    /// @}
+
+    //////////////////////////////////////////
+    // lexicographical comparison operators //
+    //////////////////////////////////////////
+
+    /// @name lexicographical comparison operators
+    /// @{
+
+    // note parentheses around operands are necessary; see
+    // https://github.com/nlohmann/json/issues/1530
+#define JSON_IMPLEMENT_OPERATOR(op, null_result, unordered_result, default_result)                       \
+    const auto lhs_type = lhs.type();                                                                    \
+    const auto rhs_type = rhs.type();                                                                    \
+    \
+    if (lhs_type == rhs_type) /* NOLINT(readability/braces) */                                           \
+    {                                                                                                    \
+        switch (lhs_type)                                                                                \
+        {                                                                                                \
+            case value_t::array:                                                                         \
+                return (*lhs.m_data.m_value.array) op (*rhs.m_data.m_value.array);                                     \
+                \
+            case value_t::object:                                                                        \
+                return (*lhs.m_data.m_value.object) op (*rhs.m_data.m_value.object);                                   \
+                \
+            case value_t::null:                                                                          \
+                return (null_result);                                                                    \
+                \
+            case value_t::string:                                                                        \
+                return (*lhs.m_data.m_value.string) op (*rhs.m_data.m_value.string);                                   \
+                \
+            case value_t::boolean:                                                                       \
+                return (lhs.m_data.m_value.boolean) op (rhs.m_data.m_value.boolean);                                   \
+                \
+            case value_t::number_integer:                                                                \
+                return (lhs.m_data.m_value.number_integer) op (rhs.m_data.m_value.number_integer);                     \
+                \
+            case value_t::number_unsigned:                                                               \
+                return (lhs.m_data.m_value.number_unsigned) op (rhs.m_data.m_value.number_unsigned);                   \
+                \
+            case value_t::number_float:                                                                  \
+                return (lhs.m_data.m_value.number_float) op (rhs.m_data.m_value.number_float);                         \
+                \
+            case value_t::binary:                                                                        \
+                return (*lhs.m_data.m_value.binary) op (*rhs.m_data.m_value.binary);                                   \
+                \
+            case value_t::discarded:                                                                     \
+            default:                                                                                     \
+                return (unordered_result);                                                               \
+        }                                                                                                \
+    }                                                                                                    \
+    else if (lhs_type == value_t::number_integer && rhs_type == value_t::number_float)                   \
+    {                                                                                                    \
+        return static_cast<number_float_t>(lhs.m_data.m_value.number_integer) op rhs.m_data.m_value.number_float;      \
+    }                                                                                                    \
+    else if (lhs_type == value_t::number_float && rhs_type == value_t::number_integer)                   \
+    {                                                                                                    \
+        return lhs.m_data.m_value.number_float op static_cast<number_float_t>(rhs.m_data.m_value.number_integer);      \
+    }                                                                                                    \
+    else if (lhs_type == value_t::number_unsigned && rhs_type == value_t::number_float)                  \
+    {                                                                                                    \
+        return static_cast<number_float_t>(lhs.m_data.m_value.number_unsigned) op rhs.m_data.m_value.number_float;     \
+    }                                                                                                    \
+    else if (lhs_type == value_t::number_float && rhs_type == value_t::number_unsigned)                  \
+    {                                                                                                    \
+        return lhs.m_data.m_value.number_float op static_cast<number_float_t>(rhs.m_data.m_value.number_unsigned);     \
+    }                                                                                                    \
+    else if (lhs_type == value_t::number_unsigned && rhs_type == value_t::number_integer)                \
+    {                                                                                                    \
+        return static_cast<number_integer_t>(lhs.m_data.m_value.number_unsigned) op rhs.m_data.m_value.number_integer; \
+    }                                                                                                    \
+    else if (lhs_type == value_t::number_integer && rhs_type == value_t::number_unsigned)                \
+    {                                                                                                    \
+        return lhs.m_data.m_value.number_integer op static_cast<number_integer_t>(rhs.m_data.m_value.number_unsigned); \
+    }                                                                                                    \
+    else if(compares_unordered(lhs, rhs))\
+    {\
+        return (unordered_result);\
+    }\
+    \
+    return (default_result);
+
+  JSON_PRIVATE_UNLESS_TESTED:
+    // returns true if:
+    // - any operand is NaN and the other operand is of number type
+    // - any operand is discarded
+    // in legacy mode, discarded values are considered ordered if
+    // an operation is computed as an odd number of inverses of others
+    static bool compares_unordered(const_reference lhs, const_reference rhs, bool inverse = false) noexcept
+    {
+        if ((lhs.is_number_float() && std::isnan(lhs.m_data.m_value.number_float) && rhs.is_number())
+                || (rhs.is_number_float() && std::isnan(rhs.m_data.m_value.number_float) && lhs.is_number()))
+        {
+            return true;
+        }
+#if JSON_USE_LEGACY_DISCARDED_VALUE_COMPARISON
+        return (lhs.is_discarded() || rhs.is_discarded()) && !inverse;
+#else
+        static_cast<void>(inverse);
+        return lhs.is_discarded() || rhs.is_discarded();
+#endif
+    }
+
+  private:
+    bool compares_unordered(const_reference rhs, bool inverse = false) const noexcept
+    {
+        return compares_unordered(*this, rhs, inverse);
+    }
+
+  public:
+#if JSON_HAS_THREE_WAY_COMPARISON
+    /// @brief comparison: equal
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_eq/
+    bool operator==(const_reference rhs) const noexcept
+    {
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wfloat-equal"
+#endif
+        const_reference lhs = *this;
+        JSON_IMPLEMENT_OPERATOR( ==, true, false, false)
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#endif
+    }
+
+    /// @brief comparison: equal
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_eq/
+    template<typename ScalarType>
+    requires std::is_scalar_v<ScalarType>
+    bool operator==(ScalarType rhs) const noexcept
+    {
+        return *this == basic_json(rhs);
+    }
+
+    /// @brief comparison: not equal
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_ne/
+    bool operator!=(const_reference rhs) const noexcept
+    {
+        if (compares_unordered(rhs, true))
