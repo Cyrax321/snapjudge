@@ -4742,3 +4742,596 @@ namespace {
                 std::signal(SIGABRT, prev_sigabrt_handler);
                 SetErrorMode(prev_error_mode_1);
                 _set_error_mode(prev_error_mode_2);
+                _set_abort_behavior(prev_abort_behavior, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+                static_cast<void>(_CrtSetReportMode(_CRT_ASSERT, prev_report_mode));
+                static_cast<void>(_CrtSetReportFile(_CRT_ASSERT, prev_report_file));
+                isSet = false;
+            }
+        }
+
+        ~FatalConditionHandler() { reset(); }
+
+    private:
+        static UINT         prev_error_mode_1;
+        static int          prev_error_mode_2;
+        static unsigned int prev_abort_behavior;
+        static int          prev_report_mode;
+        static _HFILE       prev_report_file;
+        static void (DOCTEST_CDECL *prev_sigabrt_handler)(int);
+        static std::terminate_handler original_terminate_handler;
+        static bool isSet;
+        static ULONG guaranteeSize;
+        static LPTOP_LEVEL_EXCEPTION_FILTER previousTop;
+    };
+
+    UINT         FatalConditionHandler::prev_error_mode_1;
+    int          FatalConditionHandler::prev_error_mode_2;
+    unsigned int FatalConditionHandler::prev_abort_behavior;
+    int          FatalConditionHandler::prev_report_mode;
+    _HFILE       FatalConditionHandler::prev_report_file;
+    void (DOCTEST_CDECL *FatalConditionHandler::prev_sigabrt_handler)(int);
+    std::terminate_handler FatalConditionHandler::original_terminate_handler;
+    bool FatalConditionHandler::isSet = false;
+    ULONG FatalConditionHandler::guaranteeSize = 0;
+    LPTOP_LEVEL_EXCEPTION_FILTER FatalConditionHandler::previousTop = nullptr;
+
+#else // DOCTEST_PLATFORM_WINDOWS
+
+    struct SignalDefs
+    {
+        int         id;
+        const char* name;
+    };
+    SignalDefs signalDefs[] = {{SIGINT, "SIGINT - Terminal interrupt signal"},
+                               {SIGILL, "SIGILL - Illegal instruction signal"},
+                               {SIGFPE, "SIGFPE - Floating point error signal"},
+                               {SIGSEGV, "SIGSEGV - Segmentation violation signal"},
+                               {SIGTERM, "SIGTERM - Termination request signal"},
+                               {SIGABRT, "SIGABRT - Abort (abnormal termination) signal"}};
+
+    struct FatalConditionHandler
+    {
+        static bool             isSet;
+        static struct sigaction oldSigActions[DOCTEST_COUNTOF(signalDefs)];
+        static stack_t          oldSigStack;
+        static size_t           altStackSize;
+        static char*            altStackMem;
+
+        static void handleSignal(int sig) {
+            const char* name = "<unknown signal>";
+            for(std::size_t i = 0; i < DOCTEST_COUNTOF(signalDefs); ++i) {
+                SignalDefs& def = signalDefs[i];
+                if(sig == def.id) {
+                    name = def.name;
+                    break;
+                }
+            }
+            reset();
+            reportFatal(name);
+            raise(sig);
+        }
+
+        static void allocateAltStackMem() {
+            altStackMem = new char[altStackSize];
+        }
+
+        static void freeAltStackMem() {
+            delete[] altStackMem;
+        }
+
+        FatalConditionHandler() {
+            isSet = true;
+            stack_t sigStack;
+            sigStack.ss_sp    = altStackMem;
+            sigStack.ss_size  = altStackSize;
+            sigStack.ss_flags = 0;
+            sigaltstack(&sigStack, &oldSigStack);
+            struct sigaction sa = {};
+            sa.sa_handler       = handleSignal;
+            sa.sa_flags         = SA_ONSTACK;
+            for(std::size_t i = 0; i < DOCTEST_COUNTOF(signalDefs); ++i) {
+                sigaction(signalDefs[i].id, &sa, &oldSigActions[i]);
+            }
+        }
+
+        ~FatalConditionHandler() { reset(); }
+        static void reset() {
+            if(isSet) {
+                // Set signals back to previous values -- hopefully nobody overwrote them in the meantime
+                for(std::size_t i = 0; i < DOCTEST_COUNTOF(signalDefs); ++i) {
+                    sigaction(signalDefs[i].id, &oldSigActions[i], nullptr);
+                }
+                // Return the old stack
+                sigaltstack(&oldSigStack, nullptr);
+                isSet = false;
+            }
+        }
+    };
+
+    bool             FatalConditionHandler::isSet = false;
+    struct sigaction FatalConditionHandler::oldSigActions[DOCTEST_COUNTOF(signalDefs)] = {};
+    stack_t          FatalConditionHandler::oldSigStack = {};
+    size_t           FatalConditionHandler::altStackSize = 4 * SIGSTKSZ;
+    char*            FatalConditionHandler::altStackMem = nullptr;
+
+#endif // DOCTEST_PLATFORM_WINDOWS
+#endif // DOCTEST_CONFIG_POSIX_SIGNALS || DOCTEST_CONFIG_WINDOWS_SEH
+
+} // namespace
+
+namespace {
+    using namespace detail;
+
+#ifdef DOCTEST_PLATFORM_WINDOWS
+#define DOCTEST_OUTPUT_DEBUG_STRING(text) ::OutputDebugStringA(text)
+#else
+    // TODO: integration with XCode and other IDEs
+#define DOCTEST_OUTPUT_DEBUG_STRING(text)
+#endif // Platform
+
+    void addAssert(assertType::Enum at) {
+        if((at & assertType::is_warn) == 0) //!OCLINT bitwise operator in conditional
+            g_cs->numAssertsCurrentTest_atomic++;
+    }
+
+    void addFailedAssert(assertType::Enum at) {
+        if((at & assertType::is_warn) == 0) //!OCLINT bitwise operator in conditional
+            g_cs->numAssertsFailedCurrentTest_atomic++;
+    }
+
+#if defined(DOCTEST_CONFIG_POSIX_SIGNALS) || defined(DOCTEST_CONFIG_WINDOWS_SEH)
+    void reportFatal(const std::string& message) {
+        g_cs->failure_flags |= TestCaseFailureReason::Crash;
+
+        DOCTEST_ITERATE_THROUGH_REPORTERS(test_case_exception, {message.c_str(), true});
+
+        while (g_cs->subcaseStack.size()) {
+            g_cs->subcaseStack.pop_back();
+            DOCTEST_ITERATE_THROUGH_REPORTERS(subcase_end, DOCTEST_EMPTY);
+        }
+
+        g_cs->finalizeTestCaseData();
+
+        DOCTEST_ITERATE_THROUGH_REPORTERS(test_case_end, *g_cs);
+
+        DOCTEST_ITERATE_THROUGH_REPORTERS(test_run_end, *g_cs);
+    }
+#endif // DOCTEST_CONFIG_POSIX_SIGNALS || DOCTEST_CONFIG_WINDOWS_SEH
+} // namespace
+
+AssertData::AssertData(assertType::Enum at, const char* file, int line, const char* expr,
+    const char* exception_type, const StringContains& exception_string)
+    : m_test_case(g_cs->currentTest), m_at(at), m_file(file), m_line(line), m_expr(expr),
+    m_failed(true), m_threw(false), m_threw_as(false), m_exception_type(exception_type),
+    m_exception_string(exception_string) {
+#if DOCTEST_MSVC
+    if (m_expr[0] == ' ') // this happens when variadic macros are disabled under MSVC
+        ++m_expr;
+#endif // MSVC
+}
+
+namespace detail {
+    ResultBuilder::ResultBuilder(assertType::Enum at, const char* file, int line, const char* expr,
+                                 const char* exception_type, const String& exception_string)
+        : AssertData(at, file, line, expr, exception_type, exception_string) { }
+
+    ResultBuilder::ResultBuilder(assertType::Enum at, const char* file, int line, const char* expr,
+        const char* exception_type, const Contains& exception_string)
+        : AssertData(at, file, line, expr, exception_type, exception_string) { }
+
+    void ResultBuilder::setResult(const Result& res) {
+        m_decomp = res.m_decomp;
+        m_failed = !res.m_passed;
+    }
+
+    void ResultBuilder::translateException() {
+        m_threw     = true;
+        m_exception = translateActiveException();
+    }
+
+    bool ResultBuilder::log() {
+        if(m_at & assertType::is_throws) { //!OCLINT bitwise operator in conditional
+            m_failed = !m_threw;
+        } else if((m_at & assertType::is_throws_as) && (m_at & assertType::is_throws_with)) { //!OCLINT
+            m_failed = !m_threw_as || !m_exception_string.check(m_exception);
+        } else if(m_at & assertType::is_throws_as) { //!OCLINT bitwise operator in conditional
+            m_failed = !m_threw_as;
+        } else if(m_at & assertType::is_throws_with) { //!OCLINT bitwise operator in conditional
+            m_failed = !m_exception_string.check(m_exception);
+        } else if(m_at & assertType::is_nothrow) { //!OCLINT bitwise operator in conditional
+            m_failed = m_threw;
+        }
+
+        if(m_exception.size())
+            m_exception = "\"" + m_exception + "\"";
+
+        if(is_running_in_test) {
+            addAssert(m_at);
+            DOCTEST_ITERATE_THROUGH_REPORTERS(log_assert, *this);
+
+            if(m_failed)
+                addFailedAssert(m_at);
+        } else if(m_failed) {
+            failed_out_of_a_testing_context(*this);
+        }
+
+        return m_failed && isDebuggerActive() && !getContextOptions()->no_breaks &&
+            (g_cs->currentTest == nullptr || !g_cs->currentTest->m_no_breaks); // break into debugger
+    }
+
+    void ResultBuilder::react() const {
+        if(m_failed && checkIfShouldThrow(m_at))
+            throwException();
+    }
+
+    void failed_out_of_a_testing_context(const AssertData& ad) {
+        if(g_cs->ah)
+            g_cs->ah(ad);
+        else
+            std::abort();
+    }
+
+    bool decomp_assert(assertType::Enum at, const char* file, int line, const char* expr,
+                       const Result& result) {
+        bool failed = !result.m_passed;
+
+        // ###################################################################################
+        // IF THE DEBUGGER BREAKS HERE - GO 1 LEVEL UP IN THE CALLSTACK FOR THE FAILING ASSERT
+        // THIS IS THE EFFECT OF HAVING 'DOCTEST_CONFIG_SUPER_FAST_ASSERTS' DEFINED
+        // ###################################################################################
+        DOCTEST_ASSERT_OUT_OF_TESTS(result.m_decomp);
+        DOCTEST_ASSERT_IN_TESTS(result.m_decomp);
+        return !failed;
+    }
+
+    MessageBuilder::MessageBuilder(const char* file, int line, assertType::Enum severity) {
+        m_stream   = tlssPush();
+        m_file     = file;
+        m_line     = line;
+        m_severity = severity;
+    }
+
+    MessageBuilder::~MessageBuilder() {
+        if (!logged)
+            tlssPop();
+    }
+
+    DOCTEST_DEFINE_INTERFACE(IExceptionTranslator)
+
+    bool MessageBuilder::log() {
+        if (!logged) {
+            m_string = tlssPop();
+            logged = true;
+        }
+
+        DOCTEST_ITERATE_THROUGH_REPORTERS(log_message, *this);
+
+        const bool isWarn = m_severity & assertType::is_warn;
+
+        // warn is just a message in this context so we don't treat it as an assert
+        if(!isWarn) {
+            addAssert(m_severity);
+            addFailedAssert(m_severity);
+        }
+
+        return isDebuggerActive() && !getContextOptions()->no_breaks && !isWarn &&
+            (g_cs->currentTest == nullptr || !g_cs->currentTest->m_no_breaks); // break into debugger
+    }
+
+    void MessageBuilder::react() {
+        if(m_severity & assertType::is_require) //!OCLINT bitwise operator in conditional
+            throwException();
+    }
+} // namespace detail
+namespace {
+    using namespace detail;
+
+    // clang-format off
+
+// =================================================================================================
+// The following code has been taken verbatim from Catch2/include/internal/catch_xmlwriter.h/cpp
+// This is done so cherry-picking bug fixes is trivial - even the style/formatting is untouched.
+// =================================================================================================
+
+    class XmlEncode {
+    public:
+        enum ForWhat { ForTextNodes, ForAttributes };
+
+        XmlEncode( std::string const& str, ForWhat forWhat = ForTextNodes );
+
+        void encodeTo( std::ostream& os ) const;
+
+        friend std::ostream& operator << ( std::ostream& os, XmlEncode const& xmlEncode );
+
+    private:
+        std::string m_str;
+        ForWhat m_forWhat;
+    };
+
+    class XmlWriter {
+    public:
+
+        class ScopedElement {
+        public:
+            ScopedElement( XmlWriter* writer );
+
+            ScopedElement( ScopedElement&& other ) DOCTEST_NOEXCEPT;
+            ScopedElement& operator=( ScopedElement&& other ) DOCTEST_NOEXCEPT;
+
+            ~ScopedElement();
+
+            ScopedElement& writeText( std::string const& text, bool indent = true );
+
+            template<typename T>
+            ScopedElement& writeAttribute( std::string const& name, T const& attribute ) {
+                m_writer->writeAttribute( name, attribute );
+                return *this;
+            }
+
+        private:
+            mutable XmlWriter* m_writer = nullptr;
+        };
+
+#ifndef DOCTEST_CONFIG_NO_INCLUDE_IOSTREAM
+        XmlWriter( std::ostream& os = std::cout );
+#else // DOCTEST_CONFIG_NO_INCLUDE_IOSTREAM
+        XmlWriter( std::ostream& os );
+#endif // DOCTEST_CONFIG_NO_INCLUDE_IOSTREAM
+        ~XmlWriter();
+
+        XmlWriter( XmlWriter const& ) = delete;
+        XmlWriter& operator=( XmlWriter const& ) = delete;
+
+        XmlWriter& startElement( std::string const& name );
+
+        ScopedElement scopedElement( std::string const& name );
+
+        XmlWriter& endElement();
+
+        XmlWriter& writeAttribute( std::string const& name, std::string const& attribute );
+
+        XmlWriter& writeAttribute( std::string const& name, const char* attribute );
+
+        XmlWriter& writeAttribute( std::string const& name, bool attribute );
+
+        template<typename T>
+        XmlWriter& writeAttribute( std::string const& name, T const& attribute ) {
+        std::stringstream rss;
+            rss << attribute;
+            return writeAttribute( name, rss.str() );
+        }
+
+        XmlWriter& writeText( std::string const& text, bool indent = true );
+
+        //XmlWriter& writeComment( std::string const& text );
+
+        //void writeStylesheetRef( std::string const& url );
+
+        //XmlWriter& writeBlankLine();
+
+        void ensureTagClosed();
+
+        void writeDeclaration();
+
+    private:
+
+        void newlineIfNecessary();
+
+        bool m_tagIsOpen = false;
+        bool m_needsNewline = false;
+        std::vector<std::string> m_tags;
+        std::string m_indent;
+        std::ostream& m_os;
+    };
+
+// =================================================================================================
+// The following code has been taken verbatim from Catch2/include/internal/catch_xmlwriter.h/cpp
+// This is done so cherry-picking bug fixes is trivial - even the style/formatting is untouched.
+// =================================================================================================
+
+using uchar = unsigned char;
+
+namespace {
+
+    size_t trailingBytes(unsigned char c) {
+        if ((c & 0xE0) == 0xC0) {
+            return 2;
+        }
+        if ((c & 0xF0) == 0xE0) {
+            return 3;
+        }
+        if ((c & 0xF8) == 0xF0) {
+            return 4;
+        }
+        DOCTEST_INTERNAL_ERROR("Invalid multibyte utf-8 start byte encountered");
+    }
+
+    uint32_t headerValue(unsigned char c) {
+        if ((c & 0xE0) == 0xC0) {
+            return c & 0x1F;
+        }
+        if ((c & 0xF0) == 0xE0) {
+            return c & 0x0F;
+        }
+        if ((c & 0xF8) == 0xF0) {
+            return c & 0x07;
+        }
+        DOCTEST_INTERNAL_ERROR("Invalid multibyte utf-8 start byte encountered");
+    }
+
+    void hexEscapeChar(std::ostream& os, unsigned char c) {
+        std::ios_base::fmtflags f(os.flags());
+        os << "\\x"
+            << std::uppercase << std::hex << std::setfill('0') << std::setw(2)
+            << static_cast<int>(c);
+        os.flags(f);
+    }
+
+} // anonymous namespace
+
+    XmlEncode::XmlEncode( std::string const& str, ForWhat forWhat )
+    :   m_str( str ),
+        m_forWhat( forWhat )
+    {}
+
+    void XmlEncode::encodeTo( std::ostream& os ) const {
+        // Apostrophe escaping not necessary if we always use " to write attributes
+        // (see: https://www.w3.org/TR/xml/#syntax)
+
+        for( std::size_t idx = 0; idx < m_str.size(); ++ idx ) {
+            uchar c = m_str[idx];
+            switch (c) {
+            case '<':   os << "&lt;"; break;
+            case '&':   os << "&amp;"; break;
+
+            case '>':
+                // See: https://www.w3.org/TR/xml/#syntax
+                if (idx > 2 && m_str[idx - 1] == ']' && m_str[idx - 2] == ']')
+                    os << "&gt;";
+                else
+                    os << c;
+                break;
+
+            case '\"':
+                if (m_forWhat == ForAttributes)
+                    os << "&quot;";
+                else
+                    os << c;
+                break;
+
+            default:
+                // Check for control characters and invalid utf-8
+
+                // Escape control characters in standard ascii
+                // see https://stackoverflow.com/questions/404107/why-are-control-characters-illegal-in-xml-1-0
+                if (c < 0x09 || (c > 0x0D && c < 0x20) || c == 0x7F) {
+                    hexEscapeChar(os, c);
+                    break;
+                }
+
+                // Plain ASCII: Write it to stream
+                if (c < 0x7F) {
+                    os << c;
+                    break;
+                }
+
+                // UTF-8 territory
+                // Check if the encoding is valid and if it is not, hex escape bytes.
+                // Important: We do not check the exact decoded values for validity, only the encoding format
+                // First check that this bytes is a valid lead byte:
+                // This means that it is not encoded as 1111 1XXX
+                // Or as 10XX XXXX
+                if (c <  0xC0 ||
+                    c >= 0xF8) {
+                    hexEscapeChar(os, c);
+                    break;
+                }
+
+                auto encBytes = trailingBytes(c);
+                // Are there enough bytes left to avoid accessing out-of-bounds memory?
+                if (idx + encBytes - 1 >= m_str.size()) {
+                    hexEscapeChar(os, c);
+                    break;
+                }
+                // The header is valid, check data
+                // The next encBytes bytes must together be a valid utf-8
+                // This means: bitpattern 10XX XXXX and the extracted value is sane (ish)
+                bool valid = true;
+                uint32_t value = headerValue(c);
+                for (std::size_t n = 1; n < encBytes; ++n) {
+                    uchar nc = m_str[idx + n];
+                    valid &= ((nc & 0xC0) == 0x80);
+                    value = (value << 6) | (nc & 0x3F);
+                }
+
+                if (
+                    // Wrong bit pattern of following bytes
+                    (!valid) ||
+                    // Overlong encodings
+                    (value < 0x80) ||
+                    (                 value < 0x800   && encBytes > 2) || // removed "0x80 <= value &&" because redundant
+                    (0x800 < value && value < 0x10000 && encBytes > 3) ||
+                    // Encoded value out of range
+                    (value >= 0x110000)
+                    ) {
+                    hexEscapeChar(os, c);
+                    break;
+                }
+
+                // If we got here, this is in fact a valid(ish) utf-8 sequence
+                for (std::size_t n = 0; n < encBytes; ++n) {
+                    os << m_str[idx + n];
+                }
+                idx += encBytes - 1;
+                break;
+            }
+        }
+    }
+
+    std::ostream& operator << ( std::ostream& os, XmlEncode const& xmlEncode ) {
+        xmlEncode.encodeTo( os );
+        return os;
+    }
+
+    XmlWriter::ScopedElement::ScopedElement( XmlWriter* writer )
+    :   m_writer( writer )
+    {}
+
+    XmlWriter::ScopedElement::ScopedElement( ScopedElement&& other ) DOCTEST_NOEXCEPT
+    :   m_writer( other.m_writer ){
+        other.m_writer = nullptr;
+    }
+    XmlWriter::ScopedElement& XmlWriter::ScopedElement::operator=( ScopedElement&& other ) DOCTEST_NOEXCEPT {
+        if ( m_writer ) {
+            m_writer->endElement();
+        }
+        m_writer = other.m_writer;
+        other.m_writer = nullptr;
+        return *this;
+    }
+
+
+    XmlWriter::ScopedElement::~ScopedElement() {
+        if( m_writer )
+            m_writer->endElement();
+    }
+
+    XmlWriter::ScopedElement& XmlWriter::ScopedElement::writeText( std::string const& text, bool indent ) {
+        m_writer->writeText( text, indent );
+        return *this;
+    }
+
+    XmlWriter::XmlWriter( std::ostream& os ) : m_os( os )
+    {
+        // writeDeclaration(); // called explicitly by the reporters that use the writer class - see issue #627
+    }
+
+    XmlWriter::~XmlWriter() {
+        while( !m_tags.empty() )
+            endElement();
+    }
+
+    XmlWriter& XmlWriter::startElement( std::string const& name ) {
+        ensureTagClosed();
+        newlineIfNecessary();
+        m_os << m_indent << '<' << name;
+        m_tags.push_back( name );
+        m_indent += "  ";
+        m_tagIsOpen = true;
+        return *this;
+    }
+
+    XmlWriter::ScopedElement XmlWriter::scopedElement( std::string const& name ) {
+        ScopedElement scoped( this );
+        startElement( name );
+        return scoped;
+    }
+
+    XmlWriter& XmlWriter::endElement() {
+        newlineIfNecessary();
+        m_indent = m_indent.substr( 0, m_indent.size()-2 );
+        if( m_tagIsOpen ) {
+            m_os << "/>";
+            m_tagIsOpen = false;
+        }
+        else {
