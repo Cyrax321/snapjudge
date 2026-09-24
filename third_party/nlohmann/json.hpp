@@ -18878,3 +18878,593 @@ class serializer
             return c == '.' || c == 'e';
         });
 
+        if (value_is_int_like)
+        {
+            o->write_characters(".0", 2);
+        }
+    }
+
+    /*!
+    @brief check whether a string is UTF-8 encoded
+
+    The function checks each byte of a string whether it is UTF-8 encoded. The
+    result of the check is stored in the @a state parameter. The function must
+    be called initially with state 0 (accept). State 1 means the string must
+    be rejected, because the current byte is not allowed. If the string is
+    completely processed, but the state is non-zero, the string ended
+    prematurely; that is, the last byte indicated more bytes should have
+    followed.
+
+    @param[in,out] state  the state of the decoding
+    @param[in,out] codep  codepoint (valid only if resulting state is UTF8_ACCEPT)
+    @param[in] byte       next byte to decode
+    @return               new state
+
+    @note The function has been edited: a std::array is used.
+
+    @copyright Copyright (c) 2008-2009 Bjoern Hoehrmann <bjoern@hoehrmann.de>
+    @sa http://bjoern.hoehrmann.de/utf-8/decoder/dfa/
+    */
+    static std::uint8_t decode(std::uint8_t& state, std::uint32_t& codep, const std::uint8_t byte) noexcept
+    {
+        static const std::array<std::uint8_t, 400> utf8d =
+        {
+            {
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 00..1F
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 20..3F
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 40..5F
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 60..7F
+                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, // 80..9F
+                7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, // A0..BF
+                8, 8, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, // C0..DF
+                0xA, 0x3, 0x3, 0x3, 0x3, 0x3, 0x3, 0x3, 0x3, 0x3, 0x3, 0x3, 0x3, 0x4, 0x3, 0x3, // E0..EF
+                0xB, 0x6, 0x6, 0x6, 0x5, 0x8, 0x8, 0x8, 0x8, 0x8, 0x8, 0x8, 0x8, 0x8, 0x8, 0x8, // F0..FF
+                0x0, 0x1, 0x2, 0x3, 0x5, 0x8, 0x7, 0x1, 0x1, 0x1, 0x4, 0x6, 0x1, 0x1, 0x1, 0x1, // s0..s0
+                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, // s1..s2
+                1, 2, 1, 1, 1, 1, 1, 2, 1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1, 1, // s3..s4
+                1, 2, 1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3, 1, 3, 1, 1, 1, 1, 1, 1, // s5..s6
+                1, 3, 1, 1, 1, 1, 1, 3, 1, 3, 1, 1, 1, 1, 1, 1, 1, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 // s7..s8
+            }
+        };
+
+        JSON_ASSERT(byte < utf8d.size());
+        const std::uint8_t type = utf8d[byte];
+
+        codep = (state != UTF8_ACCEPT)
+                ? (byte & 0x3fu) | (codep << 6u)
+                : (0xFFu >> type) & (byte);
+
+        const std::size_t index = 256u + static_cast<size_t>(state) * 16u + static_cast<size_t>(type);
+        JSON_ASSERT(index < utf8d.size());
+        state = utf8d[index];
+        return state;
+    }
+
+    /*
+     * Overload to make the compiler happy while it is instantiating
+     * dump_integer for number_unsigned_t.
+     * Must never be called.
+     */
+    number_unsigned_t remove_sign(number_unsigned_t x)
+    {
+        JSON_ASSERT(false); // NOLINT(cert-dcl03-c,hicpp-static-assert,misc-static-assert) LCOV_EXCL_LINE
+        return x; // LCOV_EXCL_LINE
+    }
+
+    /*
+     * Helper function for dump_integer
+     *
+     * This function takes a negative signed integer and returns its absolute
+     * value as unsigned integer. The plus/minus shuffling is necessary as we can
+     * not directly remove the sign of an arbitrary signed integer as the
+     * absolute values of INT_MIN and INT_MAX are usually not the same. See
+     * #1708 for details.
+     */
+    inline number_unsigned_t remove_sign(number_integer_t x) noexcept
+    {
+        JSON_ASSERT(x < 0 && x < (std::numeric_limits<number_integer_t>::max)()); // NOLINT(misc-redundant-expression)
+        return static_cast<number_unsigned_t>(-(x + 1)) + 1;
+    }
+
+  private:
+    /// the output of the serializer
+    output_adapter_t<char> o = nullptr;
+
+    /// a (hopefully) large enough character buffer
+    std::array<char, 64> number_buffer{{}};
+
+    /// the locale
+    const std::lconv* loc = nullptr;
+    /// the locale's thousand separator character
+    const char thousands_sep = '\0';
+    /// the locale's decimal point character
+    const char decimal_point = '\0';
+
+    /// string buffer
+    std::array<char, 512> string_buffer{{}};
+
+    /// the indentation character
+    const char indent_char;
+    /// the indentation string
+    string_t indent_string;
+
+    /// error_handler how to react on decoding errors
+    const error_handler_t error_handler;
+};
+
+}  // namespace detail
+NLOHMANN_JSON_NAMESPACE_END
+
+// #include <nlohmann/detail/value_t.hpp>
+
+// #include <nlohmann/json_fwd.hpp>
+
+// #include <nlohmann/ordered_map.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
+
+
+#include <functional> // equal_to, less
+#include <initializer_list> // initializer_list
+#include <iterator> // input_iterator_tag, iterator_traits
+#include <memory> // allocator
+#include <stdexcept> // for out_of_range
+#include <type_traits> // enable_if, is_convertible
+#include <utility> // pair
+#include <vector> // vector
+
+// #include <nlohmann/detail/macro_scope.hpp>
+
+// #include <nlohmann/detail/meta/type_traits.hpp>
+
+
+NLOHMANN_JSON_NAMESPACE_BEGIN
+
+/// ordered_map: a minimal map-like container that preserves insertion order
+/// for use within nlohmann::basic_json<ordered_map>
+template <class Key, class T, class IgnoredLess = std::less<Key>,
+          class Allocator = std::allocator<std::pair<const Key, T>>>
+                  struct ordered_map : std::vector<std::pair<const Key, T>, Allocator>
+{
+    using key_type = Key;
+    using mapped_type = T;
+    using Container = std::vector<std::pair<const Key, T>, Allocator>;
+    using iterator = typename Container::iterator;
+    using const_iterator = typename Container::const_iterator;
+    using size_type = typename Container::size_type;
+    using value_type = typename Container::value_type;
+#ifdef JSON_HAS_CPP_14
+    using key_compare = std::equal_to<>;
+#else
+    using key_compare = std::equal_to<Key>;
+#endif
+
+    // Explicit constructors instead of `using Container::Container`
+    // otherwise older compilers choke on it (GCC <= 5.5, xcode <= 9.4)
+    ordered_map() noexcept(noexcept(Container())) : Container{} {}
+    explicit ordered_map(const Allocator& alloc) noexcept(noexcept(Container(alloc))) : Container{alloc} {}
+    template <class It>
+    ordered_map(It first, It last, const Allocator& alloc = Allocator())
+        : Container{first, last, alloc} {}
+    ordered_map(std::initializer_list<value_type> init, const Allocator& alloc = Allocator() )
+        : Container{init, alloc} {}
+
+    std::pair<iterator, bool> emplace(const key_type& key, T&& t)
+    {
+        for (auto it = this->begin(); it != this->end(); ++it)
+        {
+            if (m_compare(it->first, key))
+            {
+                return {it, false};
+            }
+        }
+        Container::emplace_back(key, std::forward<T>(t));
+        return {std::prev(this->end()), true};
+    }
+
+    template<class KeyType, detail::enable_if_t<
+                 detail::is_usable_as_key_type<key_compare, key_type, KeyType>::value, int> = 0>
+    std::pair<iterator, bool> emplace(KeyType && key, T && t)
+    {
+        for (auto it = this->begin(); it != this->end(); ++it)
+        {
+            if (m_compare(it->first, key))
+            {
+                return {it, false};
+            }
+        }
+        Container::emplace_back(std::forward<KeyType>(key), std::forward<T>(t));
+        return {std::prev(this->end()), true};
+    }
+
+    T& operator[](const key_type& key)
+    {
+        return emplace(key, T{}).first->second;
+    }
+
+    template<class KeyType, detail::enable_if_t<
+                 detail::is_usable_as_key_type<key_compare, key_type, KeyType>::value, int> = 0>
+    T & operator[](KeyType && key)
+    {
+        return emplace(std::forward<KeyType>(key), T{}).first->second;
+    }
+
+    const T& operator[](const key_type& key) const
+    {
+        return at(key);
+    }
+
+    template<class KeyType, detail::enable_if_t<
+                 detail::is_usable_as_key_type<key_compare, key_type, KeyType>::value, int> = 0>
+    const T & operator[](KeyType && key) const
+    {
+        return at(std::forward<KeyType>(key));
+    }
+
+    T& at(const key_type& key)
+    {
+        for (auto it = this->begin(); it != this->end(); ++it)
+        {
+            if (m_compare(it->first, key))
+            {
+                return it->second;
+            }
+        }
+
+        JSON_THROW(std::out_of_range("key not found"));
+    }
+
+    template<class KeyType, detail::enable_if_t<
+                 detail::is_usable_as_key_type<key_compare, key_type, KeyType>::value, int> = 0>
+    T & at(KeyType && key) // NOLINT(cppcoreguidelines-missing-std-forward)
+    {
+        for (auto it = this->begin(); it != this->end(); ++it)
+        {
+            if (m_compare(it->first, key))
+            {
+                return it->second;
+            }
+        }
+
+        JSON_THROW(std::out_of_range("key not found"));
+    }
+
+    const T& at(const key_type& key) const
+    {
+        for (auto it = this->begin(); it != this->end(); ++it)
+        {
+            if (m_compare(it->first, key))
+            {
+                return it->second;
+            }
+        }
+
+        JSON_THROW(std::out_of_range("key not found"));
+    }
+
+    template<class KeyType, detail::enable_if_t<
+                 detail::is_usable_as_key_type<key_compare, key_type, KeyType>::value, int> = 0>
+    const T & at(KeyType && key) const // NOLINT(cppcoreguidelines-missing-std-forward)
+    {
+        for (auto it = this->begin(); it != this->end(); ++it)
+        {
+            if (m_compare(it->first, key))
+            {
+                return it->second;
+            }
+        }
+
+        JSON_THROW(std::out_of_range("key not found"));
+    }
+
+    size_type erase(const key_type& key)
+    {
+        for (auto it = this->begin(); it != this->end(); ++it)
+        {
+            if (m_compare(it->first, key))
+            {
+                // Since we cannot move const Keys, re-construct them in place
+                for (auto next = it; ++next != this->end(); ++it)
+                {
+                    it->~value_type(); // Destroy but keep allocation
+                    new (&*it) value_type{std::move(*next)};
+                }
+                Container::pop_back();
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+    template<class KeyType, detail::enable_if_t<
+                 detail::is_usable_as_key_type<key_compare, key_type, KeyType>::value, int> = 0>
+    size_type erase(KeyType && key) // NOLINT(cppcoreguidelines-missing-std-forward)
+    {
+        for (auto it = this->begin(); it != this->end(); ++it)
+        {
+            if (m_compare(it->first, key))
+            {
+                // Since we cannot move const Keys, re-construct them in place
+                for (auto next = it; ++next != this->end(); ++it)
+                {
+                    it->~value_type(); // Destroy but keep allocation
+                    new (&*it) value_type{std::move(*next)};
+                }
+                Container::pop_back();
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+    iterator erase(iterator pos)
+    {
+        return erase(pos, std::next(pos));
+    }
+
+    iterator erase(iterator first, iterator last)
+    {
+        if (first == last)
+        {
+            return first;
+        }
+
+        const auto elements_affected = std::distance(first, last);
+        const auto offset = std::distance(Container::begin(), first);
+
+        // This is the start situation. We need to delete elements_affected
+        // elements (3 in this example: e, f, g), and need to return an
+        // iterator past the last deleted element (h in this example).
+        // Note that offset is the distance from the start of the vector
+        // to first. We will need this later.
+
+        // [ a, b, c, d, e, f, g, h, i, j ]
+        //               ^        ^
+        //             first    last
+
+        // Since we cannot move const Keys, we re-construct them in place.
+        // We start at first and re-construct (viz. copy) the elements from
+        // the back of the vector. Example for first iteration:
+
+        //               ,--------.
+        //               v        |   destroy e and re-construct with h
+        // [ a, b, c, d, e, f, g, h, i, j ]
+        //               ^        ^
+        //               it       it + elements_affected
+
+        for (auto it = first; std::next(it, elements_affected) != Container::end(); ++it)
+        {
+            it->~value_type(); // destroy but keep allocation
+            new (&*it) value_type{std::move(*std::next(it, elements_affected))}; // "move" next element to it
+        }
+
+        // [ a, b, c, d, h, i, j, h, i, j ]
+        //               ^        ^
+        //             first    last
+
+        // remove the unneeded elements at the end of the vector
+        Container::resize(this->size() - static_cast<size_type>(elements_affected));
+
+        // [ a, b, c, d, h, i, j ]
+        //               ^        ^
+        //             first    last
+
+        // first is now pointing past the last deleted element, but we cannot
+        // use this iterator, because it may have been invalidated by the
+        // resize call. Instead, we can return begin() + offset.
+        return Container::begin() + offset;
+    }
+
+    size_type count(const key_type& key) const
+    {
+        for (auto it = this->begin(); it != this->end(); ++it)
+        {
+            if (m_compare(it->first, key))
+            {
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+    template<class KeyType, detail::enable_if_t<
+                 detail::is_usable_as_key_type<key_compare, key_type, KeyType>::value, int> = 0>
+    size_type count(KeyType && key) const // NOLINT(cppcoreguidelines-missing-std-forward)
+    {
+        for (auto it = this->begin(); it != this->end(); ++it)
+        {
+            if (m_compare(it->first, key))
+            {
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+    iterator find(const key_type& key)
+    {
+        for (auto it = this->begin(); it != this->end(); ++it)
+        {
+            if (m_compare(it->first, key))
+            {
+                return it;
+            }
+        }
+        return Container::end();
+    }
+
+    template<class KeyType, detail::enable_if_t<
+                 detail::is_usable_as_key_type<key_compare, key_type, KeyType>::value, int> = 0>
+    iterator find(KeyType && key) // NOLINT(cppcoreguidelines-missing-std-forward)
+    {
+        for (auto it = this->begin(); it != this->end(); ++it)
+        {
+            if (m_compare(it->first, key))
+            {
+                return it;
+            }
+        }
+        return Container::end();
+    }
+
+    const_iterator find(const key_type& key) const
+    {
+        for (auto it = this->begin(); it != this->end(); ++it)
+        {
+            if (m_compare(it->first, key))
+            {
+                return it;
+            }
+        }
+        return Container::end();
+    }
+
+    std::pair<iterator, bool> insert( value_type&& value )
+    {
+        return emplace(value.first, std::move(value.second));
+    }
+
+    std::pair<iterator, bool> insert( const value_type& value )
+    {
+        for (auto it = this->begin(); it != this->end(); ++it)
+        {
+            if (m_compare(it->first, value.first))
+            {
+                return {it, false};
+            }
+        }
+        Container::push_back(value);
+        return {--this->end(), true};
+    }
+
+    template<typename InputIt>
+    using require_input_iter = typename std::enable_if<std::is_convertible<typename std::iterator_traits<InputIt>::iterator_category,
+            std::input_iterator_tag>::value>::type;
+
+    template<typename InputIt, typename = require_input_iter<InputIt>>
+    void insert(InputIt first, InputIt last)
+    {
+        for (auto it = first; it != last; ++it)
+        {
+            insert(*it);
+        }
+    }
+
+private:
+    JSON_NO_UNIQUE_ADDRESS key_compare m_compare = key_compare();
+};
+
+NLOHMANN_JSON_NAMESPACE_END
+
+
+#if defined(JSON_HAS_CPP_17)
+    #if JSON_HAS_STATIC_RTTI
+        #include <any>
+    #endif
+    #include <string_view>
+#endif
+
+/*!
+@brief namespace for Niels Lohmann
+@see https://github.com/nlohmann
+@since version 1.0.0
+*/
+NLOHMANN_JSON_NAMESPACE_BEGIN
+
+/*!
+@brief a class to store JSON values
+
+@internal
+@invariant The member variables @a m_value and @a m_type have the following
+relationship:
+- If `m_type == value_t::object`, then `m_value.object != nullptr`.
+- If `m_type == value_t::array`, then `m_value.array != nullptr`.
+- If `m_type == value_t::string`, then `m_value.string != nullptr`.
+The invariants are checked by member function assert_invariant().
+
+@note ObjectType trick from https://stackoverflow.com/a/9860911
+@endinternal
+
+@since version 1.0.0
+
+@nosubgrouping
+*/
+NLOHMANN_BASIC_JSON_TPL_DECLARATION
+class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-special-member-functions)
+    : public ::nlohmann::detail::json_base_class<CustomBaseClass>
+{
+  private:
+    template<detail::value_t> friend struct detail::external_constructor;
+
+    template<typename>
+    friend class ::nlohmann::json_pointer;
+    // can be restored when json_pointer backwards compatibility is removed
+    // friend ::nlohmann::json_pointer<StringType>;
+
+    template<typename BasicJsonType, typename InputType>
+    friend class ::nlohmann::detail::parser;
+    friend ::nlohmann::detail::serializer<basic_json>;
+    template<typename BasicJsonType>
+    friend class ::nlohmann::detail::iter_impl;
+    template<typename BasicJsonType, typename CharType>
+    friend class ::nlohmann::detail::binary_writer;
+    template<typename BasicJsonType, typename InputType, typename SAX>
+    friend class ::nlohmann::detail::binary_reader;
+    template<typename BasicJsonType>
+    friend class ::nlohmann::detail::json_sax_dom_parser;
+    template<typename BasicJsonType>
+    friend class ::nlohmann::detail::json_sax_dom_callback_parser;
+    friend class ::nlohmann::detail::exception;
+
+    /// workaround type for MSVC
+    using basic_json_t = NLOHMANN_BASIC_JSON_TPL;
+    using json_base_class_t = ::nlohmann::detail::json_base_class<CustomBaseClass>;
+
+  JSON_PRIVATE_UNLESS_TESTED:
+    // convenience aliases for types residing in namespace detail;
+    using lexer = ::nlohmann::detail::lexer_base<basic_json>;
+
+    template<typename InputAdapterType>
+    static ::nlohmann::detail::parser<basic_json, InputAdapterType> parser(
+        InputAdapterType adapter,
+        detail::parser_callback_t<basic_json>cb = nullptr,
+        const bool allow_exceptions = true,
+        const bool ignore_comments = false
+                                 )
+    {
+        return ::nlohmann::detail::parser<basic_json, InputAdapterType>(std::move(adapter),
+                std::move(cb), allow_exceptions, ignore_comments);
+    }
+
+  private:
+    using primitive_iterator_t = ::nlohmann::detail::primitive_iterator_t;
+    template<typename BasicJsonType>
+    using internal_iterator = ::nlohmann::detail::internal_iterator<BasicJsonType>;
+    template<typename BasicJsonType>
+    using iter_impl = ::nlohmann::detail::iter_impl<BasicJsonType>;
+    template<typename Iterator>
+    using iteration_proxy = ::nlohmann::detail::iteration_proxy<Iterator>;
+    template<typename Base> using json_reverse_iterator = ::nlohmann::detail::json_reverse_iterator<Base>;
+
+    template<typename CharType>
+    using output_adapter_t = ::nlohmann::detail::output_adapter_t<CharType>;
+
+    template<typename InputType>
+    using binary_reader = ::nlohmann::detail::binary_reader<basic_json, InputType>;
+    template<typename CharType> using binary_writer = ::nlohmann::detail::binary_writer<basic_json, CharType>;
+
+  JSON_PRIVATE_UNLESS_TESTED:
+    using serializer = ::nlohmann::detail::serializer<basic_json>;
+
+  public:
+    using value_t = detail::value_t;
+    /// JSON Pointer, see @ref nlohmann::json_pointer
+    using json_pointer = ::nlohmann::json_pointer<StringType>;
+    template<typename T, typename SFINAE>
+    using json_serializer = JSONSerializer<T, SFINAE>;
