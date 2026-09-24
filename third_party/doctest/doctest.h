@@ -5335,3 +5335,596 @@ namespace {
             m_tagIsOpen = false;
         }
         else {
+            m_os << m_indent << "</" << m_tags.back() << ">";
+        }
+        m_os << std::endl;
+        m_tags.pop_back();
+        return *this;
+    }
+
+    XmlWriter& XmlWriter::writeAttribute( std::string const& name, std::string const& attribute ) {
+        if( !name.empty() && !attribute.empty() )
+            m_os << ' ' << name << "=\"" << XmlEncode( attribute, XmlEncode::ForAttributes ) << '"';
+        return *this;
+    }
+
+    XmlWriter& XmlWriter::writeAttribute( std::string const& name, const char* attribute ) {
+        if( !name.empty() && attribute && attribute[0] != '\0' )
+            m_os << ' ' << name << "=\"" << XmlEncode( attribute, XmlEncode::ForAttributes ) << '"';
+        return *this;
+    }
+
+    XmlWriter& XmlWriter::writeAttribute( std::string const& name, bool attribute ) {
+        m_os << ' ' << name << "=\"" << ( attribute ? "true" : "false" ) << '"';
+        return *this;
+    }
+
+    XmlWriter& XmlWriter::writeText( std::string const& text, bool indent ) {
+        if( !text.empty() ){
+            bool tagWasOpen = m_tagIsOpen;
+            ensureTagClosed();
+            if( tagWasOpen && indent )
+                m_os << m_indent;
+            m_os << XmlEncode( text );
+            m_needsNewline = true;
+        }
+        return *this;
+    }
+
+    //XmlWriter& XmlWriter::writeComment( std::string const& text ) {
+    //    ensureTagClosed();
+    //    m_os << m_indent << "<!--" << text << "-->";
+    //    m_needsNewline = true;
+    //    return *this;
+    //}
+
+    //void XmlWriter::writeStylesheetRef( std::string const& url ) {
+    //    m_os << "<?xml-stylesheet type=\"text/xsl\" href=\"" << url << "\"?>\n";
+    //}
+
+    //XmlWriter& XmlWriter::writeBlankLine() {
+    //    ensureTagClosed();
+    //    m_os << '\n';
+    //    return *this;
+    //}
+
+    void XmlWriter::ensureTagClosed() {
+        if( m_tagIsOpen ) {
+            m_os << ">" << std::endl;
+            m_tagIsOpen = false;
+        }
+    }
+
+    void XmlWriter::writeDeclaration() {
+        m_os << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+    }
+
+    void XmlWriter::newlineIfNecessary() {
+        if( m_needsNewline ) {
+            m_os << std::endl;
+            m_needsNewline = false;
+        }
+    }
+
+// =================================================================================================
+// End of copy-pasted code from Catch
+// =================================================================================================
+
+    // clang-format on
+
+    struct XmlReporter : public IReporter
+    {
+        XmlWriter xml;
+        DOCTEST_DECLARE_MUTEX(mutex)
+
+        // caching pointers/references to objects of these types - safe to do
+        const ContextOptions& opt;
+        const TestCaseData*   tc = nullptr;
+
+        XmlReporter(const ContextOptions& co)
+                : xml(*co.cout)
+                , opt(co) {}
+
+        void log_contexts() {
+            int num_contexts = get_num_active_contexts();
+            if(num_contexts) {
+                auto              contexts = get_active_contexts();
+                std::stringstream ss;
+                for(int i = 0; i < num_contexts; ++i) {
+                    contexts[i]->stringify(&ss);
+                    xml.scopedElement("Info").writeText(ss.str());
+                    ss.str("");
+                }
+            }
+        }
+
+        unsigned line(unsigned l) const { return opt.no_line_numbers ? 0 : l; }
+
+        void test_case_start_impl(const TestCaseData& in) {
+            bool open_ts_tag = false;
+            if(tc != nullptr) { // we have already opened a test suite
+                if(std::strcmp(tc->m_test_suite, in.m_test_suite) != 0) {
+                    xml.endElement();
+                    open_ts_tag = true;
+                }
+            }
+            else {
+                open_ts_tag = true; // first test case ==> first test suite
+            }
+
+            if(open_ts_tag) {
+                xml.startElement("TestSuite");
+                xml.writeAttribute("name", in.m_test_suite);
+            }
+
+            tc = &in;
+            xml.startElement("TestCase")
+                    .writeAttribute("name", in.m_name)
+                    .writeAttribute("filename", skipPathFromFilename(in.m_file.c_str()))
+                    .writeAttribute("line", line(in.m_line))
+                    .writeAttribute("description", in.m_description);
+
+            if(Approx(in.m_timeout) != 0)
+                xml.writeAttribute("timeout", in.m_timeout);
+            if(in.m_may_fail)
+                xml.writeAttribute("may_fail", true);
+            if(in.m_should_fail)
+                xml.writeAttribute("should_fail", true);
+        }
+
+        // =========================================================================================
+        // WHAT FOLLOWS ARE OVERRIDES OF THE VIRTUAL METHODS OF THE REPORTER INTERFACE
+        // =========================================================================================
+
+        void report_query(const QueryData& in) override {
+            test_run_start();
+            if(opt.list_reporters) {
+                for(auto& curr : getListeners())
+                    xml.scopedElement("Listener")
+                            .writeAttribute("priority", curr.first.first)
+                            .writeAttribute("name", curr.first.second);
+                for(auto& curr : getReporters())
+                    xml.scopedElement("Reporter")
+                            .writeAttribute("priority", curr.first.first)
+                            .writeAttribute("name", curr.first.second);
+            } else if(opt.count || opt.list_test_cases) {
+                for(unsigned i = 0; i < in.num_data; ++i) {
+                    xml.scopedElement("TestCase").writeAttribute("name", in.data[i]->m_name)
+                        .writeAttribute("testsuite", in.data[i]->m_test_suite)
+                        .writeAttribute("filename", skipPathFromFilename(in.data[i]->m_file.c_str()))
+                        .writeAttribute("line", line(in.data[i]->m_line))
+                        .writeAttribute("skipped", in.data[i]->m_skip);
+                }
+                xml.scopedElement("OverallResultsTestCases")
+                        .writeAttribute("unskipped", in.run_stats->numTestCasesPassingFilters);
+            } else if(opt.list_test_suites) {
+                for(unsigned i = 0; i < in.num_data; ++i)
+                    xml.scopedElement("TestSuite").writeAttribute("name", in.data[i]->m_test_suite);
+                xml.scopedElement("OverallResultsTestCases")
+                        .writeAttribute("unskipped", in.run_stats->numTestCasesPassingFilters);
+                xml.scopedElement("OverallResultsTestSuites")
+                        .writeAttribute("unskipped", in.run_stats->numTestSuitesPassingFilters);
+            }
+            xml.endElement();
+        }
+
+        void test_run_start() override {
+            xml.writeDeclaration();
+
+            // remove .exe extension - mainly to have the same output on UNIX and Windows
+            std::string binary_name = skipPathFromFilename(opt.binary_name.c_str());
+#ifdef DOCTEST_PLATFORM_WINDOWS
+            if(binary_name.rfind(".exe") != std::string::npos)
+                binary_name = binary_name.substr(0, binary_name.length() - 4);
+#endif // DOCTEST_PLATFORM_WINDOWS
+
+            xml.startElement("doctest").writeAttribute("binary", binary_name);
+            if(opt.no_version == false)
+                xml.writeAttribute("version", DOCTEST_VERSION_STR);
+
+            // only the consequential ones (TODO: filters)
+            xml.scopedElement("Options")
+                    .writeAttribute("order_by", opt.order_by.c_str())
+                    .writeAttribute("rand_seed", opt.rand_seed)
+                    .writeAttribute("first", opt.first)
+                    .writeAttribute("last", opt.last)
+                    .writeAttribute("abort_after", opt.abort_after)
+                    .writeAttribute("subcase_filter_levels", opt.subcase_filter_levels)
+                    .writeAttribute("case_sensitive", opt.case_sensitive)
+                    .writeAttribute("no_throw", opt.no_throw)
+                    .writeAttribute("no_skip", opt.no_skip);
+        }
+
+        void test_run_end(const TestRunStats& p) override {
+            if(tc) // the TestSuite tag - only if there has been at least 1 test case
+                xml.endElement();
+
+            xml.scopedElement("OverallResultsAsserts")
+                    .writeAttribute("successes", p.numAsserts - p.numAssertsFailed)
+                    .writeAttribute("failures", p.numAssertsFailed);
+
+            xml.startElement("OverallResultsTestCases")
+                    .writeAttribute("successes",
+                                    p.numTestCasesPassingFilters - p.numTestCasesFailed)
+                    .writeAttribute("failures", p.numTestCasesFailed);
+            if(opt.no_skipped_summary == false)
+                xml.writeAttribute("skipped", p.numTestCases - p.numTestCasesPassingFilters);
+            xml.endElement();
+
+            xml.endElement();
+        }
+
+        void test_case_start(const TestCaseData& in) override {
+            test_case_start_impl(in);
+            xml.ensureTagClosed();
+        }
+
+        void test_case_reenter(const TestCaseData&) override {}
+
+        void test_case_end(const CurrentTestCaseStats& st) override {
+            xml.startElement("OverallResultsAsserts")
+                    .writeAttribute("successes",
+                                    st.numAssertsCurrentTest - st.numAssertsFailedCurrentTest)
+                    .writeAttribute("failures", st.numAssertsFailedCurrentTest)
+                    .writeAttribute("test_case_success", st.testCaseSuccess);
+            if(opt.duration)
+                xml.writeAttribute("duration", st.seconds);
+            if(tc->m_expected_failures)
+                xml.writeAttribute("expected_failures", tc->m_expected_failures);
+            xml.endElement();
+
+            xml.endElement();
+        }
+
+        void test_case_exception(const TestCaseException& e) override {
+            DOCTEST_LOCK_MUTEX(mutex)
+
+            xml.scopedElement("Exception")
+                    .writeAttribute("crash", e.is_crash)
+                    .writeText(e.error_string.c_str());
+        }
+
+        void subcase_start(const SubcaseSignature& in) override {
+            xml.startElement("SubCase")
+                    .writeAttribute("name", in.m_name)
+                    .writeAttribute("filename", skipPathFromFilename(in.m_file))
+                    .writeAttribute("line", line(in.m_line));
+            xml.ensureTagClosed();
+        }
+
+        void subcase_end() override { xml.endElement(); }
+
+        void log_assert(const AssertData& rb) override {
+            if(!rb.m_failed && !opt.success)
+                return;
+
+            DOCTEST_LOCK_MUTEX(mutex)
+
+            xml.startElement("Expression")
+                    .writeAttribute("success", !rb.m_failed)
+                    .writeAttribute("type", assertString(rb.m_at))
+                    .writeAttribute("filename", skipPathFromFilename(rb.m_file))
+                    .writeAttribute("line", line(rb.m_line));
+
+            xml.scopedElement("Original").writeText(rb.m_expr);
+
+            if(rb.m_threw)
+                xml.scopedElement("Exception").writeText(rb.m_exception.c_str());
+
+            if(rb.m_at & assertType::is_throws_as)
+                xml.scopedElement("ExpectedException").writeText(rb.m_exception_type);
+            if(rb.m_at & assertType::is_throws_with)
+                xml.scopedElement("ExpectedExceptionString").writeText(rb.m_exception_string.c_str());
+            if((rb.m_at & assertType::is_normal) && !rb.m_threw)
+                xml.scopedElement("Expanded").writeText(rb.m_decomp.c_str());
+
+            log_contexts();
+
+            xml.endElement();
+        }
+
+        void log_message(const MessageData& mb) override {
+            DOCTEST_LOCK_MUTEX(mutex)
+
+            xml.startElement("Message")
+                    .writeAttribute("type", failureString(mb.m_severity))
+                    .writeAttribute("filename", skipPathFromFilename(mb.m_file))
+                    .writeAttribute("line", line(mb.m_line));
+
+            xml.scopedElement("Text").writeText(mb.m_string.c_str());
+
+            log_contexts();
+
+            xml.endElement();
+        }
+
+        void test_case_skipped(const TestCaseData& in) override {
+            if(opt.no_skipped_summary == false) {
+                test_case_start_impl(in);
+                xml.writeAttribute("skipped", "true");
+                xml.endElement();
+            }
+        }
+    };
+
+    DOCTEST_REGISTER_REPORTER("xml", 0, XmlReporter);
+
+    void fulltext_log_assert_to_stream(std::ostream& s, const AssertData& rb) {
+        if((rb.m_at & (assertType::is_throws_as | assertType::is_throws_with)) ==
+            0) //!OCLINT bitwise operator in conditional
+            s << Color::Cyan << assertString(rb.m_at) << "( " << rb.m_expr << " ) "
+                << Color::None;
+
+        if(rb.m_at & assertType::is_throws) { //!OCLINT bitwise operator in conditional
+            s << (rb.m_threw ? "threw as expected!" : "did NOT throw at all!") << "\n";
+        } else if((rb.m_at & assertType::is_throws_as) &&
+                    (rb.m_at & assertType::is_throws_with)) { //!OCLINT
+            s << Color::Cyan << assertString(rb.m_at) << "( " << rb.m_expr << ", \""
+                << rb.m_exception_string.c_str()
+                << "\", " << rb.m_exception_type << " ) " << Color::None;
+            if(rb.m_threw) {
+                if(!rb.m_failed) {
+                    s << "threw as expected!\n";
+                } else {
+                    s << "threw a DIFFERENT exception! (contents: " << rb.m_exception << ")\n";
+                }
+            } else {
+                s << "did NOT throw at all!\n";
+            }
+        } else if(rb.m_at &
+                    assertType::is_throws_as) { //!OCLINT bitwise operator in conditional
+            s << Color::Cyan << assertString(rb.m_at) << "( " << rb.m_expr << ", "
+                << rb.m_exception_type << " ) " << Color::None
+                << (rb.m_threw ? (rb.m_threw_as ? "threw as expected!" :
+                                                "threw a DIFFERENT exception: ") :
+                                "did NOT throw at all!")
+                << Color::Cyan << rb.m_exception << "\n";
+        } else if(rb.m_at &
+                    assertType::is_throws_with) { //!OCLINT bitwise operator in conditional
+            s << Color::Cyan << assertString(rb.m_at) << "( " << rb.m_expr << ", \""
+                << rb.m_exception_string.c_str()
+                << "\" ) " << Color::None
+                << (rb.m_threw ? (!rb.m_failed ? "threw as expected!" :
+                                                "threw a DIFFERENT exception: ") :
+                                "did NOT throw at all!")
+                << Color::Cyan << rb.m_exception << "\n";
+        } else if(rb.m_at & assertType::is_nothrow) { //!OCLINT bitwise operator in conditional
+            s << (rb.m_threw ? "THREW exception: " : "didn't throw!") << Color::Cyan
+                << rb.m_exception << "\n";
+        } else {
+            s << (rb.m_threw ? "THREW exception: " :
+                                (!rb.m_failed ? "is correct!\n" : "is NOT correct!\n"));
+            if(rb.m_threw)
+                s << rb.m_exception << "\n";
+            else
+                s << "  values: " << assertString(rb.m_at) << "( " << rb.m_decomp << " )\n";
+        }
+    }
+
+    // TODO:
+    // - log_message()
+    // - respond to queries
+    // - honor remaining options
+    // - more attributes in tags
+    struct JUnitReporter : public IReporter
+    {
+        XmlWriter xml;
+        DOCTEST_DECLARE_MUTEX(mutex)
+        Timer timer;
+        std::vector<String> deepestSubcaseStackNames;
+
+        struct JUnitTestCaseData
+        {
+            static std::string getCurrentTimestamp() {
+                // Beware, this is not reentrant because of backward compatibility issues
+                // Also, UTC only, again because of backward compatibility (%z is C++11)
+                time_t rawtime;
+                std::time(&rawtime);
+                auto const timeStampSize = sizeof("2017-01-16T17:06:45Z");
+
+                std::tm timeInfo;
+#ifdef DOCTEST_PLATFORM_WINDOWS
+                gmtime_s(&timeInfo, &rawtime);
+#else // DOCTEST_PLATFORM_WINDOWS
+                gmtime_r(&rawtime, &timeInfo);
+#endif // DOCTEST_PLATFORM_WINDOWS
+
+                char timeStamp[timeStampSize];
+                const char* const fmt = "%Y-%m-%dT%H:%M:%SZ";
+
+                std::strftime(timeStamp, timeStampSize, fmt, &timeInfo);
+                return std::string(timeStamp);
+            }
+
+            struct JUnitTestMessage
+            {
+                JUnitTestMessage(const std::string& _message, const std::string& _type, const std::string& _details)
+                    : message(_message), type(_type), details(_details) {}
+
+                JUnitTestMessage(const std::string& _message, const std::string& _details)
+                    : message(_message), type(), details(_details) {}
+
+                std::string message, type, details;
+            };
+
+            struct JUnitTestCase
+            {
+                JUnitTestCase(const std::string& _classname, const std::string& _name)
+                    : classname(_classname), name(_name), time(0), failures() {}
+
+                std::string classname, name;
+                double time;
+                std::vector<JUnitTestMessage> failures, errors;
+            };
+
+            void add(const std::string& classname, const std::string& name) {
+                testcases.emplace_back(classname, name);
+            }
+
+            void appendSubcaseNamesToLastTestcase(std::vector<String> nameStack) {
+                for(auto& curr: nameStack)
+                    if(curr.size())
+                        testcases.back().name += std::string("/") + curr.c_str();
+            }
+
+            void addTime(double time) {
+                if(time < 1e-4)
+                    time = 0;
+                testcases.back().time = time;
+                totalSeconds += time;
+            }
+
+            void addFailure(const std::string& message, const std::string& type, const std::string& details) {
+                testcases.back().failures.emplace_back(message, type, details);
+                ++totalFailures;
+            }
+
+            void addError(const std::string& message, const std::string& details) {
+                testcases.back().errors.emplace_back(message, details);
+                ++totalErrors;
+            }
+
+            std::vector<JUnitTestCase> testcases;
+            double totalSeconds = 0;
+            int totalErrors = 0, totalFailures = 0;
+        };
+
+        JUnitTestCaseData testCaseData;
+
+        // caching pointers/references to objects of these types - safe to do
+        const ContextOptions& opt;
+        const TestCaseData*   tc = nullptr;
+
+        JUnitReporter(const ContextOptions& co)
+                : xml(*co.cout)
+                , opt(co) {}
+
+        unsigned line(unsigned l) const { return opt.no_line_numbers ? 0 : l; }
+
+        // =========================================================================================
+        // WHAT FOLLOWS ARE OVERRIDES OF THE VIRTUAL METHODS OF THE REPORTER INTERFACE
+        // =========================================================================================
+
+        void report_query(const QueryData&) override {
+            xml.writeDeclaration();
+        }
+
+        void test_run_start() override {
+            xml.writeDeclaration();
+        }
+
+        void test_run_end(const TestRunStats& p) override {
+            // remove .exe extension - mainly to have the same output on UNIX and Windows
+            std::string binary_name = skipPathFromFilename(opt.binary_name.c_str());
+#ifdef DOCTEST_PLATFORM_WINDOWS
+            if(binary_name.rfind(".exe") != std::string::npos)
+                binary_name = binary_name.substr(0, binary_name.length() - 4);
+#endif // DOCTEST_PLATFORM_WINDOWS
+            xml.startElement("testsuites");
+            xml.startElement("testsuite").writeAttribute("name", binary_name)
+                    .writeAttribute("errors", testCaseData.totalErrors)
+                    .writeAttribute("failures", testCaseData.totalFailures)
+                    .writeAttribute("tests", p.numAsserts);
+            if(opt.no_time_in_output == false) {
+                xml.writeAttribute("time", testCaseData.totalSeconds);
+                xml.writeAttribute("timestamp", JUnitTestCaseData::getCurrentTimestamp());
+            }
+            if(opt.no_version == false)
+                xml.writeAttribute("doctest_version", DOCTEST_VERSION_STR);
+
+            for(const auto& testCase : testCaseData.testcases) {
+                xml.startElement("testcase")
+                    .writeAttribute("classname", testCase.classname)
+                    .writeAttribute("name", testCase.name);
+                if(opt.no_time_in_output == false)
+                    xml.writeAttribute("time", testCase.time);
+                // This is not ideal, but it should be enough to mimic gtest's junit output.
+                xml.writeAttribute("status", "run");
+
+                for(const auto& failure : testCase.failures) {
+                    xml.scopedElement("failure")
+                        .writeAttribute("message", failure.message)
+                        .writeAttribute("type", failure.type)
+                        .writeText(failure.details, false);
+                }
+
+                for(const auto& error : testCase.errors) {
+                    xml.scopedElement("error")
+                        .writeAttribute("message", error.message)
+                        .writeText(error.details);
+                }
+
+                xml.endElement();
+            }
+            xml.endElement();
+            xml.endElement();
+        }
+
+        void test_case_start(const TestCaseData& in) override {
+            testCaseData.add(skipPathFromFilename(in.m_file.c_str()), in.m_name);
+            timer.start();
+        }
+
+        void test_case_reenter(const TestCaseData& in) override {
+            testCaseData.addTime(timer.getElapsedSeconds());
+            testCaseData.appendSubcaseNamesToLastTestcase(deepestSubcaseStackNames);
+            deepestSubcaseStackNames.clear();
+
+            timer.start();
+            testCaseData.add(skipPathFromFilename(in.m_file.c_str()), in.m_name);
+        }
+
+        void test_case_end(const CurrentTestCaseStats&) override {
+            testCaseData.addTime(timer.getElapsedSeconds());
+            testCaseData.appendSubcaseNamesToLastTestcase(deepestSubcaseStackNames);
+            deepestSubcaseStackNames.clear();
+        }
+
+        void test_case_exception(const TestCaseException& e) override {
+            DOCTEST_LOCK_MUTEX(mutex)
+            testCaseData.addError("exception", e.error_string.c_str());
+        }
+
+        void subcase_start(const SubcaseSignature& in) override {
+            deepestSubcaseStackNames.push_back(in.m_name);
+        }
+
+        void subcase_end() override {}
+
+        void log_assert(const AssertData& rb) override {
+            if(!rb.m_failed) // report only failures & ignore the `success` option
+                return;
+
+            DOCTEST_LOCK_MUTEX(mutex)
+
+            std::ostringstream os;
+            os << skipPathFromFilename(rb.m_file) << (opt.gnu_file_line ? ":" : "(")
+              << line(rb.m_line) << (opt.gnu_file_line ? ":" : "):") << std::endl;
+
+            fulltext_log_assert_to_stream(os, rb);
+            log_contexts(os);
+            testCaseData.addFailure(rb.m_decomp.c_str(), assertString(rb.m_at), os.str());
+        }
+
+        void log_message(const MessageData& mb) override {
+            if(mb.m_severity & assertType::is_warn) // report only failures
+                return;
+
+            DOCTEST_LOCK_MUTEX(mutex)
+
+            std::ostringstream os;
+            os << skipPathFromFilename(mb.m_file) << (opt.gnu_file_line ? ":" : "(")
+              << line(mb.m_line) << (opt.gnu_file_line ? ":" : "):") << std::endl;
+
+            os << mb.m_string.c_str() << "\n";
+            log_contexts(os);
+
+            testCaseData.addFailure(mb.m_string.c_str(),
+                mb.m_severity & assertType::is_check ? "FAIL_CHECK" : "FAIL", os.str());
+        }
+
+        void test_case_skipped(const TestCaseData&) override {}
+
+        void log_contexts(std::ostringstream& s) {
+            int num_contexts = get_num_active_contexts();
+            if(num_contexts) {
