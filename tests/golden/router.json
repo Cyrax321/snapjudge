@@ -1,0 +1,177 @@
+{
+  "route_cases": [
+    {
+      "model": "english",
+      "repo": "snapjudge/snapjudge",
+      "reason": "English Latin text",
+      "detection": {
+        "script": "latin",
+        "script_profile": {
+          "latin": 1.0
+        },
+        "language": "en",
+        "is_english": true,
+        "language_undecided": false,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "workflow": null
+    },
+    {
+      "model": "english",
+      "repo": "snapjudge/snapjudge",
+      "reason": "Latin script, language not identified and no non-English letters; using default (english)",
+      "detection": {
+        "script": "latin",
+        "script_profile": {
+          "latin": 1.0
+        },
+        "language": null,
+        "is_english": true,
+        "language_undecided": true,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "workflow": null
+    },
+    {
+      "model": "english",
+      "repo": "snapjudge/snapjudge",
+      "reason": "English Latin text",
+      "detection": {
+        "script": "latin",
+        "script_profile": {
+          "latin": 1.0
+        },
+        "language": "en",
+        "is_english": true,
+        "language_undecided": false,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "workflow": null
+    },
+    {
+      "model": "english",
+      "repo": "snapjudge/snapjudge",
+      "reason": "Latin script, language not identified and no non-English letters; using default (english)",
+      "detection": {
+        "script": "latin",
+        "script_profile": {
+          "latin": 1.0
+        },
+        "language": null,
+        "is_english": true,
+        "language_undecided": true,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "workflow": null
+    },
+    {
+      "model": "english",
+      "repo": "snapjudge/snapjudge",
+      "reason": "Latin script, language not identified and no non-English letters; using default (english)",
+      "detection": {
+        "script": "latin",
+        "script_profile": {
+          "latin": 1.0
+        },
+        "language": null,
+        "is_english": true,
+        "language_undecided": true,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "workflow": null
+    },
+    {
+      "model": "english",
+      "repo": "snapjudge/snapjudge",
+      "reason": "Latin script, language not identified and no non-English letters; using default (english)",
+      "detection": {
+        "script": "latin",
+        "script_profile": {
+          "latin": 1.0
+        },
+        "language": null,
+        "is_english": true,
+        "language_undecided": true,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "workflow": null
+    },
+    {
+      "model": "english",
+      "repo": "snapjudge/snapjudge",
+      "reason": "no letters detected in state; using default (english)",
+      "detection": {
+        "script": "unknown",
+        "script_profile": {},
+        "language": null,
+        "is_english": true,
+        "language_undecided": true,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "workflow": null
+    },
+    {
+      "model": "multilingual",
+      "repo": "snapjudge/snapjudge/multilingual",
+      "reason": "explicit lang='de'",
+      "detection": null,
+      "workflow": null
+    },
+    {
+      "model": "english",
+      "repo": "snapjudge/snapjudge",
+      "reason": "explicit lang='en-US'",
+      "detection": null,
+      "workflow": null
+    },
+    {
+      "model": "english",
+      "repo": "snapjudge/snapjudge",
+      "reason": "explicit lang='en_US.UTF-8'",
+      "detection": null,
+      "workflow": null
+    },
+    {
+      "model": "multilingual",
+      "repo": "snapjudge/snapjudge/multilingual",
+      "reason": "explicit model='ml'",
+      "detection": null,
+      "workflow": null
+    },
+    {
+      "model": "typed-decisions",
+      "repo": "snapjudge/snapjudge/typed-decisions",
+      "reason": "explicit model='typed'",
+      "detection": null,
+      "workflow": null
+    },
+    {
+      "model": "typed-decisions",
+      "repo": "snapjudge/snapjudge/typed-decisions",
+      "reason": "explicit task='typed_decisions'",
+      "detection": null,
+      "workflow": null
+    },
+    {
+      "model": "multilingual",
+      "repo": "snapjudge/snapjudge/multilingual",
+      "reason": "lang_guess: the caller identified this as non-English text",
+      "detection": null,
+      "workflow": null
+    },
+    {
+      "model": "english",
+      "repo": "snapjudge/snapjudge",
+      "reason": "lang_guess: the caller identified this as English text",
+      "detection": null,
+      "workflow": null
+    }
+  ]
+}
