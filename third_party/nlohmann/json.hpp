@@ -16518,3 +16518,593 @@ class binary_writer
                 oa->write_character(to_char_type('L'));  // int64
             }
             write_number(static_cast<std::int64_t>(n), use_bjdata);
+        }
+        // LCOV_EXCL_START
+        else
+        {
+            if (add_prefix)
+            {
+                oa->write_character(to_char_type('H'));  // high-precision number
+            }
+
+            const auto number = BasicJsonType(n).dump();
+            write_number_with_ubjson_prefix(number.size(), true, use_bjdata);
+            for (std::size_t i = 0; i < number.size(); ++i)
+            {
+                oa->write_character(to_char_type(static_cast<std::uint8_t>(number[i])));
+            }
+        }
+        // LCOV_EXCL_STOP
+    }
+
+    /*!
+    @brief determine the type prefix of container values
+    */
+    CharType ubjson_prefix(const BasicJsonType& j, const bool use_bjdata) const noexcept
+    {
+        switch (j.type())
+        {
+            case value_t::null:
+                return 'Z';
+
+            case value_t::boolean:
+                return j.m_data.m_value.boolean ? 'T' : 'F';
+
+            case value_t::number_integer:
+            {
+                if ((std::numeric_limits<std::int8_t>::min)() <= j.m_data.m_value.number_integer && j.m_data.m_value.number_integer <= (std::numeric_limits<std::int8_t>::max)())
+                {
+                    return 'i';
+                }
+                if ((std::numeric_limits<std::uint8_t>::min)() <= j.m_data.m_value.number_integer && j.m_data.m_value.number_integer <= (std::numeric_limits<std::uint8_t>::max)())
+                {
+                    return 'U';
+                }
+                if ((std::numeric_limits<std::int16_t>::min)() <= j.m_data.m_value.number_integer && j.m_data.m_value.number_integer <= (std::numeric_limits<std::int16_t>::max)())
+                {
+                    return 'I';
+                }
+                if (use_bjdata && ((std::numeric_limits<std::uint16_t>::min)() <= j.m_data.m_value.number_integer && j.m_data.m_value.number_integer <= (std::numeric_limits<std::uint16_t>::max)()))
+                {
+                    return 'u';
+                }
+                if ((std::numeric_limits<std::int32_t>::min)() <= j.m_data.m_value.number_integer && j.m_data.m_value.number_integer <= (std::numeric_limits<std::int32_t>::max)())
+                {
+                    return 'l';
+                }
+                if (use_bjdata && ((std::numeric_limits<std::uint32_t>::min)() <= j.m_data.m_value.number_integer && j.m_data.m_value.number_integer <= (std::numeric_limits<std::uint32_t>::max)()))
+                {
+                    return 'm';
+                }
+                if ((std::numeric_limits<std::int64_t>::min)() <= j.m_data.m_value.number_integer && j.m_data.m_value.number_integer <= (std::numeric_limits<std::int64_t>::max)())
+                {
+                    return 'L';
+                }
+                // anything else is treated as high-precision number
+                return 'H'; // LCOV_EXCL_LINE
+            }
+
+            case value_t::number_unsigned:
+            {
+                if (j.m_data.m_value.number_unsigned <= static_cast<std::uint64_t>((std::numeric_limits<std::int8_t>::max)()))
+                {
+                    return 'i';
+                }
+                if (j.m_data.m_value.number_unsigned <= static_cast<std::uint64_t>((std::numeric_limits<std::uint8_t>::max)()))
+                {
+                    return 'U';
+                }
+                if (j.m_data.m_value.number_unsigned <= static_cast<std::uint64_t>((std::numeric_limits<std::int16_t>::max)()))
+                {
+                    return 'I';
+                }
+                if (use_bjdata && j.m_data.m_value.number_unsigned <= static_cast<std::uint64_t>((std::numeric_limits<std::uint16_t>::max)()))
+                {
+                    return 'u';
+                }
+                if (j.m_data.m_value.number_unsigned <= static_cast<std::uint64_t>((std::numeric_limits<std::int32_t>::max)()))
+                {
+                    return 'l';
+                }
+                if (use_bjdata && j.m_data.m_value.number_unsigned <= static_cast<std::uint64_t>((std::numeric_limits<std::uint32_t>::max)()))
+                {
+                    return 'm';
+                }
+                if (j.m_data.m_value.number_unsigned <= static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()))
+                {
+                    return 'L';
+                }
+                if (use_bjdata && j.m_data.m_value.number_unsigned <= (std::numeric_limits<std::uint64_t>::max)())
+                {
+                    return 'M';
+                }
+                // anything else is treated as high-precision number
+                return 'H'; // LCOV_EXCL_LINE
+            }
+
+            case value_t::number_float:
+                return get_ubjson_float_prefix(j.m_data.m_value.number_float);
+
+            case value_t::string:
+                return 'S';
+
+            case value_t::array: // fallthrough
+            case value_t::binary:
+                return '[';
+
+            case value_t::object:
+                return '{';
+
+            case value_t::discarded:
+            default:  // discarded values
+                return 'N';
+        }
+    }
+
+    static constexpr CharType get_ubjson_float_prefix(float /*unused*/)
+    {
+        return 'd';  // float 32
+    }
+
+    static constexpr CharType get_ubjson_float_prefix(double /*unused*/)
+    {
+        return 'D';  // float 64
+    }
+
+    /*!
+    @return false if the object is successfully converted to a bjdata ndarray, true if the type or size is invalid
+    */
+    bool write_bjdata_ndarray(const typename BasicJsonType::object_t& value, const bool use_count, const bool use_type)
+    {
+        std::map<string_t, CharType> bjdtype = {{"uint8", 'U'},  {"int8", 'i'},  {"uint16", 'u'}, {"int16", 'I'},
+            {"uint32", 'm'}, {"int32", 'l'}, {"uint64", 'M'}, {"int64", 'L'}, {"single", 'd'}, {"double", 'D'}, {"char", 'C'}
+        };
+
+        string_t key = "_ArrayType_";
+        auto it = bjdtype.find(static_cast<string_t>(value.at(key)));
+        if (it == bjdtype.end())
+        {
+            return true;
+        }
+        CharType dtype = it->second;
+
+        key = "_ArraySize_";
+        std::size_t len = (value.at(key).empty() ? 0 : 1);
+        for (const auto& el : value.at(key))
+        {
+            len *= static_cast<std::size_t>(el.m_data.m_value.number_unsigned);
+        }
+
+        key = "_ArrayData_";
+        if (value.at(key).size() != len)
+        {
+            return true;
+        }
+
+        oa->write_character('[');
+        oa->write_character('$');
+        oa->write_character(dtype);
+        oa->write_character('#');
+
+        key = "_ArraySize_";
+        write_ubjson(value.at(key), use_count, use_type, true,  true);
+
+        key = "_ArrayData_";
+        if (dtype == 'U' || dtype == 'C')
+        {
+            for (const auto& el : value.at(key))
+            {
+                write_number(static_cast<std::uint8_t>(el.m_data.m_value.number_unsigned), true);
+            }
+        }
+        else if (dtype == 'i')
+        {
+            for (const auto& el : value.at(key))
+            {
+                write_number(static_cast<std::int8_t>(el.m_data.m_value.number_integer), true);
+            }
+        }
+        else if (dtype == 'u')
+        {
+            for (const auto& el : value.at(key))
+            {
+                write_number(static_cast<std::uint16_t>(el.m_data.m_value.number_unsigned), true);
+            }
+        }
+        else if (dtype == 'I')
+        {
+            for (const auto& el : value.at(key))
+            {
+                write_number(static_cast<std::int16_t>(el.m_data.m_value.number_integer), true);
+            }
+        }
+        else if (dtype == 'm')
+        {
+            for (const auto& el : value.at(key))
+            {
+                write_number(static_cast<std::uint32_t>(el.m_data.m_value.number_unsigned), true);
+            }
+        }
+        else if (dtype == 'l')
+        {
+            for (const auto& el : value.at(key))
+            {
+                write_number(static_cast<std::int32_t>(el.m_data.m_value.number_integer), true);
+            }
+        }
+        else if (dtype == 'M')
+        {
+            for (const auto& el : value.at(key))
+            {
+                write_number(static_cast<std::uint64_t>(el.m_data.m_value.number_unsigned), true);
+            }
+        }
+        else if (dtype == 'L')
+        {
+            for (const auto& el : value.at(key))
+            {
+                write_number(static_cast<std::int64_t>(el.m_data.m_value.number_integer), true);
+            }
+        }
+        else if (dtype == 'd')
+        {
+            for (const auto& el : value.at(key))
+            {
+                write_number(static_cast<float>(el.m_data.m_value.number_float), true);
+            }
+        }
+        else if (dtype == 'D')
+        {
+            for (const auto& el : value.at(key))
+            {
+                write_number(static_cast<double>(el.m_data.m_value.number_float), true);
+            }
+        }
+        return false;
+    }
+
+    ///////////////////////
+    // Utility functions //
+    ///////////////////////
+
+    /*
+    @brief write a number to output input
+    @param[in] n number of type @a NumberType
+    @param[in] OutputIsLittleEndian Set to true if output data is
+                                 required to be little endian
+    @tparam NumberType the type of the number
+
+    @note This function needs to respect the system's endianness, because bytes
+          in CBOR, MessagePack, and UBJSON are stored in network order (big
+          endian) and therefore need reordering on little endian systems.
+          On the other hand, BSON and BJData use little endian and should reorder
+          on big endian systems.
+    */
+    template<typename NumberType>
+    void write_number(const NumberType n, const bool OutputIsLittleEndian = false)
+    {
+        // step 1: write number to array of length NumberType
+        std::array<CharType, sizeof(NumberType)> vec{};
+        std::memcpy(vec.data(), &n, sizeof(NumberType));
+
+        // step 2: write array to output (with possible reordering)
+        if (is_little_endian != OutputIsLittleEndian)
+        {
+            // reverse byte order prior to conversion if necessary
+            std::reverse(vec.begin(), vec.end());
+        }
+
+        oa->write_characters(vec.data(), sizeof(NumberType));
+    }
+
+    void write_compact_float(const number_float_t n, detail::input_format_t format)
+    {
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wfloat-equal"
+#endif
+        if (static_cast<double>(n) >= static_cast<double>(std::numeric_limits<float>::lowest()) &&
+                static_cast<double>(n) <= static_cast<double>((std::numeric_limits<float>::max)()) &&
+                static_cast<double>(static_cast<float>(n)) == static_cast<double>(n))
+        {
+            oa->write_character(format == detail::input_format_t::cbor
+                                ? get_cbor_float_prefix(static_cast<float>(n))
+                                : get_msgpack_float_prefix(static_cast<float>(n)));
+            write_number(static_cast<float>(n));
+        }
+        else
+        {
+            oa->write_character(format == detail::input_format_t::cbor
+                                ? get_cbor_float_prefix(n)
+                                : get_msgpack_float_prefix(n));
+            write_number(n);
+        }
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#endif
+    }
+
+  public:
+    // The following to_char_type functions are implement the conversion
+    // between uint8_t and CharType. In case CharType is not unsigned,
+    // such a conversion is required to allow values greater than 128.
+    // See <https://github.com/nlohmann/json/issues/1286> for a discussion.
+    template < typename C = CharType,
+               enable_if_t < std::is_signed<C>::value && std::is_signed<char>::value > * = nullptr >
+    static constexpr CharType to_char_type(std::uint8_t x) noexcept
+    {
+        return *reinterpret_cast<char*>(&x);
+    }
+
+    template < typename C = CharType,
+               enable_if_t < std::is_signed<C>::value && std::is_unsigned<char>::value > * = nullptr >
+    static CharType to_char_type(std::uint8_t x) noexcept
+    {
+        static_assert(sizeof(std::uint8_t) == sizeof(CharType), "size of CharType must be equal to std::uint8_t");
+        static_assert(std::is_trivial<CharType>::value, "CharType must be trivial");
+        CharType result;
+        std::memcpy(&result, &x, sizeof(x));
+        return result;
+    }
+
+    template<typename C = CharType,
+             enable_if_t<std::is_unsigned<C>::value>* = nullptr>
+    static constexpr CharType to_char_type(std::uint8_t x) noexcept
+    {
+        return x;
+    }
+
+    template < typename InputCharType, typename C = CharType,
+               enable_if_t <
+                   std::is_signed<C>::value &&
+                   std::is_signed<char>::value &&
+                   std::is_same<char, typename std::remove_cv<InputCharType>::type>::value
+                   > * = nullptr >
+    static constexpr CharType to_char_type(InputCharType x) noexcept
+    {
+        return x;
+    }
+
+  private:
+    /// whether we can assume little endianness
+    const bool is_little_endian = little_endianness();
+
+    /// the output
+    output_adapter_t<CharType> oa = nullptr;
+};
+
+}  // namespace detail
+NLOHMANN_JSON_NAMESPACE_END
+
+// #include <nlohmann/detail/output/output_adapters.hpp>
+
+// #include <nlohmann/detail/output/serializer.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2008-2009 Björn Hoehrmann <bjoern@hoehrmann.de>
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
+
+
+#include <algorithm> // reverse, remove, fill, find, none_of
+#include <array> // array
+#include <clocale> // localeconv, lconv
+#include <cmath> // labs, isfinite, isnan, signbit
+#include <cstddef> // size_t, ptrdiff_t
+#include <cstdint> // uint8_t
+#include <cstdio> // snprintf
+#include <limits> // numeric_limits
+#include <string> // string, char_traits
+#include <iomanip> // setfill, setw
+#include <type_traits> // is_same
+#include <utility> // move
+
+// #include <nlohmann/detail/conversions/to_chars.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2009 Florian Loitsch <https://florian.loitsch.com/>
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
+
+
+#include <array> // array
+#include <cmath>   // signbit, isfinite
+#include <cstdint> // intN_t, uintN_t
+#include <cstring> // memcpy, memmove
+#include <limits> // numeric_limits
+#include <type_traits> // conditional
+
+// #include <nlohmann/detail/macro_scope.hpp>
+
+
+NLOHMANN_JSON_NAMESPACE_BEGIN
+namespace detail
+{
+
+/*!
+@brief implements the Grisu2 algorithm for binary to decimal floating-point
+conversion.
+
+This implementation is a slightly modified version of the reference
+implementation which may be obtained from
+http://florian.loitsch.com/publications (bench.tar.gz).
+
+The code is distributed under the MIT license, Copyright (c) 2009 Florian Loitsch.
+
+For a detailed description of the algorithm see:
+
+[1] Loitsch, "Printing Floating-Point Numbers Quickly and Accurately with
+    Integers", Proceedings of the ACM SIGPLAN 2010 Conference on Programming
+    Language Design and Implementation, PLDI 2010
+[2] Burger, Dybvig, "Printing Floating-Point Numbers Quickly and Accurately",
+    Proceedings of the ACM SIGPLAN 1996 Conference on Programming Language
+    Design and Implementation, PLDI 1996
+*/
+namespace dtoa_impl
+{
+
+template<typename Target, typename Source>
+Target reinterpret_bits(const Source source)
+{
+    static_assert(sizeof(Target) == sizeof(Source), "size mismatch");
+
+    Target target;
+    std::memcpy(&target, &source, sizeof(Source));
+    return target;
+}
+
+struct diyfp // f * 2^e
+{
+    static constexpr int kPrecision = 64; // = q
+
+    std::uint64_t f = 0;
+    int e = 0;
+
+    constexpr diyfp(std::uint64_t f_, int e_) noexcept : f(f_), e(e_) {}
+
+    /*!
+    @brief returns x - y
+    @pre x.e == y.e and x.f >= y.f
+    */
+    static diyfp sub(const diyfp& x, const diyfp& y) noexcept
+    {
+        JSON_ASSERT(x.e == y.e);
+        JSON_ASSERT(x.f >= y.f);
+
+        return {x.f - y.f, x.e};
+    }
+
+    /*!
+    @brief returns x * y
+    @note The result is rounded. (Only the upper q bits are returned.)
+    */
+    static diyfp mul(const diyfp& x, const diyfp& y) noexcept
+    {
+        static_assert(kPrecision == 64, "internal error");
+
+        // Computes:
+        //  f = round((x.f * y.f) / 2^q)
+        //  e = x.e + y.e + q
+
+        // Emulate the 64-bit * 64-bit multiplication:
+        //
+        // p = u * v
+        //   = (u_lo + 2^32 u_hi) (v_lo + 2^32 v_hi)
+        //   = (u_lo v_lo         ) + 2^32 ((u_lo v_hi         ) + (u_hi v_lo         )) + 2^64 (u_hi v_hi         )
+        //   = (p0                ) + 2^32 ((p1                ) + (p2                )) + 2^64 (p3                )
+        //   = (p0_lo + 2^32 p0_hi) + 2^32 ((p1_lo + 2^32 p1_hi) + (p2_lo + 2^32 p2_hi)) + 2^64 (p3                )
+        //   = (p0_lo             ) + 2^32 (p0_hi + p1_lo + p2_lo                      ) + 2^64 (p1_hi + p2_hi + p3)
+        //   = (p0_lo             ) + 2^32 (Q                                          ) + 2^64 (H                 )
+        //   = (p0_lo             ) + 2^32 (Q_lo + 2^32 Q_hi                           ) + 2^64 (H                 )
+        //
+        // (Since Q might be larger than 2^32 - 1)
+        //
+        //   = (p0_lo + 2^32 Q_lo) + 2^64 (Q_hi + H)
+        //
+        // (Q_hi + H does not overflow a 64-bit int)
+        //
+        //   = p_lo + 2^64 p_hi
+
+        const std::uint64_t u_lo = x.f & 0xFFFFFFFFu;
+        const std::uint64_t u_hi = x.f >> 32u;
+        const std::uint64_t v_lo = y.f & 0xFFFFFFFFu;
+        const std::uint64_t v_hi = y.f >> 32u;
+
+        const std::uint64_t p0 = u_lo * v_lo;
+        const std::uint64_t p1 = u_lo * v_hi;
+        const std::uint64_t p2 = u_hi * v_lo;
+        const std::uint64_t p3 = u_hi * v_hi;
+
+        const std::uint64_t p0_hi = p0 >> 32u;
+        const std::uint64_t p1_lo = p1 & 0xFFFFFFFFu;
+        const std::uint64_t p1_hi = p1 >> 32u;
+        const std::uint64_t p2_lo = p2 & 0xFFFFFFFFu;
+        const std::uint64_t p2_hi = p2 >> 32u;
+
+        std::uint64_t Q = p0_hi + p1_lo + p2_lo;
+
+        // The full product might now be computed as
+        //
+        // p_hi = p3 + p2_hi + p1_hi + (Q >> 32)
+        // p_lo = p0_lo + (Q << 32)
+        //
+        // But in this particular case here, the full p_lo is not required.
+        // Effectively we only need to add the highest bit in p_lo to p_hi (and
+        // Q_hi + 1 does not overflow).
+
+        Q += std::uint64_t{1} << (64u - 32u - 1u); // round, ties up
+
+        const std::uint64_t h = p3 + p2_hi + p1_hi + (Q >> 32u);
+
+        return {h, x.e + y.e + 64};
+    }
+
+    /*!
+    @brief normalize x such that the significand is >= 2^(q-1)
+    @pre x.f != 0
+    */
+    static diyfp normalize(diyfp x) noexcept
+    {
+        JSON_ASSERT(x.f != 0);
+
+        while ((x.f >> 63u) == 0)
+        {
+            x.f <<= 1u;
+            x.e--;
+        }
+
+        return x;
+    }
+
+    /*!
+    @brief normalize x such that the result has the exponent E
+    @pre e >= x.e and the upper e - x.e bits of x.f must be zero.
+    */
+    static diyfp normalize_to(const diyfp& x, const int target_exponent) noexcept
+    {
+        const int delta = x.e - target_exponent;
+
+        JSON_ASSERT(delta >= 0);
+        JSON_ASSERT(((x.f << delta) >> delta) == x.f);
+
+        return {x.f << delta, target_exponent};
+    }
+};
+
+struct boundaries
+{
+    diyfp w;
+    diyfp minus;
+    diyfp plus;
+};
+
+/*!
+Compute the (normalized) diyfp representing the input number 'value' and its
+boundaries.
+
+@pre value must be finite and positive
+*/
+template<typename FloatType>
+boundaries compute_boundaries(FloatType value)
+{
+    JSON_ASSERT(std::isfinite(value));
+    JSON_ASSERT(value > 0);
+
+    // Convert the IEEE representation into a diyfp.
+    //
+    // If v is denormal:
+    //      value = 0.F * 2^(1 - bias) = (          F) * 2^(1 - bias - (p-1))
+    // If v is normalized:
+    //      value = 1.F * 2^(E - bias) = (2^(p-1) + F) * 2^(E - bias - (p-1))
+
+    static_assert(std::numeric_limits<FloatType>::is_iec559,
+                  "internal error: dtoa_short requires an IEEE-754 floating-point implementation");
+
