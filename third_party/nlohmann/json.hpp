@@ -19468,3 +19468,593 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     using json_pointer = ::nlohmann::json_pointer<StringType>;
     template<typename T, typename SFINAE>
     using json_serializer = JSONSerializer<T, SFINAE>;
+    /// how to treat decoding errors
+    using error_handler_t = detail::error_handler_t;
+    /// how to treat CBOR tags
+    using cbor_tag_handler_t = detail::cbor_tag_handler_t;
+    /// helper type for initializer lists of basic_json values
+    using initializer_list_t = std::initializer_list<detail::json_ref<basic_json>>;
+
+    using input_format_t = detail::input_format_t;
+    /// SAX interface type, see @ref nlohmann::json_sax
+    using json_sax_t = json_sax<basic_json>;
+
+    ////////////////
+    // exceptions //
+    ////////////////
+
+    /// @name exceptions
+    /// Classes to implement user-defined exceptions.
+    /// @{
+
+    using exception = detail::exception;
+    using parse_error = detail::parse_error;
+    using invalid_iterator = detail::invalid_iterator;
+    using type_error = detail::type_error;
+    using out_of_range = detail::out_of_range;
+    using other_error = detail::other_error;
+
+    /// @}
+
+    /////////////////////
+    // container types //
+    /////////////////////
+
+    /// @name container types
+    /// The canonic container types to use @ref basic_json like any other STL
+    /// container.
+    /// @{
+
+    /// the type of elements in a basic_json container
+    using value_type = basic_json;
+
+    /// the type of an element reference
+    using reference = value_type&;
+    /// the type of an element const reference
+    using const_reference = const value_type&;
+
+    /// a type to represent differences between iterators
+    using difference_type = std::ptrdiff_t;
+    /// a type to represent container sizes
+    using size_type = std::size_t;
+
+    /// the allocator type
+    using allocator_type = AllocatorType<basic_json>;
+
+    /// the type of an element pointer
+    using pointer = typename std::allocator_traits<allocator_type>::pointer;
+    /// the type of an element const pointer
+    using const_pointer = typename std::allocator_traits<allocator_type>::const_pointer;
+
+    /// an iterator for a basic_json container
+    using iterator = iter_impl<basic_json>;
+    /// a const iterator for a basic_json container
+    using const_iterator = iter_impl<const basic_json>;
+    /// a reverse iterator for a basic_json container
+    using reverse_iterator = json_reverse_iterator<typename basic_json::iterator>;
+    /// a const reverse iterator for a basic_json container
+    using const_reverse_iterator = json_reverse_iterator<typename basic_json::const_iterator>;
+
+    /// @}
+
+    /// @brief returns the allocator associated with the container
+    /// @sa https://json.nlohmann.me/api/basic_json/get_allocator/
+    static allocator_type get_allocator()
+    {
+        return allocator_type();
+    }
+
+    /// @brief returns version information on the library
+    /// @sa https://json.nlohmann.me/api/basic_json/meta/
+    JSON_HEDLEY_WARN_UNUSED_RESULT
+    static basic_json meta()
+    {
+        basic_json result;
+
+        result["copyright"] = "(C) 2013-2023 Niels Lohmann";
+        result["name"] = "JSON for Modern C++";
+        result["url"] = "https://github.com/nlohmann/json";
+        result["version"]["string"] =
+            detail::concat(std::to_string(NLOHMANN_JSON_VERSION_MAJOR), '.',
+                           std::to_string(NLOHMANN_JSON_VERSION_MINOR), '.',
+                           std::to_string(NLOHMANN_JSON_VERSION_PATCH));
+        result["version"]["major"] = NLOHMANN_JSON_VERSION_MAJOR;
+        result["version"]["minor"] = NLOHMANN_JSON_VERSION_MINOR;
+        result["version"]["patch"] = NLOHMANN_JSON_VERSION_PATCH;
+
+#ifdef _WIN32
+        result["platform"] = "win32";
+#elif defined __linux__
+        result["platform"] = "linux";
+#elif defined __APPLE__
+        result["platform"] = "apple";
+#elif defined __unix__
+        result["platform"] = "unix";
+#else
+        result["platform"] = "unknown";
+#endif
+
+#if defined(__ICC) || defined(__INTEL_COMPILER)
+        result["compiler"] = {{"family", "icc"}, {"version", __INTEL_COMPILER}};
+#elif defined(__clang__)
+        result["compiler"] = {{"family", "clang"}, {"version", __clang_version__}};
+#elif defined(__GNUC__) || defined(__GNUG__)
+        result["compiler"] = {{"family", "gcc"}, {"version", detail::concat(
+                    std::to_string(__GNUC__), '.',
+                    std::to_string(__GNUC_MINOR__), '.',
+                    std::to_string(__GNUC_PATCHLEVEL__))
+            }
+        };
+#elif defined(__HP_cc) || defined(__HP_aCC)
+        result["compiler"] = "hp"
+#elif defined(__IBMCPP__)
+        result["compiler"] = {{"family", "ilecpp"}, {"version", __IBMCPP__}};
+#elif defined(_MSC_VER)
+        result["compiler"] = {{"family", "msvc"}, {"version", _MSC_VER}};
+#elif defined(__PGI)
+        result["compiler"] = {{"family", "pgcpp"}, {"version", __PGI}};
+#elif defined(__SUNPRO_CC)
+        result["compiler"] = {{"family", "sunpro"}, {"version", __SUNPRO_CC}};
+#else
+        result["compiler"] = {{"family", "unknown"}, {"version", "unknown"}};
+#endif
+
+#if defined(_MSVC_LANG)
+        result["compiler"]["c++"] = std::to_string(_MSVC_LANG);
+#elif defined(__cplusplus)
+        result["compiler"]["c++"] = std::to_string(__cplusplus);
+#else
+        result["compiler"]["c++"] = "unknown";
+#endif
+        return result;
+    }
+
+    ///////////////////////////
+    // JSON value data types //
+    ///////////////////////////
+
+    /// @name JSON value data types
+    /// The data types to store a JSON value. These types are derived from
+    /// the template arguments passed to class @ref basic_json.
+    /// @{
+
+    /// @brief default object key comparator type
+    /// The actual object key comparator type (@ref object_comparator_t) may be
+    /// different.
+    /// @sa https://json.nlohmann.me/api/basic_json/default_object_comparator_t/
+#if defined(JSON_HAS_CPP_14)
+    // use of transparent comparator avoids unnecessary repeated construction of temporaries
+    // in functions involving lookup by key with types other than object_t::key_type (aka. StringType)
+    using default_object_comparator_t = std::less<>;
+#else
+    using default_object_comparator_t = std::less<StringType>;
+#endif
+
+    /// @brief a type for an object
+    /// @sa https://json.nlohmann.me/api/basic_json/object_t/
+    using object_t = ObjectType<StringType,
+          basic_json,
+          default_object_comparator_t,
+          AllocatorType<std::pair<const StringType,
+          basic_json>>>;
+
+    /// @brief a type for an array
+    /// @sa https://json.nlohmann.me/api/basic_json/array_t/
+    using array_t = ArrayType<basic_json, AllocatorType<basic_json>>;
+
+    /// @brief a type for a string
+    /// @sa https://json.nlohmann.me/api/basic_json/string_t/
+    using string_t = StringType;
+
+    /// @brief a type for a boolean
+    /// @sa https://json.nlohmann.me/api/basic_json/boolean_t/
+    using boolean_t = BooleanType;
+
+    /// @brief a type for a number (integer)
+    /// @sa https://json.nlohmann.me/api/basic_json/number_integer_t/
+    using number_integer_t = NumberIntegerType;
+
+    /// @brief a type for a number (unsigned)
+    /// @sa https://json.nlohmann.me/api/basic_json/number_unsigned_t/
+    using number_unsigned_t = NumberUnsignedType;
+
+    /// @brief a type for a number (floating-point)
+    /// @sa https://json.nlohmann.me/api/basic_json/number_float_t/
+    using number_float_t = NumberFloatType;
+
+    /// @brief a type for a packed binary type
+    /// @sa https://json.nlohmann.me/api/basic_json/binary_t/
+    using binary_t = nlohmann::byte_container_with_subtype<BinaryType>;
+
+    /// @brief object key comparator type
+    /// @sa https://json.nlohmann.me/api/basic_json/object_comparator_t/
+    using object_comparator_t = detail::actual_object_comparator_t<basic_json>;
+
+    /// @}
+
+  private:
+
+    /// helper for exception-safe object creation
+    template<typename T, typename... Args>
+    JSON_HEDLEY_RETURNS_NON_NULL
+    static T* create(Args&& ... args)
+    {
+        AllocatorType<T> alloc;
+        using AllocatorTraits = std::allocator_traits<AllocatorType<T>>;
+
+        auto deleter = [&](T * obj)
+        {
+            AllocatorTraits::deallocate(alloc, obj, 1);
+        };
+        std::unique_ptr<T, decltype(deleter)> obj(AllocatorTraits::allocate(alloc, 1), deleter);
+        AllocatorTraits::construct(alloc, obj.get(), std::forward<Args>(args)...);
+        JSON_ASSERT(obj != nullptr);
+        return obj.release();
+    }
+
+    ////////////////////////
+    // JSON value storage //
+    ////////////////////////
+
+  JSON_PRIVATE_UNLESS_TESTED:
+    /*!
+    @brief a JSON value
+
+    The actual storage for a JSON value of the @ref basic_json class. This
+    union combines the different storage types for the JSON value types
+    defined in @ref value_t.
+
+    JSON type | value_t type    | used type
+    --------- | --------------- | ------------------------
+    object    | object          | pointer to @ref object_t
+    array     | array           | pointer to @ref array_t
+    string    | string          | pointer to @ref string_t
+    boolean   | boolean         | @ref boolean_t
+    number    | number_integer  | @ref number_integer_t
+    number    | number_unsigned | @ref number_unsigned_t
+    number    | number_float    | @ref number_float_t
+    binary    | binary          | pointer to @ref binary_t
+    null      | null            | *no value is stored*
+
+    @note Variable-length types (objects, arrays, and strings) are stored as
+    pointers. The size of the union should not exceed 64 bits if the default
+    value types are used.
+
+    @since version 1.0.0
+    */
+    union json_value
+    {
+        /// object (stored with pointer to save storage)
+        object_t* object;
+        /// array (stored with pointer to save storage)
+        array_t* array;
+        /// string (stored with pointer to save storage)
+        string_t* string;
+        /// binary (stored with pointer to save storage)
+        binary_t* binary;
+        /// boolean
+        boolean_t boolean;
+        /// number (integer)
+        number_integer_t number_integer;
+        /// number (unsigned integer)
+        number_unsigned_t number_unsigned;
+        /// number (floating-point)
+        number_float_t number_float;
+
+        /// default constructor (for null values)
+        json_value() = default;
+        /// constructor for booleans
+        json_value(boolean_t v) noexcept : boolean(v) {}
+        /// constructor for numbers (integer)
+        json_value(number_integer_t v) noexcept : number_integer(v) {}
+        /// constructor for numbers (unsigned)
+        json_value(number_unsigned_t v) noexcept : number_unsigned(v) {}
+        /// constructor for numbers (floating-point)
+        json_value(number_float_t v) noexcept : number_float(v) {}
+        /// constructor for empty values of a given type
+        json_value(value_t t)
+        {
+            switch (t)
+            {
+                case value_t::object:
+                {
+                    object = create<object_t>();
+                    break;
+                }
+
+                case value_t::array:
+                {
+                    array = create<array_t>();
+                    break;
+                }
+
+                case value_t::string:
+                {
+                    string = create<string_t>("");
+                    break;
+                }
+
+                case value_t::binary:
+                {
+                    binary = create<binary_t>();
+                    break;
+                }
+
+                case value_t::boolean:
+                {
+                    boolean = static_cast<boolean_t>(false);
+                    break;
+                }
+
+                case value_t::number_integer:
+                {
+                    number_integer = static_cast<number_integer_t>(0);
+                    break;
+                }
+
+                case value_t::number_unsigned:
+                {
+                    number_unsigned = static_cast<number_unsigned_t>(0);
+                    break;
+                }
+
+                case value_t::number_float:
+                {
+                    number_float = static_cast<number_float_t>(0.0);
+                    break;
+                }
+
+                case value_t::null:
+                {
+                    object = nullptr;  // silence warning, see #821
+                    break;
+                }
+
+                case value_t::discarded:
+                default:
+                {
+                    object = nullptr;  // silence warning, see #821
+                    if (JSON_HEDLEY_UNLIKELY(t == value_t::null))
+                    {
+                        JSON_THROW(other_error::create(500, "961c151d2e87f2686a955a9be24d316f1362bf21 3.11.3", nullptr)); // LCOV_EXCL_LINE
+                    }
+                    break;
+                }
+            }
+        }
+
+        /// constructor for strings
+        json_value(const string_t& value) : string(create<string_t>(value)) {}
+
+        /// constructor for rvalue strings
+        json_value(string_t&& value) : string(create<string_t>(std::move(value))) {}
+
+        /// constructor for objects
+        json_value(const object_t& value) : object(create<object_t>(value)) {}
+
+        /// constructor for rvalue objects
+        json_value(object_t&& value) : object(create<object_t>(std::move(value))) {}
+
+        /// constructor for arrays
+        json_value(const array_t& value) : array(create<array_t>(value)) {}
+
+        /// constructor for rvalue arrays
+        json_value(array_t&& value) : array(create<array_t>(std::move(value))) {}
+
+        /// constructor for binary arrays
+        json_value(const typename binary_t::container_type& value) : binary(create<binary_t>(value)) {}
+
+        /// constructor for rvalue binary arrays
+        json_value(typename binary_t::container_type&& value) : binary(create<binary_t>(std::move(value))) {}
+
+        /// constructor for binary arrays (internal type)
+        json_value(const binary_t& value) : binary(create<binary_t>(value)) {}
+
+        /// constructor for rvalue binary arrays (internal type)
+        json_value(binary_t&& value) : binary(create<binary_t>(std::move(value))) {}
+
+        void destroy(value_t t)
+        {
+            if (
+                (t == value_t::object && object == nullptr) ||
+                (t == value_t::array && array == nullptr) ||
+                (t == value_t::string && string == nullptr) ||
+                (t == value_t::binary && binary == nullptr)
+            )
+            {
+                //not initialized (e.g. due to exception in the ctor)
+                return;
+            }
+            if (t == value_t::array || t == value_t::object)
+            {
+                // flatten the current json_value to a heap-allocated stack
+                std::vector<basic_json> stack;
+
+                // move the top-level items to stack
+                if (t == value_t::array)
+                {
+                    stack.reserve(array->size());
+                    std::move(array->begin(), array->end(), std::back_inserter(stack));
+                }
+                else
+                {
+                    stack.reserve(object->size());
+                    for (auto&& it : *object)
+                    {
+                        stack.push_back(std::move(it.second));
+                    }
+                }
+
+                while (!stack.empty())
+                {
+                    // move the last item to local variable to be processed
+                    basic_json current_item(std::move(stack.back()));
+                    stack.pop_back();
+
+                    // if current_item is array/object, move
+                    // its children to the stack to be processed later
+                    if (current_item.is_array())
+                    {
+                        std::move(current_item.m_data.m_value.array->begin(), current_item.m_data.m_value.array->end(), std::back_inserter(stack));
+
+                        current_item.m_data.m_value.array->clear();
+                    }
+                    else if (current_item.is_object())
+                    {
+                        for (auto&& it : *current_item.m_data.m_value.object)
+                        {
+                            stack.push_back(std::move(it.second));
+                        }
+
+                        current_item.m_data.m_value.object->clear();
+                    }
+
+                    // it's now safe that current_item get destructed
+                    // since it doesn't have any children
+                }
+            }
+
+            switch (t)
+            {
+                case value_t::object:
+                {
+                    AllocatorType<object_t> alloc;
+                    std::allocator_traits<decltype(alloc)>::destroy(alloc, object);
+                    std::allocator_traits<decltype(alloc)>::deallocate(alloc, object, 1);
+                    break;
+                }
+
+                case value_t::array:
+                {
+                    AllocatorType<array_t> alloc;
+                    std::allocator_traits<decltype(alloc)>::destroy(alloc, array);
+                    std::allocator_traits<decltype(alloc)>::deallocate(alloc, array, 1);
+                    break;
+                }
+
+                case value_t::string:
+                {
+                    AllocatorType<string_t> alloc;
+                    std::allocator_traits<decltype(alloc)>::destroy(alloc, string);
+                    std::allocator_traits<decltype(alloc)>::deallocate(alloc, string, 1);
+                    break;
+                }
+
+                case value_t::binary:
+                {
+                    AllocatorType<binary_t> alloc;
+                    std::allocator_traits<decltype(alloc)>::destroy(alloc, binary);
+                    std::allocator_traits<decltype(alloc)>::deallocate(alloc, binary, 1);
+                    break;
+                }
+
+                case value_t::null:
+                case value_t::boolean:
+                case value_t::number_integer:
+                case value_t::number_unsigned:
+                case value_t::number_float:
+                case value_t::discarded:
+                default:
+                {
+                    break;
+                }
+            }
+        }
+    };
+
+  private:
+    /*!
+    @brief checks the class invariants
+
+    This function asserts the class invariants. It needs to be called at the
+    end of every constructor to make sure that created objects respect the
+    invariant. Furthermore, it has to be called each time the type of a JSON
+    value is changed, because the invariant expresses a relationship between
+    @a m_type and @a m_value.
+
+    Furthermore, the parent relation is checked for arrays and objects: If
+    @a check_parents true and the value is an array or object, then the
+    container's elements must have the current value as parent.
+
+    @param[in] check_parents  whether the parent relation should be checked.
+               The value is true by default and should only be set to false
+               during destruction of objects when the invariant does not
+               need to hold.
+    */
+    void assert_invariant(bool check_parents = true) const noexcept
+    {
+        JSON_ASSERT(m_data.m_type != value_t::object || m_data.m_value.object != nullptr);
+        JSON_ASSERT(m_data.m_type != value_t::array || m_data.m_value.array != nullptr);
+        JSON_ASSERT(m_data.m_type != value_t::string || m_data.m_value.string != nullptr);
+        JSON_ASSERT(m_data.m_type != value_t::binary || m_data.m_value.binary != nullptr);
+
+#if JSON_DIAGNOSTICS
+        JSON_TRY
+        {
+            // cppcheck-suppress assertWithSideEffect
+            JSON_ASSERT(!check_parents || !is_structured() || std::all_of(begin(), end(), [this](const basic_json & j)
+            {
+                return j.m_parent == this;
+            }));
+        }
+        JSON_CATCH(...) {} // LCOV_EXCL_LINE
+#endif
+        static_cast<void>(check_parents);
+    }
+
+    void set_parents()
+    {
+#if JSON_DIAGNOSTICS
+        switch (m_data.m_type)
+        {
+            case value_t::array:
+            {
+                for (auto& element : *m_data.m_value.array)
+                {
+                    element.m_parent = this;
+                }
+                break;
+            }
+
+            case value_t::object:
+            {
+                for (auto& element : *m_data.m_value.object)
+                {
+                    element.second.m_parent = this;
+                }
+                break;
+            }
+
+            case value_t::null:
+            case value_t::string:
+            case value_t::boolean:
+            case value_t::number_integer:
+            case value_t::number_unsigned:
+            case value_t::number_float:
+            case value_t::binary:
+            case value_t::discarded:
+            default:
+                break;
+        }
+#endif
+    }
+
+    iterator set_parents(iterator it, typename iterator::difference_type count_set_parents)
+    {
+#if JSON_DIAGNOSTICS
+        for (typename iterator::difference_type i = 0; i < count_set_parents; ++i)
+        {
+            (it + i)->m_parent = this;
+        }
+#else
+        static_cast<void>(count_set_parents);
+#endif
+        return it;
+    }
+
+    reference set_parent(reference j, std::size_t old_capacity = static_cast<std::size_t>(-1))
+    {
+#if JSON_DIAGNOSTICS
+        if (old_capacity != static_cast<std::size_t>(-1))
+        {
+            // see https://github.com/nlohmann/json/issues/2838
