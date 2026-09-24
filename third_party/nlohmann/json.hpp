@@ -12388,3 +12388,593 @@ class parser
                         {
                             return false;
                         }
+
+                        // parse separator (:)
+                        if (JSON_HEDLEY_UNLIKELY(get_token() != token_type::name_separator))
+                        {
+                            return sax->parse_error(m_lexer.get_position(),
+                                                    m_lexer.get_token_string(),
+                                                    parse_error::create(101, m_lexer.get_position(), exception_message(token_type::name_separator, "object separator"), nullptr));
+                        }
+
+                        // remember we are now inside an object
+                        states.push_back(false);
+
+                        // parse values
+                        get_token();
+                        continue;
+                    }
+
+                    case token_type::begin_array:
+                    {
+                        if (JSON_HEDLEY_UNLIKELY(!sax->start_array(static_cast<std::size_t>(-1))))
+                        {
+                            return false;
+                        }
+
+                        // closing ] -> we are done
+                        if (get_token() == token_type::end_array)
+                        {
+                            if (JSON_HEDLEY_UNLIKELY(!sax->end_array()))
+                            {
+                                return false;
+                            }
+                            break;
+                        }
+
+                        // remember we are now inside an array
+                        states.push_back(true);
+
+                        // parse values (no need to call get_token)
+                        continue;
+                    }
+
+                    case token_type::value_float:
+                    {
+                        const auto res = m_lexer.get_number_float();
+
+                        if (JSON_HEDLEY_UNLIKELY(!std::isfinite(res)))
+                        {
+                            return sax->parse_error(m_lexer.get_position(),
+                                                    m_lexer.get_token_string(),
+                                                    out_of_range::create(406, concat("number overflow parsing '", m_lexer.get_token_string(), '\''), nullptr));
+                        }
+
+                        if (JSON_HEDLEY_UNLIKELY(!sax->number_float(res, m_lexer.get_string())))
+                        {
+                            return false;
+                        }
+
+                        break;
+                    }
+
+                    case token_type::literal_false:
+                    {
+                        if (JSON_HEDLEY_UNLIKELY(!sax->boolean(false)))
+                        {
+                            return false;
+                        }
+                        break;
+                    }
+
+                    case token_type::literal_null:
+                    {
+                        if (JSON_HEDLEY_UNLIKELY(!sax->null()))
+                        {
+                            return false;
+                        }
+                        break;
+                    }
+
+                    case token_type::literal_true:
+                    {
+                        if (JSON_HEDLEY_UNLIKELY(!sax->boolean(true)))
+                        {
+                            return false;
+                        }
+                        break;
+                    }
+
+                    case token_type::value_integer:
+                    {
+                        if (JSON_HEDLEY_UNLIKELY(!sax->number_integer(m_lexer.get_number_integer())))
+                        {
+                            return false;
+                        }
+                        break;
+                    }
+
+                    case token_type::value_string:
+                    {
+                        if (JSON_HEDLEY_UNLIKELY(!sax->string(m_lexer.get_string())))
+                        {
+                            return false;
+                        }
+                        break;
+                    }
+
+                    case token_type::value_unsigned:
+                    {
+                        if (JSON_HEDLEY_UNLIKELY(!sax->number_unsigned(m_lexer.get_number_unsigned())))
+                        {
+                            return false;
+                        }
+                        break;
+                    }
+
+                    case token_type::parse_error:
+                    {
+                        // using "uninitialized" to avoid "expected" message
+                        return sax->parse_error(m_lexer.get_position(),
+                                                m_lexer.get_token_string(),
+                                                parse_error::create(101, m_lexer.get_position(), exception_message(token_type::uninitialized, "value"), nullptr));
+                    }
+                    case token_type::end_of_input:
+                    {
+                        if (JSON_HEDLEY_UNLIKELY(m_lexer.get_position().chars_read_total == 1))
+                        {
+                            return sax->parse_error(m_lexer.get_position(),
+                                                    m_lexer.get_token_string(),
+                                                    parse_error::create(101, m_lexer.get_position(),
+                                                            "attempting to parse an empty input; check that your input string or stream contains the expected JSON", nullptr));
+                        }
+
+                        return sax->parse_error(m_lexer.get_position(),
+                                                m_lexer.get_token_string(),
+                                                parse_error::create(101, m_lexer.get_position(), exception_message(token_type::literal_or_value, "value"), nullptr));
+                    }
+                    case token_type::uninitialized:
+                    case token_type::end_array:
+                    case token_type::end_object:
+                    case token_type::name_separator:
+                    case token_type::value_separator:
+                    case token_type::literal_or_value:
+                    default: // the last token was unexpected
+                    {
+                        return sax->parse_error(m_lexer.get_position(),
+                                                m_lexer.get_token_string(),
+                                                parse_error::create(101, m_lexer.get_position(), exception_message(token_type::literal_or_value, "value"), nullptr));
+                    }
+                }
+            }
+            else
+            {
+                skip_to_state_evaluation = false;
+            }
+
+            // we reached this line after we successfully parsed a value
+            if (states.empty())
+            {
+                // empty stack: we reached the end of the hierarchy: done
+                return true;
+            }
+
+            if (states.back())  // array
+            {
+                // comma -> next value
+                if (get_token() == token_type::value_separator)
+                {
+                    // parse a new value
+                    get_token();
+                    continue;
+                }
+
+                // closing ]
+                if (JSON_HEDLEY_LIKELY(last_token == token_type::end_array))
+                {
+                    if (JSON_HEDLEY_UNLIKELY(!sax->end_array()))
+                    {
+                        return false;
+                    }
+
+                    // We are done with this array. Before we can parse a
+                    // new value, we need to evaluate the new state first.
+                    // By setting skip_to_state_evaluation to false, we
+                    // are effectively jumping to the beginning of this if.
+                    JSON_ASSERT(!states.empty());
+                    states.pop_back();
+                    skip_to_state_evaluation = true;
+                    continue;
+                }
+
+                return sax->parse_error(m_lexer.get_position(),
+                                        m_lexer.get_token_string(),
+                                        parse_error::create(101, m_lexer.get_position(), exception_message(token_type::end_array, "array"), nullptr));
+            }
+
+            // states.back() is false -> object
+
+            // comma -> next value
+            if (get_token() == token_type::value_separator)
+            {
+                // parse key
+                if (JSON_HEDLEY_UNLIKELY(get_token() != token_type::value_string))
+                {
+                    return sax->parse_error(m_lexer.get_position(),
+                                            m_lexer.get_token_string(),
+                                            parse_error::create(101, m_lexer.get_position(), exception_message(token_type::value_string, "object key"), nullptr));
+                }
+
+                if (JSON_HEDLEY_UNLIKELY(!sax->key(m_lexer.get_string())))
+                {
+                    return false;
+                }
+
+                // parse separator (:)
+                if (JSON_HEDLEY_UNLIKELY(get_token() != token_type::name_separator))
+                {
+                    return sax->parse_error(m_lexer.get_position(),
+                                            m_lexer.get_token_string(),
+                                            parse_error::create(101, m_lexer.get_position(), exception_message(token_type::name_separator, "object separator"), nullptr));
+                }
+
+                // parse values
+                get_token();
+                continue;
+            }
+
+            // closing }
+            if (JSON_HEDLEY_LIKELY(last_token == token_type::end_object))
+            {
+                if (JSON_HEDLEY_UNLIKELY(!sax->end_object()))
+                {
+                    return false;
+                }
+
+                // We are done with this object. Before we can parse a
+                // new value, we need to evaluate the new state first.
+                // By setting skip_to_state_evaluation to false, we
+                // are effectively jumping to the beginning of this if.
+                JSON_ASSERT(!states.empty());
+                states.pop_back();
+                skip_to_state_evaluation = true;
+                continue;
+            }
+
+            return sax->parse_error(m_lexer.get_position(),
+                                    m_lexer.get_token_string(),
+                                    parse_error::create(101, m_lexer.get_position(), exception_message(token_type::end_object, "object"), nullptr));
+        }
+    }
+
+    /// get next token from lexer
+    token_type get_token()
+    {
+        return last_token = m_lexer.scan();
+    }
+
+    std::string exception_message(const token_type expected, const std::string& context)
+    {
+        std::string error_msg = "syntax error ";
+
+        if (!context.empty())
+        {
+            error_msg += concat("while parsing ", context, ' ');
+        }
+
+        error_msg += "- ";
+
+        if (last_token == token_type::parse_error)
+        {
+            error_msg += concat(m_lexer.get_error_message(), "; last read: '",
+                                m_lexer.get_token_string(), '\'');
+        }
+        else
+        {
+            error_msg += concat("unexpected ", lexer_t::token_type_name(last_token));
+        }
+
+        if (expected != token_type::uninitialized)
+        {
+            error_msg += concat("; expected ", lexer_t::token_type_name(expected));
+        }
+
+        return error_msg;
+    }
+
+  private:
+    /// callback function
+    const parser_callback_t<BasicJsonType> callback = nullptr;
+    /// the type of the last read token
+    token_type last_token = token_type::uninitialized;
+    /// the lexer
+    lexer_t m_lexer;
+    /// whether to throw exceptions in case of errors
+    const bool allow_exceptions = true;
+};
+
+}  // namespace detail
+NLOHMANN_JSON_NAMESPACE_END
+
+// #include <nlohmann/detail/iterators/internal_iterator.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
+
+
+// #include <nlohmann/detail/abi_macros.hpp>
+
+// #include <nlohmann/detail/iterators/primitive_iterator.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
+
+
+#include <cstddef> // ptrdiff_t
+#include <limits>  // numeric_limits
+
+// #include <nlohmann/detail/macro_scope.hpp>
+
+
+NLOHMANN_JSON_NAMESPACE_BEGIN
+namespace detail
+{
+
+/*
+@brief an iterator for primitive JSON types
+
+This class models an iterator for primitive JSON types (boolean, number,
+string). It's only purpose is to allow the iterator/const_iterator classes
+to "iterate" over primitive values. Internally, the iterator is modeled by
+a `difference_type` variable. Value begin_value (`0`) models the begin,
+end_value (`1`) models past the end.
+*/
+class primitive_iterator_t
+{
+  private:
+    using difference_type = std::ptrdiff_t;
+    static constexpr difference_type begin_value = 0;
+    static constexpr difference_type end_value = begin_value + 1;
+
+  JSON_PRIVATE_UNLESS_TESTED:
+    /// iterator as signed integer type
+    difference_type m_it = (std::numeric_limits<std::ptrdiff_t>::min)();
+
+  public:
+    constexpr difference_type get_value() const noexcept
+    {
+        return m_it;
+    }
+
+    /// set iterator to a defined beginning
+    void set_begin() noexcept
+    {
+        m_it = begin_value;
+    }
+
+    /// set iterator to a defined past the end
+    void set_end() noexcept
+    {
+        m_it = end_value;
+    }
+
+    /// return whether the iterator can be dereferenced
+    constexpr bool is_begin() const noexcept
+    {
+        return m_it == begin_value;
+    }
+
+    /// return whether the iterator is at end
+    constexpr bool is_end() const noexcept
+    {
+        return m_it == end_value;
+    }
+
+    friend constexpr bool operator==(primitive_iterator_t lhs, primitive_iterator_t rhs) noexcept
+    {
+        return lhs.m_it == rhs.m_it;
+    }
+
+    friend constexpr bool operator<(primitive_iterator_t lhs, primitive_iterator_t rhs) noexcept
+    {
+        return lhs.m_it < rhs.m_it;
+    }
+
+    primitive_iterator_t operator+(difference_type n) noexcept
+    {
+        auto result = *this;
+        result += n;
+        return result;
+    }
+
+    friend constexpr difference_type operator-(primitive_iterator_t lhs, primitive_iterator_t rhs) noexcept
+    {
+        return lhs.m_it - rhs.m_it;
+    }
+
+    primitive_iterator_t& operator++() noexcept
+    {
+        ++m_it;
+        return *this;
+    }
+
+    primitive_iterator_t operator++(int)& noexcept // NOLINT(cert-dcl21-cpp)
+    {
+        auto result = *this;
+        ++m_it;
+        return result;
+    }
+
+    primitive_iterator_t& operator--() noexcept
+    {
+        --m_it;
+        return *this;
+    }
+
+    primitive_iterator_t operator--(int)& noexcept // NOLINT(cert-dcl21-cpp)
+    {
+        auto result = *this;
+        --m_it;
+        return result;
+    }
+
+    primitive_iterator_t& operator+=(difference_type n) noexcept
+    {
+        m_it += n;
+        return *this;
+    }
+
+    primitive_iterator_t& operator-=(difference_type n) noexcept
+    {
+        m_it -= n;
+        return *this;
+    }
+};
+
+}  // namespace detail
+NLOHMANN_JSON_NAMESPACE_END
+
+
+NLOHMANN_JSON_NAMESPACE_BEGIN
+namespace detail
+{
+
+/*!
+@brief an iterator value
+
+@note This structure could easily be a union, but MSVC currently does not allow
+unions members with complex constructors, see https://github.com/nlohmann/json/pull/105.
+*/
+template<typename BasicJsonType> struct internal_iterator
+{
+    /// iterator for JSON objects
+    typename BasicJsonType::object_t::iterator object_iterator {};
+    /// iterator for JSON arrays
+    typename BasicJsonType::array_t::iterator array_iterator {};
+    /// generic iterator for all other types
+    primitive_iterator_t primitive_iterator {};
+};
+
+}  // namespace detail
+NLOHMANN_JSON_NAMESPACE_END
+
+// #include <nlohmann/detail/iterators/iter_impl.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
+
+
+#include <iterator> // iterator, random_access_iterator_tag, bidirectional_iterator_tag, advance, next
+#include <type_traits> // conditional, is_const, remove_const
+
+// #include <nlohmann/detail/exceptions.hpp>
+
+// #include <nlohmann/detail/iterators/internal_iterator.hpp>
+
+// #include <nlohmann/detail/iterators/primitive_iterator.hpp>
+
+// #include <nlohmann/detail/macro_scope.hpp>
+
+// #include <nlohmann/detail/meta/cpp_future.hpp>
+
+// #include <nlohmann/detail/meta/type_traits.hpp>
+
+// #include <nlohmann/detail/value_t.hpp>
+
+
+NLOHMANN_JSON_NAMESPACE_BEGIN
+namespace detail
+{
+
+// forward declare, to be able to friend it later on
+template<typename IteratorType> class iteration_proxy;
+template<typename IteratorType> class iteration_proxy_value;
+
+/*!
+@brief a template for a bidirectional iterator for the @ref basic_json class
+This class implements a both iterators (iterator and const_iterator) for the
+@ref basic_json class.
+@note An iterator is called *initialized* when a pointer to a JSON value has
+      been set (e.g., by a constructor or a copy assignment). If the iterator is
+      default-constructed, it is *uninitialized* and most methods are undefined.
+      **The library uses assertions to detect calls on uninitialized iterators.**
+@requirement The class satisfies the following concept requirements:
+-
+[BidirectionalIterator](https://en.cppreference.com/w/cpp/named_req/BidirectionalIterator):
+  The iterator that can be moved can be moved in both directions (i.e.
+  incremented and decremented).
+@since version 1.0.0, simplified in version 2.0.9, change to bidirectional
+       iterators in version 3.0.0 (see https://github.com/nlohmann/json/issues/593)
+*/
+template<typename BasicJsonType>
+class iter_impl // NOLINT(cppcoreguidelines-special-member-functions,hicpp-special-member-functions)
+{
+    /// the iterator with BasicJsonType of different const-ness
+    using other_iter_impl = iter_impl<typename std::conditional<std::is_const<BasicJsonType>::value, typename std::remove_const<BasicJsonType>::type, const BasicJsonType>::type>;
+    /// allow basic_json to access private members
+    friend other_iter_impl;
+    friend BasicJsonType;
+    friend iteration_proxy<iter_impl>;
+    friend iteration_proxy_value<iter_impl>;
+
+    using object_t = typename BasicJsonType::object_t;
+    using array_t = typename BasicJsonType::array_t;
+    // make sure BasicJsonType is basic_json or const basic_json
+    static_assert(is_basic_json<typename std::remove_const<BasicJsonType>::type>::value,
+                  "iter_impl only accepts (const) basic_json");
+    // superficial check for the LegacyBidirectionalIterator named requirement
+    static_assert(std::is_base_of<std::bidirectional_iterator_tag, std::bidirectional_iterator_tag>::value
+                  &&  std::is_base_of<std::bidirectional_iterator_tag, typename std::iterator_traits<typename array_t::iterator>::iterator_category>::value,
+                  "basic_json iterator assumes array and object type iterators satisfy the LegacyBidirectionalIterator named requirement.");
+
+  public:
+    /// The std::iterator class template (used as a base class to provide typedefs) is deprecated in C++17.
+    /// The C++ Standard has never required user-defined iterators to derive from std::iterator.
+    /// A user-defined iterator should provide publicly accessible typedefs named
+    /// iterator_category, value_type, difference_type, pointer, and reference.
+    /// Note that value_type is required to be non-const, even for constant iterators.
+    using iterator_category = std::bidirectional_iterator_tag;
+
+    /// the type of the values when the iterator is dereferenced
+    using value_type = typename BasicJsonType::value_type;
+    /// a type to represent differences between iterators
+    using difference_type = typename BasicJsonType::difference_type;
+    /// defines a pointer to the type iterated over (value_type)
+    using pointer = typename std::conditional<std::is_const<BasicJsonType>::value,
+          typename BasicJsonType::const_pointer,
+          typename BasicJsonType::pointer>::type;
+    /// defines a reference to the type iterated over (value_type)
+    using reference =
+        typename std::conditional<std::is_const<BasicJsonType>::value,
+        typename BasicJsonType::const_reference,
+        typename BasicJsonType::reference>::type;
+
+    iter_impl() = default;
+    ~iter_impl() = default;
+    iter_impl(iter_impl&&) noexcept = default;
+    iter_impl& operator=(iter_impl&&) noexcept = default;
+
+    /*!
+    @brief constructor for a given JSON instance
+    @param[in] object  pointer to a JSON object for this iterator
+    @pre object != nullptr
+    @post The iterator is initialized; i.e. `m_object != nullptr`.
+    */
+    explicit iter_impl(pointer object) noexcept : m_object(object)
+    {
+        JSON_ASSERT(m_object != nullptr);
+
+        switch (m_object->m_data.m_type)
+        {
+            case value_t::object:
+            {
+                m_it.object_iterator = typename object_t::iterator();
+                break;
+            }
+
+            case value_t::array:
