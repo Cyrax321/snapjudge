@@ -24188,3 +24188,578 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                     break;
                 }
 
+                case patch_operations::remove:
+                {
+                    operation_remove(ptr);
+                    break;
+                }
+
+                case patch_operations::replace:
+                {
+                    // the "path" location must exist - use at()
+                    result.at(ptr) = get_value("replace", "value", false);
+                    break;
+                }
+
+                case patch_operations::move:
+                {
+                    const auto from_path = get_value("move", "from", true).template get<std::string>();
+                    json_pointer from_ptr(from_path);
+
+                    // the "from" location must exist - use at()
+                    basic_json const v = result.at(from_ptr);
+
+                    // The move operation is functionally identical to a
+                    // "remove" operation on the "from" location, followed
+                    // immediately by an "add" operation at the target
+                    // location with the value that was just removed.
+                    operation_remove(from_ptr);
+                    operation_add(ptr, v);
+                    break;
+                }
+
+                case patch_operations::copy:
+                {
+                    const auto from_path = get_value("copy", "from", true).template get<std::string>();
+                    const json_pointer from_ptr(from_path);
+
+                    // the "from" location must exist - use at()
+                    basic_json const v = result.at(from_ptr);
+
+                    // The copy is functionally identical to an "add"
+                    // operation at the target location using the value
+                    // specified in the "from" member.
+                    operation_add(ptr, v);
+                    break;
+                }
+
+                case patch_operations::test:
+                {
+                    bool success = false;
+                    JSON_TRY
+                    {
+                        // check if "value" matches the one at "path"
+                        // the "path" location must exist - use at()
+                        success = (result.at(ptr) == get_value("test", "value", false));
+                    }
+                    JSON_INTERNAL_CATCH (out_of_range&)
+                    {
+                        // ignore out of range errors: success remains false
+                    }
+
+                    // throw an exception if test fails
+                    if (JSON_HEDLEY_UNLIKELY(!success))
+                    {
+                        JSON_THROW(other_error::create(501, detail::concat("unsuccessful: ", val.dump()), &val));
+                    }
+
+                    break;
+                }
+
+                case patch_operations::invalid:
+                default:
+                {
+                    // op must be "add", "remove", "replace", "move", "copy", or
+                    // "test"
+                    JSON_THROW(parse_error::create(105, 0, detail::concat("operation value '", op, "' is invalid"), &val));
+                }
+            }
+        }
+    }
+
+    /// @brief applies a JSON patch to a copy of the current object
+    /// @sa https://json.nlohmann.me/api/basic_json/patch/
+    basic_json patch(const basic_json& json_patch) const
+    {
+        basic_json result = *this;
+        result.patch_inplace(json_patch);
+        return result;
+    }
+
+    /// @brief creates a diff as a JSON patch
+    /// @sa https://json.nlohmann.me/api/basic_json/diff/
+    JSON_HEDLEY_WARN_UNUSED_RESULT
+    static basic_json diff(const basic_json& source, const basic_json& target,
+                           const std::string& path = "")
+    {
+        // the patch
+        basic_json result(value_t::array);
+
+        // if the values are the same, return empty patch
+        if (source == target)
+        {
+            return result;
+        }
+
+        if (source.type() != target.type())
+        {
+            // different types: replace value
+            result.push_back(
+            {
+                {"op", "replace"}, {"path", path}, {"value", target}
+            });
+            return result;
+        }
+
+        switch (source.type())
+        {
+            case value_t::array:
+            {
+                // first pass: traverse common elements
+                std::size_t i = 0;
+                while (i < source.size() && i < target.size())
+                {
+                    // recursive call to compare array values at index i
+                    auto temp_diff = diff(source[i], target[i], detail::concat(path, '/', std::to_string(i)));
+                    result.insert(result.end(), temp_diff.begin(), temp_diff.end());
+                    ++i;
+                }
+
+                // We now reached the end of at least one array
+                // in a second pass, traverse the remaining elements
+
+                // remove my remaining elements
+                const auto end_index = static_cast<difference_type>(result.size());
+                while (i < source.size())
+                {
+                    // add operations in reverse order to avoid invalid
+                    // indices
+                    result.insert(result.begin() + end_index, object(
+                    {
+                        {"op", "remove"},
+                        {"path", detail::concat(path, '/', std::to_string(i))}
+                    }));
+                    ++i;
+                }
+
+                // add other remaining elements
+                while (i < target.size())
+                {
+                    result.push_back(
+                    {
+                        {"op", "add"},
+                        {"path", detail::concat(path, "/-")},
+                        {"value", target[i]}
+                    });
+                    ++i;
+                }
+
+                break;
+            }
+
+            case value_t::object:
+            {
+                // first pass: traverse this object's elements
+                for (auto it = source.cbegin(); it != source.cend(); ++it)
+                {
+                    // escape the key name to be used in a JSON patch
+                    const auto path_key = detail::concat(path, '/', detail::escape(it.key()));
+
+                    if (target.find(it.key()) != target.end())
+                    {
+                        // recursive call to compare object values at key it
+                        auto temp_diff = diff(it.value(), target[it.key()], path_key);
+                        result.insert(result.end(), temp_diff.begin(), temp_diff.end());
+                    }
+                    else
+                    {
+                        // found a key that is not in o -> remove it
+                        result.push_back(object(
+                        {
+                            {"op", "remove"}, {"path", path_key}
+                        }));
+                    }
+                }
+
+                // second pass: traverse other object's elements
+                for (auto it = target.cbegin(); it != target.cend(); ++it)
+                {
+                    if (source.find(it.key()) == source.end())
+                    {
+                        // found a key that is not in this -> add it
+                        const auto path_key = detail::concat(path, '/', detail::escape(it.key()));
+                        result.push_back(
+                        {
+                            {"op", "add"}, {"path", path_key},
+                            {"value", it.value()}
+                        });
+                    }
+                }
+
+                break;
+            }
+
+            case value_t::null:
+            case value_t::string:
+            case value_t::boolean:
+            case value_t::number_integer:
+            case value_t::number_unsigned:
+            case value_t::number_float:
+            case value_t::binary:
+            case value_t::discarded:
+            default:
+            {
+                // both primitive type: replace value
+                result.push_back(
+                {
+                    {"op", "replace"}, {"path", path}, {"value", target}
+                });
+                break;
+            }
+        }
+
+        return result;
+    }
+    /// @}
+
+    ////////////////////////////////
+    // JSON Merge Patch functions //
+    ////////////////////////////////
+
+    /// @name JSON Merge Patch functions
+    /// @{
+
+    /// @brief applies a JSON Merge Patch
+    /// @sa https://json.nlohmann.me/api/basic_json/merge_patch/
+    void merge_patch(const basic_json& apply_patch)
+    {
+        if (apply_patch.is_object())
+        {
+            if (!is_object())
+            {
+                *this = object();
+            }
+            for (auto it = apply_patch.begin(); it != apply_patch.end(); ++it)
+            {
+                if (it.value().is_null())
+                {
+                    erase(it.key());
+                }
+                else
+                {
+                    operator[](it.key()).merge_patch(it.value());
+                }
+            }
+        }
+        else
+        {
+            *this = apply_patch;
+        }
+    }
+
+    /// @}
+};
+
+/// @brief user-defined to_string function for JSON values
+/// @sa https://json.nlohmann.me/api/basic_json/to_string/
+NLOHMANN_BASIC_JSON_TPL_DECLARATION
+std::string to_string(const NLOHMANN_BASIC_JSON_TPL& j)
+{
+    return j.dump();
+}
+
+inline namespace literals
+{
+inline namespace json_literals
+{
+
+/// @brief user-defined string literal for JSON values
+/// @sa https://json.nlohmann.me/api/basic_json/operator_literal_json/
+JSON_HEDLEY_NON_NULL(1)
+#if !defined(JSON_HEDLEY_GCC_VERSION) || JSON_HEDLEY_GCC_VERSION_CHECK(4,9,0)
+    inline nlohmann::json operator ""_json(const char* s, std::size_t n)
+#else
+    inline nlohmann::json operator "" _json(const char* s, std::size_t n)
+#endif
+{
+    return nlohmann::json::parse(s, s + n);
+}
+
+/// @brief user-defined string literal for JSON pointer
+/// @sa https://json.nlohmann.me/api/basic_json/operator_literal_json_pointer/
+JSON_HEDLEY_NON_NULL(1)
+#if !defined(JSON_HEDLEY_GCC_VERSION) || JSON_HEDLEY_GCC_VERSION_CHECK(4,9,0)
+    inline nlohmann::json::json_pointer operator ""_json_pointer(const char* s, std::size_t n)
+#else
+    inline nlohmann::json::json_pointer operator "" _json_pointer(const char* s, std::size_t n)
+#endif
+{
+    return nlohmann::json::json_pointer(std::string(s, n));
+}
+
+}  // namespace json_literals
+}  // namespace literals
+NLOHMANN_JSON_NAMESPACE_END
+
+///////////////////////
+// nonmember support //
+///////////////////////
+
+namespace std // NOLINT(cert-dcl58-cpp)
+{
+
+/// @brief hash value for JSON objects
+/// @sa https://json.nlohmann.me/api/basic_json/std_hash/
+NLOHMANN_BASIC_JSON_TPL_DECLARATION
+struct hash<nlohmann::NLOHMANN_BASIC_JSON_TPL> // NOLINT(cert-dcl58-cpp)
+{
+    std::size_t operator()(const nlohmann::NLOHMANN_BASIC_JSON_TPL& j) const
+    {
+        return nlohmann::detail::hash(j);
+    }
+};
+
+// specialization for std::less<value_t>
+template<>
+struct less< ::nlohmann::detail::value_t> // do not remove the space after '<', see https://github.com/nlohmann/json/pull/679
+{
+    /*!
+    @brief compare two value_t enum values
+    @since version 3.0.0
+    */
+    bool operator()(::nlohmann::detail::value_t lhs,
+                    ::nlohmann::detail::value_t rhs) const noexcept
+    {
+#if JSON_HAS_THREE_WAY_COMPARISON
+        return std::is_lt(lhs <=> rhs); // *NOPAD*
+#else
+        return ::nlohmann::detail::operator<(lhs, rhs);
+#endif
+    }
+};
+
+// C++20 prohibit function specialization in the std namespace.
+#ifndef JSON_HAS_CPP_20
+
+/// @brief exchanges the values of two JSON objects
+/// @sa https://json.nlohmann.me/api/basic_json/std_swap/
+NLOHMANN_BASIC_JSON_TPL_DECLARATION
+inline void swap(nlohmann::NLOHMANN_BASIC_JSON_TPL& j1, nlohmann::NLOHMANN_BASIC_JSON_TPL& j2) noexcept(  // NOLINT(readability-inconsistent-declaration-parameter-name, cert-dcl58-cpp)
+    is_nothrow_move_constructible<nlohmann::NLOHMANN_BASIC_JSON_TPL>::value&&                          // NOLINT(misc-redundant-expression,cppcoreguidelines-noexcept-swap,performance-noexcept-swap)
+    is_nothrow_move_assignable<nlohmann::NLOHMANN_BASIC_JSON_TPL>::value)
+{
+    j1.swap(j2);
+}
+
+#endif
+
+}  // namespace std
+
+#if JSON_USE_GLOBAL_UDLS
+    #if !defined(JSON_HEDLEY_GCC_VERSION) || JSON_HEDLEY_GCC_VERSION_CHECK(4,9,0)
+        using nlohmann::literals::json_literals::operator ""_json; // NOLINT(misc-unused-using-decls,google-global-names-in-headers)
+        using nlohmann::literals::json_literals::operator ""_json_pointer; //NOLINT(misc-unused-using-decls,google-global-names-in-headers)
+    #else
+        using nlohmann::literals::json_literals::operator "" _json; // NOLINT(misc-unused-using-decls,google-global-names-in-headers)
+        using nlohmann::literals::json_literals::operator "" _json_pointer; //NOLINT(misc-unused-using-decls,google-global-names-in-headers)
+    #endif
+#endif
+
+// #include <nlohmann/detail/macro_unscope.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
+
+
+// restore clang diagnostic settings
+#if defined(__clang__)
+    #pragma clang diagnostic pop
+#endif
+
+// clean up
+#undef JSON_ASSERT
+#undef JSON_INTERNAL_CATCH
+#undef JSON_THROW
+#undef JSON_PRIVATE_UNLESS_TESTED
+#undef NLOHMANN_BASIC_JSON_TPL_DECLARATION
+#undef NLOHMANN_BASIC_JSON_TPL
+#undef JSON_EXPLICIT
+#undef NLOHMANN_CAN_CALL_STD_FUNC_IMPL
+#undef JSON_INLINE_VARIABLE
+#undef JSON_NO_UNIQUE_ADDRESS
+#undef JSON_DISABLE_ENUM_SERIALIZATION
+#undef JSON_USE_GLOBAL_UDLS
+
+#ifndef JSON_TEST_KEEP_MACROS
+    #undef JSON_CATCH
+    #undef JSON_TRY
+    #undef JSON_HAS_CPP_11
+    #undef JSON_HAS_CPP_14
+    #undef JSON_HAS_CPP_17
+    #undef JSON_HAS_CPP_20
+    #undef JSON_HAS_FILESYSTEM
+    #undef JSON_HAS_EXPERIMENTAL_FILESYSTEM
+    #undef JSON_HAS_THREE_WAY_COMPARISON
+    #undef JSON_HAS_RANGES
+    #undef JSON_HAS_STATIC_RTTI
+    #undef JSON_USE_LEGACY_DISCARDED_VALUE_COMPARISON
+#endif
+
+// #include <nlohmann/thirdparty/hedley/hedley_undef.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
+
+
+#undef JSON_HEDLEY_ALWAYS_INLINE
+#undef JSON_HEDLEY_ARM_VERSION
+#undef JSON_HEDLEY_ARM_VERSION_CHECK
+#undef JSON_HEDLEY_ARRAY_PARAM
+#undef JSON_HEDLEY_ASSUME
+#undef JSON_HEDLEY_BEGIN_C_DECLS
+#undef JSON_HEDLEY_CLANG_HAS_ATTRIBUTE
+#undef JSON_HEDLEY_CLANG_HAS_BUILTIN
+#undef JSON_HEDLEY_CLANG_HAS_CPP_ATTRIBUTE
+#undef JSON_HEDLEY_CLANG_HAS_DECLSPEC_DECLSPEC_ATTRIBUTE
+#undef JSON_HEDLEY_CLANG_HAS_EXTENSION
+#undef JSON_HEDLEY_CLANG_HAS_FEATURE
+#undef JSON_HEDLEY_CLANG_HAS_WARNING
+#undef JSON_HEDLEY_COMPCERT_VERSION
+#undef JSON_HEDLEY_COMPCERT_VERSION_CHECK
+#undef JSON_HEDLEY_CONCAT
+#undef JSON_HEDLEY_CONCAT3
+#undef JSON_HEDLEY_CONCAT3_EX
+#undef JSON_HEDLEY_CONCAT_EX
+#undef JSON_HEDLEY_CONST
+#undef JSON_HEDLEY_CONSTEXPR
+#undef JSON_HEDLEY_CONST_CAST
+#undef JSON_HEDLEY_CPP_CAST
+#undef JSON_HEDLEY_CRAY_VERSION
+#undef JSON_HEDLEY_CRAY_VERSION_CHECK
+#undef JSON_HEDLEY_C_DECL
+#undef JSON_HEDLEY_DEPRECATED
+#undef JSON_HEDLEY_DEPRECATED_FOR
+#undef JSON_HEDLEY_DIAGNOSTIC_DISABLE_CAST_QUAL
+#undef JSON_HEDLEY_DIAGNOSTIC_DISABLE_CPP98_COMPAT_WRAP_
+#undef JSON_HEDLEY_DIAGNOSTIC_DISABLE_DEPRECATED
+#undef JSON_HEDLEY_DIAGNOSTIC_DISABLE_UNKNOWN_CPP_ATTRIBUTES
+#undef JSON_HEDLEY_DIAGNOSTIC_DISABLE_UNKNOWN_PRAGMAS
+#undef JSON_HEDLEY_DIAGNOSTIC_DISABLE_UNUSED_FUNCTION
+#undef JSON_HEDLEY_DIAGNOSTIC_POP
+#undef JSON_HEDLEY_DIAGNOSTIC_PUSH
+#undef JSON_HEDLEY_DMC_VERSION
+#undef JSON_HEDLEY_DMC_VERSION_CHECK
+#undef JSON_HEDLEY_EMPTY_BASES
+#undef JSON_HEDLEY_EMSCRIPTEN_VERSION
+#undef JSON_HEDLEY_EMSCRIPTEN_VERSION_CHECK
+#undef JSON_HEDLEY_END_C_DECLS
+#undef JSON_HEDLEY_FLAGS
+#undef JSON_HEDLEY_FLAGS_CAST
+#undef JSON_HEDLEY_GCC_HAS_ATTRIBUTE
+#undef JSON_HEDLEY_GCC_HAS_BUILTIN
+#undef JSON_HEDLEY_GCC_HAS_CPP_ATTRIBUTE
+#undef JSON_HEDLEY_GCC_HAS_DECLSPEC_ATTRIBUTE
+#undef JSON_HEDLEY_GCC_HAS_EXTENSION
+#undef JSON_HEDLEY_GCC_HAS_FEATURE
+#undef JSON_HEDLEY_GCC_HAS_WARNING
+#undef JSON_HEDLEY_GCC_NOT_CLANG_VERSION_CHECK
+#undef JSON_HEDLEY_GCC_VERSION
+#undef JSON_HEDLEY_GCC_VERSION_CHECK
+#undef JSON_HEDLEY_GNUC_HAS_ATTRIBUTE
+#undef JSON_HEDLEY_GNUC_HAS_BUILTIN
+#undef JSON_HEDLEY_GNUC_HAS_CPP_ATTRIBUTE
+#undef JSON_HEDLEY_GNUC_HAS_DECLSPEC_ATTRIBUTE
+#undef JSON_HEDLEY_GNUC_HAS_EXTENSION
+#undef JSON_HEDLEY_GNUC_HAS_FEATURE
+#undef JSON_HEDLEY_GNUC_HAS_WARNING
+#undef JSON_HEDLEY_GNUC_VERSION
+#undef JSON_HEDLEY_GNUC_VERSION_CHECK
+#undef JSON_HEDLEY_HAS_ATTRIBUTE
+#undef JSON_HEDLEY_HAS_BUILTIN
+#undef JSON_HEDLEY_HAS_CPP_ATTRIBUTE
+#undef JSON_HEDLEY_HAS_CPP_ATTRIBUTE_NS
+#undef JSON_HEDLEY_HAS_DECLSPEC_ATTRIBUTE
+#undef JSON_HEDLEY_HAS_EXTENSION
+#undef JSON_HEDLEY_HAS_FEATURE
+#undef JSON_HEDLEY_HAS_WARNING
+#undef JSON_HEDLEY_IAR_VERSION
+#undef JSON_HEDLEY_IAR_VERSION_CHECK
+#undef JSON_HEDLEY_IBM_VERSION
+#undef JSON_HEDLEY_IBM_VERSION_CHECK
+#undef JSON_HEDLEY_IMPORT
+#undef JSON_HEDLEY_INLINE
+#undef JSON_HEDLEY_INTEL_CL_VERSION
+#undef JSON_HEDLEY_INTEL_CL_VERSION_CHECK
+#undef JSON_HEDLEY_INTEL_VERSION
+#undef JSON_HEDLEY_INTEL_VERSION_CHECK
+#undef JSON_HEDLEY_IS_CONSTANT
+#undef JSON_HEDLEY_IS_CONSTEXPR_
+#undef JSON_HEDLEY_LIKELY
+#undef JSON_HEDLEY_MALLOC
+#undef JSON_HEDLEY_MCST_LCC_VERSION
+#undef JSON_HEDLEY_MCST_LCC_VERSION_CHECK
+#undef JSON_HEDLEY_MESSAGE
+#undef JSON_HEDLEY_MSVC_VERSION
+#undef JSON_HEDLEY_MSVC_VERSION_CHECK
+#undef JSON_HEDLEY_NEVER_INLINE
+#undef JSON_HEDLEY_NON_NULL
+#undef JSON_HEDLEY_NO_ESCAPE
+#undef JSON_HEDLEY_NO_RETURN
+#undef JSON_HEDLEY_NO_THROW
+#undef JSON_HEDLEY_NULL
+#undef JSON_HEDLEY_PELLES_VERSION
+#undef JSON_HEDLEY_PELLES_VERSION_CHECK
+#undef JSON_HEDLEY_PGI_VERSION
+#undef JSON_HEDLEY_PGI_VERSION_CHECK
+#undef JSON_HEDLEY_PREDICT
+#undef JSON_HEDLEY_PRINTF_FORMAT
+#undef JSON_HEDLEY_PRIVATE
+#undef JSON_HEDLEY_PUBLIC
+#undef JSON_HEDLEY_PURE
+#undef JSON_HEDLEY_REINTERPRET_CAST
+#undef JSON_HEDLEY_REQUIRE
+#undef JSON_HEDLEY_REQUIRE_CONSTEXPR
+#undef JSON_HEDLEY_REQUIRE_MSG
+#undef JSON_HEDLEY_RESTRICT
+#undef JSON_HEDLEY_RETURNS_NON_NULL
+#undef JSON_HEDLEY_SENTINEL
+#undef JSON_HEDLEY_STATIC_ASSERT
+#undef JSON_HEDLEY_STATIC_CAST
+#undef JSON_HEDLEY_STRINGIFY
+#undef JSON_HEDLEY_STRINGIFY_EX
+#undef JSON_HEDLEY_SUNPRO_VERSION
+#undef JSON_HEDLEY_SUNPRO_VERSION_CHECK
+#undef JSON_HEDLEY_TINYC_VERSION
+#undef JSON_HEDLEY_TINYC_VERSION_CHECK
+#undef JSON_HEDLEY_TI_ARMCL_VERSION
+#undef JSON_HEDLEY_TI_ARMCL_VERSION_CHECK
+#undef JSON_HEDLEY_TI_CL2000_VERSION
+#undef JSON_HEDLEY_TI_CL2000_VERSION_CHECK
+#undef JSON_HEDLEY_TI_CL430_VERSION
+#undef JSON_HEDLEY_TI_CL430_VERSION_CHECK
+#undef JSON_HEDLEY_TI_CL6X_VERSION
+#undef JSON_HEDLEY_TI_CL6X_VERSION_CHECK
+#undef JSON_HEDLEY_TI_CL7X_VERSION
+#undef JSON_HEDLEY_TI_CL7X_VERSION_CHECK
+#undef JSON_HEDLEY_TI_CLPRU_VERSION
+#undef JSON_HEDLEY_TI_CLPRU_VERSION_CHECK
+#undef JSON_HEDLEY_TI_VERSION
+#undef JSON_HEDLEY_TI_VERSION_CHECK
+#undef JSON_HEDLEY_UNAVAILABLE
+#undef JSON_HEDLEY_UNLIKELY
+#undef JSON_HEDLEY_UNPREDICTABLE
+#undef JSON_HEDLEY_UNREACHABLE
+#undef JSON_HEDLEY_UNREACHABLE_RETURN
+#undef JSON_HEDLEY_VERSION
+#undef JSON_HEDLEY_VERSION_DECODE_MAJOR
+#undef JSON_HEDLEY_VERSION_DECODE_MINOR
+#undef JSON_HEDLEY_VERSION_DECODE_REVISION
+#undef JSON_HEDLEY_VERSION_ENCODE
+#undef JSON_HEDLEY_WARNING
+#undef JSON_HEDLEY_WARN_UNUSED_RESULT
+#undef JSON_HEDLEY_WARN_UNUSED_RESULT_MSG
+#undef JSON_HEDLEY_FALL_THROUGH
+
+
+
+#endif  // INCLUDE_NLOHMANN_JSON_HPP_
