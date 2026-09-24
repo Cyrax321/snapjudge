@@ -4149,3 +4149,596 @@ namespace {
     // checks if the name matches any of the filters (and can be configured what to do when empty)
     bool matchesAny(const char* name, const std::vector<String>& filters, bool matchEmpty,
         bool caseSensitive) {
+        if (filters.empty() && matchEmpty)
+            return true;
+        for (auto& curr : filters)
+            if (wildcmp(name, curr.c_str(), caseSensitive))
+                return true;
+        return false;
+    }
+
+    DOCTEST_NO_SANITIZE_INTEGER
+    unsigned long long hash(unsigned long long a, unsigned long long b) {
+        return (a << 5) + b;
+    }
+
+    // C string hash function (djb2) - taken from http://www.cse.yorku.ca/~oz/hash.html
+    DOCTEST_NO_SANITIZE_INTEGER
+    unsigned long long hash(const char* str) {
+        unsigned long long hash = 5381;
+        char c;
+        while ((c = *str++))
+            hash = ((hash << 5) + hash) + c; // hash * 33 + c
+        return hash;
+    }
+
+    unsigned long long hash(const SubcaseSignature& sig) {
+        return hash(hash(hash(sig.m_file), hash(sig.m_name.c_str())), sig.m_line);
+    }
+
+    unsigned long long hash(const std::vector<SubcaseSignature>& sigs, size_t count) {
+        unsigned long long running = 0;
+        auto end = sigs.begin() + count;
+        for (auto it = sigs.begin(); it != end; it++) {
+            running = hash(running, hash(*it));
+        }
+        return running;
+    }
+
+    unsigned long long hash(const std::vector<SubcaseSignature>& sigs) {
+        unsigned long long running = 0;
+        for (const SubcaseSignature& sig : sigs) {
+            running = hash(running, hash(sig));
+        }
+        return running;
+    }
+} // namespace
+namespace detail {
+    bool Subcase::checkFilters() {
+        if (g_cs->subcaseStack.size() < size_t(g_cs->subcase_filter_levels)) {
+            if (!matchesAny(m_signature.m_name.c_str(), g_cs->filters[6], true, g_cs->case_sensitive))
+                return true;
+            if (matchesAny(m_signature.m_name.c_str(), g_cs->filters[7], false, g_cs->case_sensitive))
+                return true;
+        }
+        return false;
+    }
+
+    Subcase::Subcase(const String& name, const char* file, int line)
+            : m_signature({name, file, line}) {
+        if (!g_cs->reachedLeaf) {
+            if (g_cs->nextSubcaseStack.size() <= g_cs->subcaseStack.size()
+                || g_cs->nextSubcaseStack[g_cs->subcaseStack.size()] == m_signature) {
+                // Going down.
+                if (checkFilters()) { return; }
+
+                g_cs->subcaseStack.push_back(m_signature);
+                g_cs->currentSubcaseDepth++;
+                m_entered = true;
+                DOCTEST_ITERATE_THROUGH_REPORTERS(subcase_start, m_signature);
+            }
+        } else {
+            if (g_cs->subcaseStack[g_cs->currentSubcaseDepth] == m_signature) {
+                // This subcase is reentered via control flow.
+                g_cs->currentSubcaseDepth++;
+                m_entered = true;
+                DOCTEST_ITERATE_THROUGH_REPORTERS(subcase_start, m_signature);
+            } else if (g_cs->nextSubcaseStack.size() <= g_cs->currentSubcaseDepth
+                    && g_cs->fullyTraversedSubcases.find(hash(hash(g_cs->subcaseStack, g_cs->currentSubcaseDepth), hash(m_signature)))
+                    == g_cs->fullyTraversedSubcases.end()) {
+                if (checkFilters()) { return; }
+                // This subcase is part of the one to be executed next.
+                g_cs->nextSubcaseStack.clear();
+                g_cs->nextSubcaseStack.insert(g_cs->nextSubcaseStack.end(),
+                    g_cs->subcaseStack.begin(), g_cs->subcaseStack.begin() + g_cs->currentSubcaseDepth);
+                g_cs->nextSubcaseStack.push_back(m_signature);
+            }
+        }
+    }
+
+    DOCTEST_MSVC_SUPPRESS_WARNING_WITH_PUSH(4996) // std::uncaught_exception is deprecated in C++17
+    DOCTEST_GCC_SUPPRESS_WARNING_WITH_PUSH("-Wdeprecated-declarations")
+    DOCTEST_CLANG_SUPPRESS_WARNING_WITH_PUSH("-Wdeprecated-declarations")
+
+    Subcase::~Subcase() {
+        if (m_entered) {
+            g_cs->currentSubcaseDepth--;
+
+            if (!g_cs->reachedLeaf) {
+                // Leaf.
+                g_cs->fullyTraversedSubcases.insert(hash(g_cs->subcaseStack));
+                g_cs->nextSubcaseStack.clear();
+                g_cs->reachedLeaf = true;
+            } else if (g_cs->nextSubcaseStack.empty()) {
+                // All children are finished.
+                g_cs->fullyTraversedSubcases.insert(hash(g_cs->subcaseStack));
+            }
+
+#if defined(__cpp_lib_uncaught_exceptions) && __cpp_lib_uncaught_exceptions >= 201411L && (!defined(__MAC_OS_X_VERSION_MIN_REQUIRED) || __MAC_OS_X_VERSION_MIN_REQUIRED >= 101200)
+            if(std::uncaught_exceptions() > 0
+#else
+            if(std::uncaught_exception()
+#endif
+                && g_cs->shouldLogCurrentException) {
+                DOCTEST_ITERATE_THROUGH_REPORTERS(
+                        test_case_exception, {"exception thrown in subcase - will translate later "
+                                                "when the whole test case has been exited (cannot "
+                                                "translate while there is an active exception)",
+                                                false});
+                g_cs->shouldLogCurrentException = false;
+            }
+
+            DOCTEST_ITERATE_THROUGH_REPORTERS(subcase_end, DOCTEST_EMPTY);
+        }
+    }
+
+    DOCTEST_CLANG_SUPPRESS_WARNING_POP
+    DOCTEST_GCC_SUPPRESS_WARNING_POP
+    DOCTEST_MSVC_SUPPRESS_WARNING_POP
+
+    Subcase::operator bool() const { return m_entered; }
+
+    Result::Result(bool passed, const String& decomposition)
+            : m_passed(passed)
+            , m_decomp(decomposition) {}
+
+    ExpressionDecomposer::ExpressionDecomposer(assertType::Enum at)
+            : m_at(at) {}
+
+    TestSuite& TestSuite::operator*(const char* in) {
+        m_test_suite = in;
+        return *this;
+    }
+
+    TestCase::TestCase(funcType test, const char* file, unsigned line, const TestSuite& test_suite,
+                       const String& type, int template_id) {
+        m_file              = file;
+        m_line              = line;
+        m_name              = nullptr; // will be later overridden in operator*
+        m_test_suite        = test_suite.m_test_suite;
+        m_description       = test_suite.m_description;
+        m_skip              = test_suite.m_skip;
+        m_no_breaks         = test_suite.m_no_breaks;
+        m_no_output         = test_suite.m_no_output;
+        m_may_fail          = test_suite.m_may_fail;
+        m_should_fail       = test_suite.m_should_fail;
+        m_expected_failures = test_suite.m_expected_failures;
+        m_timeout           = test_suite.m_timeout;
+
+        m_test        = test;
+        m_type        = type;
+        m_template_id = template_id;
+    }
+
+    TestCase::TestCase(const TestCase& other)
+            : TestCaseData() {
+        *this = other;
+    }
+
+    DOCTEST_MSVC_SUPPRESS_WARNING_WITH_PUSH(26434) // hides a non-virtual function
+    TestCase& TestCase::operator=(const TestCase& other) {
+        TestCaseData::operator=(other);
+        m_test        = other.m_test;
+        m_type        = other.m_type;
+        m_template_id = other.m_template_id;
+        m_full_name   = other.m_full_name;
+
+        if(m_template_id != -1)
+            m_name = m_full_name.c_str();
+        return *this;
+    }
+    DOCTEST_MSVC_SUPPRESS_WARNING_POP
+
+    TestCase& TestCase::operator*(const char* in) {
+        m_name = in;
+        // make a new name with an appended type for templated test case
+        if(m_template_id != -1) {
+            m_full_name = String(m_name) + "<" + m_type + ">";
+            // redirect the name to point to the newly constructed full name
+            m_name = m_full_name.c_str();
+        }
+        return *this;
+    }
+
+    bool TestCase::operator<(const TestCase& other) const {
+        // this will be used only to differentiate between test cases - not relevant for sorting
+        if(m_line != other.m_line)
+            return m_line < other.m_line;
+        const int name_cmp = strcmp(m_name, other.m_name);
+        if(name_cmp != 0)
+            return name_cmp < 0;
+        const int file_cmp = m_file.compare(other.m_file);
+        if(file_cmp != 0)
+            return file_cmp < 0;
+        return m_template_id < other.m_template_id;
+    }
+
+    // all the registered tests
+    std::set<TestCase>& getRegisteredTests() {
+        static std::set<TestCase> data;
+        return data;
+    }
+} // namespace detail
+namespace {
+    using namespace detail;
+    // for sorting tests by file/line
+    bool fileOrderComparator(const TestCase* lhs, const TestCase* rhs) {
+        // this is needed because MSVC gives different case for drive letters
+        // for __FILE__ when evaluated in a header and a source file
+        const int res = lhs->m_file.compare(rhs->m_file, bool(DOCTEST_MSVC));
+        if(res != 0)
+            return res < 0;
+        if(lhs->m_line != rhs->m_line)
+            return lhs->m_line < rhs->m_line;
+        return lhs->m_template_id < rhs->m_template_id;
+    }
+
+    // for sorting tests by suite/file/line
+    bool suiteOrderComparator(const TestCase* lhs, const TestCase* rhs) {
+        const int res = std::strcmp(lhs->m_test_suite, rhs->m_test_suite);
+        if(res != 0)
+            return res < 0;
+        return fileOrderComparator(lhs, rhs);
+    }
+
+    // for sorting tests by name/suite/file/line
+    bool nameOrderComparator(const TestCase* lhs, const TestCase* rhs) {
+        const int res = std::strcmp(lhs->m_name, rhs->m_name);
+        if(res != 0)
+            return res < 0;
+        return suiteOrderComparator(lhs, rhs);
+    }
+
+    DOCTEST_CLANG_SUPPRESS_WARNING_WITH_PUSH("-Wdeprecated-declarations")
+    void color_to_stream(std::ostream& s, Color::Enum code) {
+        static_cast<void>(s);    // for DOCTEST_CONFIG_COLORS_NONE or DOCTEST_CONFIG_COLORS_WINDOWS
+        static_cast<void>(code); // for DOCTEST_CONFIG_COLORS_NONE
+#ifdef DOCTEST_CONFIG_COLORS_ANSI
+        if(g_no_colors ||
+           (isatty(STDOUT_FILENO) == false && getContextOptions()->force_colors == false))
+            return;
+
+        auto col = "";
+        // clang-format off
+            switch(code) { //!OCLINT missing break in switch statement / unnecessary default statement in covered switch statement
+                case Color::Red:         col = "[0;31m"; break;
+                case Color::Green:       col = "[0;32m"; break;
+                case Color::Blue:        col = "[0;34m"; break;
+                case Color::Cyan:        col = "[0;36m"; break;
+                case Color::Yellow:      col = "[0;33m"; break;
+                case Color::Grey:        col = "[1;30m"; break;
+                case Color::LightGrey:   col = "[0;37m"; break;
+                case Color::BrightRed:   col = "[1;31m"; break;
+                case Color::BrightGreen: col = "[1;32m"; break;
+                case Color::BrightWhite: col = "[1;37m"; break;
+                case Color::Bright: // invalid
+                case Color::None:
+                case Color::White:
+                default:                 col = "[0m";
+            }
+        // clang-format on
+        s << "\033" << col;
+#endif // DOCTEST_CONFIG_COLORS_ANSI
+
+#ifdef DOCTEST_CONFIG_COLORS_WINDOWS
+        if(g_no_colors ||
+           (_isatty(_fileno(stdout)) == false && getContextOptions()->force_colors == false))
+            return;
+
+        static struct ConsoleHelper {
+            HANDLE stdoutHandle;
+            WORD   origFgAttrs;
+            WORD   origBgAttrs;
+
+            ConsoleHelper() {
+                stdoutHandle = GetStdHandle(STD_OUTPUT_HANDLE);
+                CONSOLE_SCREEN_BUFFER_INFO csbiInfo;
+                GetConsoleScreenBufferInfo(stdoutHandle, &csbiInfo);
+                origFgAttrs = csbiInfo.wAttributes & ~(BACKGROUND_GREEN | BACKGROUND_RED |
+                    BACKGROUND_BLUE | BACKGROUND_INTENSITY);
+                origBgAttrs = csbiInfo.wAttributes & ~(FOREGROUND_GREEN | FOREGROUND_RED |
+                    FOREGROUND_BLUE | FOREGROUND_INTENSITY);
+            }
+        } ch;
+
+#define DOCTEST_SET_ATTR(x) SetConsoleTextAttribute(ch.stdoutHandle, x | ch.origBgAttrs)
+
+        // clang-format off
+        switch (code) {
+            case Color::White:       DOCTEST_SET_ATTR(FOREGROUND_GREEN | FOREGROUND_RED | FOREGROUND_BLUE); break;
+            case Color::Red:         DOCTEST_SET_ATTR(FOREGROUND_RED);                                      break;
+            case Color::Green:       DOCTEST_SET_ATTR(FOREGROUND_GREEN);                                    break;
+            case Color::Blue:        DOCTEST_SET_ATTR(FOREGROUND_BLUE);                                     break;
+            case Color::Cyan:        DOCTEST_SET_ATTR(FOREGROUND_BLUE | FOREGROUND_GREEN);                  break;
+            case Color::Yellow:      DOCTEST_SET_ATTR(FOREGROUND_RED | FOREGROUND_GREEN);                   break;
+            case Color::Grey:        DOCTEST_SET_ATTR(0);                                                   break;
+            case Color::LightGrey:   DOCTEST_SET_ATTR(FOREGROUND_INTENSITY);                                break;
+            case Color::BrightRed:   DOCTEST_SET_ATTR(FOREGROUND_INTENSITY | FOREGROUND_RED);               break;
+            case Color::BrightGreen: DOCTEST_SET_ATTR(FOREGROUND_INTENSITY | FOREGROUND_GREEN);             break;
+            case Color::BrightWhite: DOCTEST_SET_ATTR(FOREGROUND_INTENSITY | FOREGROUND_GREEN | FOREGROUND_RED | FOREGROUND_BLUE); break;
+            case Color::None:
+            case Color::Bright: // invalid
+            default:                 DOCTEST_SET_ATTR(ch.origFgAttrs);
+        }
+            // clang-format on
+#endif // DOCTEST_CONFIG_COLORS_WINDOWS
+    }
+    DOCTEST_CLANG_SUPPRESS_WARNING_POP
+
+    std::vector<const IExceptionTranslator*>& getExceptionTranslators() {
+        static std::vector<const IExceptionTranslator*> data;
+        return data;
+    }
+
+    String translateActiveException() {
+#ifndef DOCTEST_CONFIG_NO_EXCEPTIONS
+        String res;
+        auto&  translators = getExceptionTranslators();
+        for(auto& curr : translators)
+            if(curr->translate(res))
+                return res;
+        // clang-format off
+        DOCTEST_GCC_SUPPRESS_WARNING_WITH_PUSH("-Wcatch-value")
+        try {
+            throw;
+        } catch(std::exception& ex) {
+            return ex.what();
+        } catch(std::string& msg) {
+            return msg.c_str();
+        } catch(const char* msg) {
+            return msg;
+        } catch(...) {
+            return "unknown exception";
+        }
+        DOCTEST_GCC_SUPPRESS_WARNING_POP
+// clang-format on
+#else  // DOCTEST_CONFIG_NO_EXCEPTIONS
+        return "";
+#endif // DOCTEST_CONFIG_NO_EXCEPTIONS
+    }
+} // namespace
+
+namespace detail {
+    // used by the macros for registering tests
+    int regTest(const TestCase& tc) {
+        getRegisteredTests().insert(tc);
+        return 0;
+    }
+
+    // sets the current test suite
+    int setTestSuite(const TestSuite& ts) {
+        doctest_detail_test_suite_ns::getCurrentTestSuite() = ts;
+        return 0;
+    }
+
+#ifdef DOCTEST_IS_DEBUGGER_ACTIVE
+    bool isDebuggerActive() { return DOCTEST_IS_DEBUGGER_ACTIVE(); }
+#else // DOCTEST_IS_DEBUGGER_ACTIVE
+#ifdef DOCTEST_PLATFORM_LINUX
+    class ErrnoGuard {
+    public:
+        ErrnoGuard() : m_oldErrno(errno) {}
+        ~ErrnoGuard() { errno = m_oldErrno; }
+    private:
+        int m_oldErrno;
+    };
+    // See the comments in Catch2 for the reasoning behind this implementation:
+    // https://github.com/catchorg/Catch2/blob/v2.13.1/include/internal/catch_debugger.cpp#L79-L102
+    bool isDebuggerActive() {
+        ErrnoGuard guard;
+        std::ifstream in("/proc/self/status");
+        for(std::string line; std::getline(in, line);) {
+            static const int PREFIX_LEN = 11;
+            if(line.compare(0, PREFIX_LEN, "TracerPid:\t") == 0) {
+                return line.length() > PREFIX_LEN && line[PREFIX_LEN] != '0';
+            }
+        }
+        return false;
+    }
+#elif defined(DOCTEST_PLATFORM_MAC)
+    // The following function is taken directly from the following technical note:
+    // https://developer.apple.com/library/archive/qa/qa1361/_index.html
+    // Returns true if the current process is being debugged (either
+    // running under the debugger or has a debugger attached post facto).
+    bool isDebuggerActive() {
+        int        mib[4];
+        kinfo_proc info;
+        size_t     size;
+        // Initialize the flags so that, if sysctl fails for some bizarre
+        // reason, we get a predictable result.
+        info.kp_proc.p_flag = 0;
+        // Initialize mib, which tells sysctl the info we want, in this case
+        // we're looking for information about a specific process ID.
+        mib[0] = CTL_KERN;
+        mib[1] = KERN_PROC;
+        mib[2] = KERN_PROC_PID;
+        mib[3] = getpid();
+        // Call sysctl.
+        size = sizeof(info);
+        if(sysctl(mib, DOCTEST_COUNTOF(mib), &info, &size, 0, 0) != 0) {
+            std::cerr << "\nCall to sysctl failed - unable to determine if debugger is active **\n";
+            return false;
+        }
+        // We're being debugged if the P_TRACED flag is set.
+        return ((info.kp_proc.p_flag & P_TRACED) != 0);
+    }
+#elif DOCTEST_MSVC || defined(__MINGW32__) || defined(__MINGW64__)
+    bool isDebuggerActive() { return ::IsDebuggerPresent() != 0; }
+#else
+    bool isDebuggerActive() { return false; }
+#endif // Platform
+#endif // DOCTEST_IS_DEBUGGER_ACTIVE
+
+    void registerExceptionTranslatorImpl(const IExceptionTranslator* et) {
+        if(std::find(getExceptionTranslators().begin(), getExceptionTranslators().end(), et) ==
+           getExceptionTranslators().end())
+            getExceptionTranslators().push_back(et);
+    }
+
+    DOCTEST_THREAD_LOCAL std::vector<IContextScope*> g_infoContexts; // for logging with INFO()
+
+    ContextScopeBase::ContextScopeBase() {
+        g_infoContexts.push_back(this);
+    }
+
+    ContextScopeBase::ContextScopeBase(ContextScopeBase&& other) noexcept {
+        if (other.need_to_destroy) {
+            other.destroy();
+        }
+        other.need_to_destroy = false;
+        g_infoContexts.push_back(this);
+    }
+
+    DOCTEST_MSVC_SUPPRESS_WARNING_WITH_PUSH(4996) // std::uncaught_exception is deprecated in C++17
+    DOCTEST_GCC_SUPPRESS_WARNING_WITH_PUSH("-Wdeprecated-declarations")
+    DOCTEST_CLANG_SUPPRESS_WARNING_WITH_PUSH("-Wdeprecated-declarations")
+
+    // destroy cannot be inlined into the destructor because that would mean calling stringify after
+    // ContextScope has been destroyed (base class destructors run after derived class destructors).
+    // Instead, ContextScope calls this method directly from its destructor.
+    void ContextScopeBase::destroy() {
+#if defined(__cpp_lib_uncaught_exceptions) && __cpp_lib_uncaught_exceptions >= 201411L && (!defined(__MAC_OS_X_VERSION_MIN_REQUIRED) || __MAC_OS_X_VERSION_MIN_REQUIRED >= 101200)
+        if(std::uncaught_exceptions() > 0) {
+#else
+        if(std::uncaught_exception()) {
+#endif
+            std::ostringstream s;
+            this->stringify(&s);
+            g_cs->stringifiedContexts.push_back(s.str().c_str());
+        }
+        g_infoContexts.pop_back();
+    }
+
+    DOCTEST_CLANG_SUPPRESS_WARNING_POP
+    DOCTEST_GCC_SUPPRESS_WARNING_POP
+    DOCTEST_MSVC_SUPPRESS_WARNING_POP
+} // namespace detail
+namespace {
+    using namespace detail;
+
+#if !defined(DOCTEST_CONFIG_POSIX_SIGNALS) && !defined(DOCTEST_CONFIG_WINDOWS_SEH)
+    struct FatalConditionHandler
+    {
+        static void reset() {}
+        static void allocateAltStackMem() {}
+        static void freeAltStackMem() {}
+    };
+#else // DOCTEST_CONFIG_POSIX_SIGNALS || DOCTEST_CONFIG_WINDOWS_SEH
+
+    void reportFatal(const std::string&);
+
+#ifdef DOCTEST_PLATFORM_WINDOWS
+
+    struct SignalDefs
+    {
+        DWORD id;
+        const char* name;
+    };
+    // There is no 1-1 mapping between signals and windows exceptions.
+    // Windows can easily distinguish between SO and SigSegV,
+    // but SigInt, SigTerm, etc are handled differently.
+    SignalDefs signalDefs[] = {
+            {static_cast<DWORD>(EXCEPTION_ILLEGAL_INSTRUCTION),
+             "SIGILL - Illegal instruction signal"},
+            {static_cast<DWORD>(EXCEPTION_STACK_OVERFLOW), "SIGSEGV - Stack overflow"},
+            {static_cast<DWORD>(EXCEPTION_ACCESS_VIOLATION),
+             "SIGSEGV - Segmentation violation signal"},
+            {static_cast<DWORD>(EXCEPTION_INT_DIVIDE_BY_ZERO), "Divide by zero error"},
+    };
+
+    struct FatalConditionHandler
+    {
+        static LONG CALLBACK handleException(PEXCEPTION_POINTERS ExceptionInfo) {
+            // Multiple threads may enter this filter/handler at once. We want the error message to be printed on the
+            // console just once no matter how many threads have crashed.
+            DOCTEST_DECLARE_STATIC_MUTEX(mutex)
+            static bool execute = true;
+            {
+                DOCTEST_LOCK_MUTEX(mutex)
+                if(execute) {
+                    bool reported = false;
+                    for(size_t i = 0; i < DOCTEST_COUNTOF(signalDefs); ++i) {
+                        if(ExceptionInfo->ExceptionRecord->ExceptionCode == signalDefs[i].id) {
+                            reportFatal(signalDefs[i].name);
+                            reported = true;
+                            break;
+                        }
+                    }
+                    if(reported == false)
+                        reportFatal("Unhandled SEH exception caught");
+                    if(isDebuggerActive() && !g_cs->no_breaks)
+                        DOCTEST_BREAK_INTO_DEBUGGER();
+                }
+                execute = false;
+            }
+            std::exit(EXIT_FAILURE);
+        }
+
+        static void allocateAltStackMem() {}
+        static void freeAltStackMem() {}
+
+        FatalConditionHandler() {
+            isSet = true;
+            // 32k seems enough for doctest to handle stack overflow,
+            // but the value was found experimentally, so there is no strong guarantee
+            guaranteeSize = 32 * 1024;
+            // Register an unhandled exception filter
+            previousTop = SetUnhandledExceptionFilter(handleException);
+            // Pass in guarantee size to be filled
+            SetThreadStackGuarantee(&guaranteeSize);
+
+            // On Windows uncaught exceptions from another thread, exceptions from
+            // destructors, or calls to std::terminate are not a SEH exception
+
+            // The terminal handler gets called when:
+            // - std::terminate is called FROM THE TEST RUNNER THREAD
+            // - an exception is thrown from a destructor FROM THE TEST RUNNER THREAD
+            original_terminate_handler = std::get_terminate();
+            std::set_terminate([]() DOCTEST_NOEXCEPT {
+                reportFatal("Terminate handler called");
+                if(isDebuggerActive() && !g_cs->no_breaks)
+                    DOCTEST_BREAK_INTO_DEBUGGER();
+                std::exit(EXIT_FAILURE); // explicitly exit - otherwise the SIGABRT handler may be called as well
+            });
+
+            // SIGABRT is raised when:
+            // - std::terminate is called FROM A DIFFERENT THREAD
+            // - an exception is thrown from a destructor FROM A DIFFERENT THREAD
+            // - an uncaught exception is thrown FROM A DIFFERENT THREAD
+            prev_sigabrt_handler = std::signal(SIGABRT, [](int signal) DOCTEST_NOEXCEPT {
+                if(signal == SIGABRT) {
+                    reportFatal("SIGABRT - Abort (abnormal termination) signal");
+                    if(isDebuggerActive() && !g_cs->no_breaks)
+                        DOCTEST_BREAK_INTO_DEBUGGER();
+                    std::exit(EXIT_FAILURE);
+                }
+            });
+
+            // The following settings are taken from google test, and more
+            // specifically from UnitTest::Run() inside of gtest.cc
+
+            // the user does not want to see pop-up dialogs about crashes
+            prev_error_mode_1 = SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOALIGNMENTFAULTEXCEPT |
+                                             SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+            // This forces the abort message to go to stderr in all circumstances.
+            prev_error_mode_2 = _set_error_mode(_OUT_TO_STDERR);
+            // In the debug version, Visual Studio pops up a separate dialog
+            // offering a choice to debug the aborted program - we want to disable that.
+            prev_abort_behavior = _set_abort_behavior(0x0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+            // In debug mode, the Windows CRT can crash with an assertion over invalid
+            // input (e.g. passing an invalid file descriptor). The default handling
+            // for these assertions is to pop up a dialog and wait for user input.
+            // Instead ask the CRT to dump such assertions to stderr non-interactively.
+            prev_report_mode = _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE | _CRTDBG_MODE_DEBUG);
+            prev_report_file = _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+        }
+
+        static void reset() {
+            if(isSet) {
+                // Unregister handler and restore the old guarantee
+                SetUnhandledExceptionFilter(previousTop);
+                SetThreadStackGuarantee(&guaranteeSize);
+                std::set_terminate(original_terminate_handler);
+                std::signal(SIGABRT, prev_sigabrt_handler);
+                SetErrorMode(prev_error_mode_1);
+                _set_error_mode(prev_error_mode_2);
