@@ -3622,3 +3622,607 @@ static void getPixelColorRGBA8(unsigned char* r, unsigned char* g,
          && 256U * in[i * 6 + 2] + in[i * 6 + 3] == mode->key_g
          && 256U * in[i * 6 + 4] + in[i * 6 + 5] == mode->key_b) *a = 0;
       else *a = 255;
+    }
+  } else if(mode->colortype == LCT_PALETTE) {
+    unsigned index;
+    if(mode->bitdepth == 8) index = in[i];
+    else {
+      size_t j = i * mode->bitdepth;
+      index = readBitsFromReversedStream(&j, in, mode->bitdepth);
+    }
+    /*out of bounds of palette not checked: see lodepng_color_mode_alloc_palette.*/
+    *r = mode->palette[index * 4 + 0];
+    *g = mode->palette[index * 4 + 1];
+    *b = mode->palette[index * 4 + 2];
+    *a = mode->palette[index * 4 + 3];
+  } else if(mode->colortype == LCT_GREY_ALPHA) {
+    if(mode->bitdepth == 8) {
+      *r = *g = *b = in[i * 2 + 0];
+      *a = in[i * 2 + 1];
+    } else {
+      *r = *g = *b = in[i * 4 + 0];
+      *a = in[i * 4 + 2];
+    }
+  } else if(mode->colortype == LCT_RGBA) {
+    if(mode->bitdepth == 8) {
+      *r = in[i * 4 + 0];
+      *g = in[i * 4 + 1];
+      *b = in[i * 4 + 2];
+      *a = in[i * 4 + 3];
+    } else {
+      *r = in[i * 8 + 0];
+      *g = in[i * 8 + 2];
+      *b = in[i * 8 + 4];
+      *a = in[i * 8 + 6];
+    }
+  }
+}
+
+/*Similar to getPixelColorRGBA8, but with all the for loops inside of the color
+mode test cases, optimized to convert the colors much faster, when converting
+to the common case of RGBA with 8 bit per channel. buffer must be RGBA with
+enough memory.*/
+static void getPixelColorsRGBA8(unsigned char* LODEPNG_RESTRICT buffer, size_t numpixels,
+                                const unsigned char* LODEPNG_RESTRICT in,
+                                const LodePNGColorMode* mode) {
+  unsigned num_channels = 4;
+  size_t i;
+  if(mode->colortype == LCT_GREY) {
+    if(mode->bitdepth == 8) {
+      for(i = 0; i != numpixels; ++i, buffer += num_channels) {
+        buffer[0] = buffer[1] = buffer[2] = in[i];
+        buffer[3] = 255;
+      }
+      if(mode->key_defined) {
+        buffer -= numpixels * num_channels;
+        for(i = 0; i != numpixels; ++i, buffer += num_channels) {
+          if(buffer[0] == mode->key_r) buffer[3] = 0;
+        }
+      }
+    } else if(mode->bitdepth == 16) {
+      for(i = 0; i != numpixels; ++i, buffer += num_channels) {
+        buffer[0] = buffer[1] = buffer[2] = in[i * 2];
+        buffer[3] = mode->key_defined && 256U * in[i * 2 + 0] + in[i * 2 + 1] == mode->key_r ? 0 : 255;
+      }
+    } else {
+      unsigned highest = ((1U << mode->bitdepth) - 1U); /*highest possible value for this bit depth*/
+      size_t j = 0;
+      for(i = 0; i != numpixels; ++i, buffer += num_channels) {
+        unsigned value = readBitsFromReversedStream(&j, in, mode->bitdepth);
+        buffer[0] = buffer[1] = buffer[2] = (value * 255) / highest;
+        buffer[3] = mode->key_defined && value == mode->key_r ? 0 : 255;
+      }
+    }
+  } else if(mode->colortype == LCT_RGB) {
+    if(mode->bitdepth == 8) {
+      for(i = 0; i != numpixels; ++i, buffer += num_channels) {
+        lodepng_memcpy(buffer, &in[i * 3], 3);
+        buffer[3] = 255;
+      }
+      if(mode->key_defined) {
+        buffer -= numpixels * num_channels;
+        for(i = 0; i != numpixels; ++i, buffer += num_channels) {
+          if(buffer[0] == mode->key_r && buffer[1]== mode->key_g && buffer[2] == mode->key_b) buffer[3] = 0;
+        }
+      }
+    } else {
+      for(i = 0; i != numpixels; ++i, buffer += num_channels) {
+        buffer[0] = in[i * 6 + 0];
+        buffer[1] = in[i * 6 + 2];
+        buffer[2] = in[i * 6 + 4];
+        buffer[3] = mode->key_defined
+           && 256U * in[i * 6 + 0] + in[i * 6 + 1] == mode->key_r
+           && 256U * in[i * 6 + 2] + in[i * 6 + 3] == mode->key_g
+           && 256U * in[i * 6 + 4] + in[i * 6 + 5] == mode->key_b ? 0 : 255;
+      }
+    }
+  } else if(mode->colortype == LCT_PALETTE) {
+    if(mode->bitdepth == 8) {
+      for(i = 0; i != numpixels; ++i, buffer += num_channels) {
+        unsigned index = in[i];
+        /*out of bounds of palette not checked: see lodepng_color_mode_alloc_palette.*/
+        lodepng_memcpy(buffer, &mode->palette[index * 4], 4);
+      }
+    } else {
+      size_t j = 0;
+      for(i = 0; i != numpixels; ++i, buffer += num_channels) {
+        unsigned index = readBitsFromReversedStream(&j, in, mode->bitdepth);
+        /*out of bounds of palette not checked: see lodepng_color_mode_alloc_palette.*/
+        lodepng_memcpy(buffer, &mode->palette[index * 4], 4);
+      }
+    }
+  } else if(mode->colortype == LCT_GREY_ALPHA) {
+    if(mode->bitdepth == 8) {
+      for(i = 0; i != numpixels; ++i, buffer += num_channels) {
+        buffer[0] = buffer[1] = buffer[2] = in[i * 2 + 0];
+        buffer[3] = in[i * 2 + 1];
+      }
+    } else {
+      for(i = 0; i != numpixels; ++i, buffer += num_channels) {
+        buffer[0] = buffer[1] = buffer[2] = in[i * 4 + 0];
+        buffer[3] = in[i * 4 + 2];
+      }
+    }
+  } else if(mode->colortype == LCT_RGBA) {
+    if(mode->bitdepth == 8) {
+      lodepng_memcpy(buffer, in, numpixels * 4);
+    } else {
+      for(i = 0; i != numpixels; ++i, buffer += num_channels) {
+        buffer[0] = in[i * 8 + 0];
+        buffer[1] = in[i * 8 + 2];
+        buffer[2] = in[i * 8 + 4];
+        buffer[3] = in[i * 8 + 6];
+      }
+    }
+  }
+}
+
+/*Similar to getPixelColorsRGBA8, but with 3-channel RGB output.*/
+static void getPixelColorsRGB8(unsigned char* LODEPNG_RESTRICT buffer, size_t numpixels,
+                               const unsigned char* LODEPNG_RESTRICT in,
+                               const LodePNGColorMode* mode) {
+  const unsigned num_channels = 3;
+  size_t i;
+  if(mode->colortype == LCT_GREY) {
+    if(mode->bitdepth == 8) {
+      for(i = 0; i != numpixels; ++i, buffer += num_channels) {
+        buffer[0] = buffer[1] = buffer[2] = in[i];
+      }
+    } else if(mode->bitdepth == 16) {
+      for(i = 0; i != numpixels; ++i, buffer += num_channels) {
+        buffer[0] = buffer[1] = buffer[2] = in[i * 2];
+      }
+    } else {
+      unsigned highest = ((1U << mode->bitdepth) - 1U); /*highest possible value for this bit depth*/
+      size_t j = 0;
+      for(i = 0; i != numpixels; ++i, buffer += num_channels) {
+        unsigned value = readBitsFromReversedStream(&j, in, mode->bitdepth);
+        buffer[0] = buffer[1] = buffer[2] = (value * 255) / highest;
+      }
+    }
+  } else if(mode->colortype == LCT_RGB) {
+    if(mode->bitdepth == 8) {
+      lodepng_memcpy(buffer, in, numpixels * 3);
+    } else {
+      for(i = 0; i != numpixels; ++i, buffer += num_channels) {
+        buffer[0] = in[i * 6 + 0];
+        buffer[1] = in[i * 6 + 2];
+        buffer[2] = in[i * 6 + 4];
+      }
+    }
+  } else if(mode->colortype == LCT_PALETTE) {
+    if(mode->bitdepth == 8) {
+      for(i = 0; i != numpixels; ++i, buffer += num_channels) {
+        unsigned index = in[i];
+        /*out of bounds of palette not checked: see lodepng_color_mode_alloc_palette.*/
+        lodepng_memcpy(buffer, &mode->palette[index * 4], 3);
+      }
+    } else {
+      size_t j = 0;
+      for(i = 0; i != numpixels; ++i, buffer += num_channels) {
+        unsigned index = readBitsFromReversedStream(&j, in, mode->bitdepth);
+        /*out of bounds of palette not checked: see lodepng_color_mode_alloc_palette.*/
+        lodepng_memcpy(buffer, &mode->palette[index * 4], 3);
+      }
+    }
+  } else if(mode->colortype == LCT_GREY_ALPHA) {
+    if(mode->bitdepth == 8) {
+      for(i = 0; i != numpixels; ++i, buffer += num_channels) {
+        buffer[0] = buffer[1] = buffer[2] = in[i * 2 + 0];
+      }
+    } else {
+      for(i = 0; i != numpixels; ++i, buffer += num_channels) {
+        buffer[0] = buffer[1] = buffer[2] = in[i * 4 + 0];
+      }
+    }
+  } else if(mode->colortype == LCT_RGBA) {
+    if(mode->bitdepth == 8) {
+      for(i = 0; i != numpixels; ++i, buffer += num_channels) {
+        lodepng_memcpy(buffer, &in[i * 4], 3);
+      }
+    } else {
+      for(i = 0; i != numpixels; ++i, buffer += num_channels) {
+        buffer[0] = in[i * 8 + 0];
+        buffer[1] = in[i * 8 + 2];
+        buffer[2] = in[i * 8 + 4];
+      }
+    }
+  }
+}
+
+/*Get RGBA16 color of pixel with index i (y * width + x) from the raw image with
+given color type, but the given color type must be 16-bit itself.*/
+static void getPixelColorRGBA16(unsigned short* r, unsigned short* g, unsigned short* b, unsigned short* a,
+                                const unsigned char* in, size_t i, const LodePNGColorMode* mode) {
+  if(mode->colortype == LCT_GREY) {
+    *r = *g = *b = 256 * in[i * 2 + 0] + in[i * 2 + 1];
+    if(mode->key_defined && 256U * in[i * 2 + 0] + in[i * 2 + 1] == mode->key_r) *a = 0;
+    else *a = 65535;
+  } else if(mode->colortype == LCT_RGB) {
+    *r = 256u * in[i * 6 + 0] + in[i * 6 + 1];
+    *g = 256u * in[i * 6 + 2] + in[i * 6 + 3];
+    *b = 256u * in[i * 6 + 4] + in[i * 6 + 5];
+    if(mode->key_defined
+       && 256u * in[i * 6 + 0] + in[i * 6 + 1] == mode->key_r
+       && 256u * in[i * 6 + 2] + in[i * 6 + 3] == mode->key_g
+       && 256u * in[i * 6 + 4] + in[i * 6 + 5] == mode->key_b) *a = 0;
+    else *a = 65535;
+  } else if(mode->colortype == LCT_GREY_ALPHA) {
+    *r = *g = *b = 256u * in[i * 4 + 0] + in[i * 4 + 1];
+    *a = 256u * in[i * 4 + 2] + in[i * 4 + 3];
+  } else if(mode->colortype == LCT_RGBA) {
+    *r = 256u * in[i * 8 + 0] + in[i * 8 + 1];
+    *g = 256u * in[i * 8 + 2] + in[i * 8 + 3];
+    *b = 256u * in[i * 8 + 4] + in[i * 8 + 5];
+    *a = 256u * in[i * 8 + 6] + in[i * 8 + 7];
+  }
+}
+
+unsigned lodepng_convert(unsigned char* out, const unsigned char* in,
+                         const LodePNGColorMode* mode_out, const LodePNGColorMode* mode_in,
+                         unsigned w, unsigned h) {
+  size_t i;
+  ColorTree tree;
+  size_t numpixels = (size_t)w * (size_t)h;
+  unsigned error = 0;
+
+  if(mode_in->colortype == LCT_PALETTE && !mode_in->palette) {
+    return 107; /* error: must provide palette if input mode is palette */
+  }
+
+  if(lodepng_color_mode_equal(mode_out, mode_in)) {
+    size_t numbytes = lodepng_get_raw_size(w, h, mode_in);
+    lodepng_memcpy(out, in, numbytes);
+    return 0;
+  }
+
+  if(mode_out->colortype == LCT_PALETTE) {
+    size_t palettesize = mode_out->palettesize;
+    const unsigned char* palette = mode_out->palette;
+    size_t palsize = (size_t)1u << mode_out->bitdepth;
+    /*if the user specified output palette but did not give the values, assume
+    they want the values of the input color type (assuming that one is palette).
+    Note that we never create a new palette ourselves.*/
+    if(palettesize == 0) {
+      palettesize = mode_in->palettesize;
+      palette = mode_in->palette;
+      /*if the input was also palette with same bitdepth, then the color types are also
+      equal, so copy literally. This to preserve the exact indices that were in the PNG
+      even in case there are duplicate colors in the palette.*/
+      if(mode_in->colortype == LCT_PALETTE && mode_in->bitdepth == mode_out->bitdepth) {
+        size_t numbytes = lodepng_get_raw_size(w, h, mode_in);
+        lodepng_memcpy(out, in, numbytes);
+        return 0;
+      }
+    }
+    if(palettesize < palsize) palsize = palettesize;
+    color_tree_init(&tree);
+    for(i = 0; i != palsize; ++i) {
+      const unsigned char* p = &palette[i * 4];
+      error = color_tree_add(&tree, p[0], p[1], p[2], p[3], (unsigned)i);
+      if(error) break;
+    }
+  }
+
+  if(!error) {
+    if(mode_in->bitdepth == 16 && mode_out->bitdepth == 16) {
+      for(i = 0; i != numpixels; ++i) {
+        unsigned short r = 0, g = 0, b = 0, a = 0;
+        getPixelColorRGBA16(&r, &g, &b, &a, in, i, mode_in);
+        rgba16ToPixel(out, i, mode_out, r, g, b, a);
+      }
+    } else if(mode_out->bitdepth == 8 && mode_out->colortype == LCT_RGBA) {
+      getPixelColorsRGBA8(out, numpixels, in, mode_in);
+    } else if(mode_out->bitdepth == 8 && mode_out->colortype == LCT_RGB) {
+      getPixelColorsRGB8(out, numpixels, in, mode_in);
+    } else {
+      unsigned char r = 0, g = 0, b = 0, a = 0;
+      for(i = 0; i != numpixels; ++i) {
+        getPixelColorRGBA8(&r, &g, &b, &a, in, i, mode_in);
+        error = rgba8ToPixel(out, i, mode_out, &tree, r, g, b, a);
+        if(error) break;
+      }
+    }
+  }
+
+  if(mode_out->colortype == LCT_PALETTE) {
+    color_tree_cleanup(&tree);
+  }
+
+  return error;
+}
+
+
+/* Converts a single rgb color without alpha from one type to another, color bits truncated to
+their bitdepth. In case of single channel (gray or palette), only the r channel is used. Slow
+function, do not use to process all pixels of an image. Alpha channel not supported on purpose:
+this is for bKGD, supporting alpha may prevent it from finding a color in the palette, from the
+specification it looks like bKGD should ignore the alpha values of the palette since it can use
+any palette index but doesn't have an alpha channel. Idem with ignoring color key. */
+unsigned lodepng_convert_rgb(
+    unsigned* r_out, unsigned* g_out, unsigned* b_out,
+    unsigned r_in, unsigned g_in, unsigned b_in,
+    const LodePNGColorMode* mode_out, const LodePNGColorMode* mode_in) {
+  unsigned r = 0, g = 0, b = 0;
+  unsigned mul = 65535 / ((1u << mode_in->bitdepth) - 1u); /*65535, 21845, 4369, 257, 1*/
+  unsigned shift = 16 - mode_out->bitdepth;
+
+  if(mode_in->colortype == LCT_GREY || mode_in->colortype == LCT_GREY_ALPHA) {
+    r = g = b = r_in * mul;
+  } else if(mode_in->colortype == LCT_RGB || mode_in->colortype == LCT_RGBA) {
+    r = r_in * mul;
+    g = g_in * mul;
+    b = b_in * mul;
+  } else if(mode_in->colortype == LCT_PALETTE) {
+    if(r_in >= mode_in->palettesize) return 82;
+    r = mode_in->palette[r_in * 4 + 0] * 257u;
+    g = mode_in->palette[r_in * 4 + 1] * 257u;
+    b = mode_in->palette[r_in * 4 + 2] * 257u;
+  } else {
+    return 31;
+  }
+
+  /* now convert to output format */
+  if(mode_out->colortype == LCT_GREY || mode_out->colortype == LCT_GREY_ALPHA) {
+    *r_out = r >> shift ;
+  } else if(mode_out->colortype == LCT_RGB || mode_out->colortype == LCT_RGBA) {
+    *r_out = r >> shift ;
+    *g_out = g >> shift ;
+    *b_out = b >> shift ;
+  } else if(mode_out->colortype == LCT_PALETTE) {
+    unsigned i;
+    /* a 16-bit color cannot be in the palette */
+    if((r >> 8) != (r & 255) || (g >> 8) != (g & 255) || (b >> 8) != (b & 255)) return 82;
+    for(i = 0; i < mode_out->palettesize; i++) {
+      unsigned j = i * 4;
+      if((r >> 8) == mode_out->palette[j + 0] && (g >> 8) == mode_out->palette[j + 1] &&
+          (b >> 8) == mode_out->palette[j + 2]) {
+        *r_out = i;
+        return 0;
+      }
+    }
+    return 82;
+  } else {
+    return 31;
+  }
+
+  return 0;
+}
+
+#ifdef LODEPNG_COMPILE_ENCODER
+
+void lodepng_color_stats_init(LodePNGColorStats* stats) {
+  /*stats*/
+  stats->colored = 0;
+  stats->key = 0;
+  stats->key_r = stats->key_g = stats->key_b = 0;
+  stats->alpha = 0;
+  stats->numcolors = 0;
+  stats->bits = 1;
+  stats->numpixels = 0;
+  /*settings*/
+  stats->allow_palette = 1;
+  stats->allow_greyscale = 1;
+}
+
+/*function used for debug purposes with C++*/
+/*void printColorStats(LodePNGColorStats* p) {
+  std::cout << "colored: " << (int)p->colored << ", ";
+  std::cout << "key: " << (int)p->key << ", ";
+  std::cout << "key_r: " << (int)p->key_r << ", ";
+  std::cout << "key_g: " << (int)p->key_g << ", ";
+  std::cout << "key_b: " << (int)p->key_b << ", ";
+  std::cout << "alpha: " << (int)p->alpha << ", ";
+  std::cout << "numcolors: " << (int)p->numcolors << ", ";
+  std::cout << "bits: " << (int)p->bits << std::endl;
+}*/
+
+/*Returns how many bits needed to represent given value (max 8 bit)*/
+static unsigned getValueRequiredBits(unsigned char value) {
+  if(value == 0 || value == 255) return 1;
+  /*The scaling of 2-bit and 4-bit values uses multiples of 85 and 17*/
+  if(value % 17 == 0) return value % 85 == 0 ? 2 : 4;
+  return 8;
+}
+
+/*stats must already have been inited. */
+unsigned lodepng_compute_color_stats(LodePNGColorStats* stats,
+                                     const unsigned char* in, unsigned w, unsigned h,
+                                     const LodePNGColorMode* mode_in) {
+  size_t i;
+  ColorTree tree;
+  size_t numpixels = (size_t)w * (size_t)h;
+  unsigned error = 0;
+
+  /* mark things as done already if it would be impossible to have a more expensive case */
+  unsigned colored_done = lodepng_is_greyscale_type(mode_in) ? 1 : 0;
+  unsigned alpha_done = lodepng_can_have_alpha(mode_in) ? 0 : 1;
+  unsigned numcolors_done = 0;
+  unsigned bpp = lodepng_get_bpp(mode_in);
+  unsigned bits_done = (stats->bits == 1 && bpp == 1) ? 1 : 0;
+  unsigned sixteen = 0; /* whether the input image is 16 bit */
+  unsigned maxnumcolors = 257;
+  if(bpp <= 8) maxnumcolors = LODEPNG_MIN(257, stats->numcolors + (1u << bpp));
+
+  stats->numpixels += numpixels;
+
+  /*if palette not allowed, no need to compute numcolors*/
+  if(!stats->allow_palette) numcolors_done = 1;
+
+  color_tree_init(&tree);
+
+  /*If the stats was already filled in from previous data, fill its palette in tree
+  and mark things as done already if we know they are the most expensive case already*/
+  if(stats->alpha) alpha_done = 1;
+  if(stats->colored) colored_done = 1;
+  if(stats->bits == 16) numcolors_done = 1;
+  if(stats->bits >= bpp) bits_done = 1;
+  if(stats->numcolors >= maxnumcolors) numcolors_done = 1;
+
+  if(!numcolors_done) {
+    for(i = 0; i < stats->numcolors; i++) {
+      const unsigned char* color = &stats->palette[i * 4];
+      error = color_tree_add(&tree, color[0], color[1], color[2], color[3], (unsigned)i);
+      if(error) goto cleanup;
+    }
+  }
+
+  /*Check if the 16-bit input is truly 16-bit*/
+  if(mode_in->bitdepth == 16 && !sixteen) {
+    unsigned short r = 0, g = 0, b = 0, a = 0;
+    for(i = 0; i != numpixels; ++i) {
+      getPixelColorRGBA16(&r, &g, &b, &a, in, i, mode_in);
+      if((r & 255) != ((r >> 8) & 255) || (g & 255) != ((g >> 8) & 255) ||
+         (b & 255) != ((b >> 8) & 255) || (a & 255) != ((a >> 8) & 255)) /*first and second byte differ*/ {
+        stats->bits = 16;
+        sixteen = 1;
+        bits_done = 1;
+        numcolors_done = 1; /*counting colors no longer useful, palette doesn't support 16-bit*/
+        break;
+      }
+    }
+  }
+
+  if(sixteen) {
+    unsigned short r = 0, g = 0, b = 0, a = 0;
+
+    for(i = 0; i != numpixels; ++i) {
+      getPixelColorRGBA16(&r, &g, &b, &a, in, i, mode_in);
+
+      if(!colored_done && (r != g || r != b)) {
+        stats->colored = 1;
+        colored_done = 1;
+      }
+
+      if(!alpha_done) {
+        unsigned matchkey = (r == stats->key_r && g == stats->key_g && b == stats->key_b);
+        if(a != 65535 && (a != 0 || (stats->key && !matchkey))) {
+          stats->alpha = 1;
+          stats->key = 0;
+          alpha_done = 1;
+        } else if(a == 0 && !stats->alpha && !stats->key) {
+          stats->key = 1;
+          stats->key_r = r;
+          stats->key_g = g;
+          stats->key_b = b;
+        } else if(a == 65535 && stats->key && matchkey) {
+          /* Color key cannot be used if an opaque pixel also has that RGB color. */
+          stats->alpha = 1;
+          stats->key = 0;
+          alpha_done = 1;
+        }
+      }
+      if(alpha_done && numcolors_done && colored_done && bits_done) break;
+    }
+
+    if(stats->key && !stats->alpha) {
+      for(i = 0; i != numpixels; ++i) {
+        getPixelColorRGBA16(&r, &g, &b, &a, in, i, mode_in);
+        if(a != 0 && r == stats->key_r && g == stats->key_g && b == stats->key_b) {
+          /* Color key cannot be used if an opaque pixel also has that RGB color. */
+          stats->alpha = 1;
+          stats->key = 0;
+          alpha_done = 1;
+        }
+      }
+    }
+  } else /* < 16-bit */ {
+    unsigned char r = 0, g = 0, b = 0, a = 0;
+    unsigned char pr = 0, pg = 0, pb = 0, pa = 0;
+    for(i = 0; i != numpixels; ++i) {
+      getPixelColorRGBA8(&r, &g, &b, &a, in, i, mode_in);
+
+      /*skip if color same as before, this speeds up large non-photographic
+      images with many same colors by avoiding 'color_tree_has' below */
+      if(i != 0 && r == pr && g == pg && b == pb && a == pa) continue;
+      pr = r;
+      pg = g;
+      pb = b;
+      pa = a;
+
+      if(!bits_done && stats->bits < 8) {
+        /*only r is checked, < 8 bits is only relevant for grayscale*/
+        unsigned bits = getValueRequiredBits(r);
+        if(bits > stats->bits) stats->bits = bits;
+      }
+      bits_done = (stats->bits >= bpp);
+
+      if(!colored_done && (r != g || r != b)) {
+        stats->colored = 1;
+        colored_done = 1;
+        if(stats->bits < 8) stats->bits = 8; /*PNG has no colored modes with less than 8-bit per channel*/
+      }
+
+      if(!alpha_done) {
+        unsigned matchkey = (r == stats->key_r && g == stats->key_g && b == stats->key_b);
+        if(a != 255 && (a != 0 || (stats->key && !matchkey))) {
+          stats->alpha = 1;
+          stats->key = 0;
+          alpha_done = 1;
+          if(stats->bits < 8) stats->bits = 8; /*PNG has no alphachannel modes with less than 8-bit per channel*/
+        } else if(a == 0 && !stats->alpha && !stats->key) {
+          stats->key = 1;
+          stats->key_r = r;
+          stats->key_g = g;
+          stats->key_b = b;
+        } else if(a == 255 && stats->key && matchkey) {
+          /* Color key cannot be used if an opaque pixel also has that RGB color. */
+          stats->alpha = 1;
+          stats->key = 0;
+          alpha_done = 1;
+          if(stats->bits < 8) stats->bits = 8; /*PNG has no alphachannel modes with less than 8-bit per channel*/
+        }
+      }
+
+      if(!numcolors_done) {
+        if(!color_tree_has(&tree, r, g, b, a)) {
+          error = color_tree_add(&tree, r, g, b, a, stats->numcolors);
+          if(error) goto cleanup;
+          if(stats->numcolors < 256) {
+            unsigned char* p = stats->palette;
+            unsigned n = stats->numcolors;
+            p[n * 4 + 0] = r;
+            p[n * 4 + 1] = g;
+            p[n * 4 + 2] = b;
+            p[n * 4 + 3] = a;
+          }
+          ++stats->numcolors;
+          numcolors_done = stats->numcolors >= maxnumcolors;
+        }
+      }
+
+      if(alpha_done && numcolors_done && colored_done && bits_done) break;
+    }
+
+    if(stats->key && !stats->alpha) {
+      for(i = 0; i != numpixels; ++i) {
+        getPixelColorRGBA8(&r, &g, &b, &a, in, i, mode_in);
+        if(a != 0 && r == stats->key_r && g == stats->key_g && b == stats->key_b) {
+          /* Color key cannot be used if an opaque pixel also has that RGB color. */
+          stats->alpha = 1;
+          stats->key = 0;
+          alpha_done = 1;
+          if(stats->bits < 8) stats->bits = 8; /*PNG has no alphachannel modes with less than 8-bit per channel*/
+        }
+      }
+    }
+
+    /*make the stats's key always 16-bit for consistency - repeat each byte twice*/
+    stats->key_r += (stats->key_r << 8);
+    stats->key_g += (stats->key_g << 8);
+    stats->key_b += (stats->key_b << 8);
+  }
+
+cleanup:
+  color_tree_cleanup(&tree);
+  return error;
+}
+
+#ifdef LODEPNG_COMPILE_ANCILLARY_CHUNKS
+/*Adds a single color to the color stats. The stats must already have been inited. The color must be given as 16-bit
+(with 2 bytes repeating for 8-bit and 65535 for opaque alpha channel). This function is expensive, do not call it for
+all pixels of an image but only for a few additional values. */
+static unsigned lodepng_color_stats_add(LodePNGColorStats* stats,
+                                        unsigned r, unsigned g, unsigned b, unsigned a) {
+  unsigned error = 0;
+  unsigned char image[8];
