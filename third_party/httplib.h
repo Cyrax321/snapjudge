@@ -6598,3 +6598,603 @@ Server::read_content_core(Stream &strm, Request &req, Response &res,
 
   if (req.method == "DELETE" && !req.has_header("Content-Length")) {
     return true;
+  }
+
+  if (!detail::read_content(strm, req, payload_max_length_, res.status, nullptr,
+                            out, true)) {
+    return false;
+  }
+
+  if (req.is_multipart_form_data()) {
+    if (!multipart_form_data_parser.is_valid()) {
+      res.status = StatusCode::BadRequest_400;
+      return false;
+    }
+  }
+
+  return true;
+}
+
+inline bool Server::handle_file_request(const Request &req, Response &res,
+                                        bool head) {
+  for (const auto &entry : base_dirs_) {
+    // Prefix match
+    if (!req.path.compare(0, entry.mount_point.size(), entry.mount_point)) {
+      std::string sub_path = "/" + req.path.substr(entry.mount_point.size());
+      if (detail::is_valid_path(sub_path)) {
+        auto path = entry.base_dir + sub_path;
+        if (path.back() == '/') { path += "index.html"; }
+
+        detail::FileStat stat(path);
+
+        if (stat.is_dir()) {
+          res.set_redirect(sub_path + "/", StatusCode::MovedPermanently_301);
+          return true;
+        }
+
+        if (stat.is_file()) {
+          for (const auto &kv : entry.headers) {
+            res.set_header(kv.first, kv.second);
+          }
+
+          auto mm = std::make_shared<detail::mmap>(path.c_str());
+          if (!mm->is_open()) { return false; }
+
+          res.set_content_provider(
+              mm->size(),
+              detail::find_content_type(path, file_extension_and_mimetype_map_,
+                                        default_file_mimetype_),
+              [mm](size_t offset, size_t length, DataSink &sink) -> bool {
+                sink.write(mm->data() + offset, length);
+                return true;
+              });
+
+          if (!head && file_request_handler_) {
+            file_request_handler_(req, res);
+          }
+
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+inline socket_t
+Server::create_server_socket(const std::string &host, int port,
+                             int socket_flags,
+                             SocketOptions socket_options) const {
+  return detail::create_socket(
+      host, std::string(), port, address_family_, socket_flags, tcp_nodelay_,
+      ipv6_v6only_, std::move(socket_options),
+      [](socket_t sock, struct addrinfo &ai, bool & /*quit*/) -> bool {
+        if (::bind(sock, ai.ai_addr, static_cast<socklen_t>(ai.ai_addrlen))) {
+          return false;
+        }
+        if (::listen(sock, CPPHTTPLIB_LISTEN_BACKLOG)) { return false; }
+        return true;
+      });
+}
+
+inline int Server::bind_internal(const std::string &host, int port,
+                                 int socket_flags) {
+  if (is_decommisioned) { return -1; }
+
+  if (!is_valid()) { return -1; }
+
+  svr_sock_ = create_server_socket(host, port, socket_flags, socket_options_);
+  if (svr_sock_ == INVALID_SOCKET) { return -1; }
+
+  if (port == 0) {
+    struct sockaddr_storage addr;
+    socklen_t addr_len = sizeof(addr);
+    if (getsockname(svr_sock_, reinterpret_cast<struct sockaddr *>(&addr),
+                    &addr_len) == -1) {
+      return -1;
+    }
+    if (addr.ss_family == AF_INET) {
+      return ntohs(reinterpret_cast<struct sockaddr_in *>(&addr)->sin_port);
+    } else if (addr.ss_family == AF_INET6) {
+      return ntohs(reinterpret_cast<struct sockaddr_in6 *>(&addr)->sin6_port);
+    } else {
+      return -1;
+    }
+  } else {
+    return port;
+  }
+}
+
+inline bool Server::listen_internal() {
+  if (is_decommisioned) { return false; }
+
+  auto ret = true;
+  is_running_ = true;
+  auto se = detail::scope_exit([&]() { is_running_ = false; });
+
+  {
+    std::unique_ptr<TaskQueue> task_queue(new_task_queue());
+
+    while (svr_sock_ != INVALID_SOCKET) {
+#ifndef _WIN32
+      if (idle_interval_sec_ > 0 || idle_interval_usec_ > 0) {
+#endif
+        auto val = detail::select_read(svr_sock_, idle_interval_sec_,
+                                       idle_interval_usec_);
+        if (val == 0) { // Timeout
+          task_queue->on_idle();
+          continue;
+        }
+#ifndef _WIN32
+      }
+#endif
+
+#if defined _WIN32
+      // sockets conneced via WASAccept inherit flags NO_HANDLE_INHERIT,
+      // OVERLAPPED
+      socket_t sock = WSAAccept(svr_sock_, nullptr, nullptr, nullptr, 0);
+#elif defined SOCK_CLOEXEC
+      socket_t sock = accept4(svr_sock_, nullptr, nullptr, SOCK_CLOEXEC);
+#else
+      socket_t sock = accept(svr_sock_, nullptr, nullptr);
+#endif
+
+      if (sock == INVALID_SOCKET) {
+        if (errno == EMFILE) {
+          // The per-process limit of open file descriptors has been reached.
+          // Try to accept new connections after a short sleep.
+          std::this_thread::sleep_for(std::chrono::microseconds{1});
+          continue;
+        } else if (errno == EINTR || errno == EAGAIN) {
+          continue;
+        }
+        if (svr_sock_ != INVALID_SOCKET) {
+          detail::close_socket(svr_sock_);
+          ret = false;
+        } else {
+          ; // The server socket was closed by user.
+        }
+        break;
+      }
+
+      {
+#ifdef _WIN32
+        auto timeout = static_cast<uint32_t>(read_timeout_sec_ * 1000 +
+                                             read_timeout_usec_ / 1000);
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
+                   reinterpret_cast<const char *>(&timeout), sizeof(timeout));
+#else
+        timeval tv;
+        tv.tv_sec = static_cast<long>(read_timeout_sec_);
+        tv.tv_usec = static_cast<decltype(tv.tv_usec)>(read_timeout_usec_);
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
+                   reinterpret_cast<const void *>(&tv), sizeof(tv));
+#endif
+      }
+      {
+
+#ifdef _WIN32
+        auto timeout = static_cast<uint32_t>(write_timeout_sec_ * 1000 +
+                                             write_timeout_usec_ / 1000);
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO,
+                   reinterpret_cast<const char *>(&timeout), sizeof(timeout));
+#else
+        timeval tv;
+        tv.tv_sec = static_cast<long>(write_timeout_sec_);
+        tv.tv_usec = static_cast<decltype(tv.tv_usec)>(write_timeout_usec_);
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO,
+                   reinterpret_cast<const void *>(&tv), sizeof(tv));
+#endif
+      }
+
+      if (!task_queue->enqueue(
+              [this, sock]() { process_and_close_socket(sock); })) {
+        detail::shutdown_socket(sock);
+        detail::close_socket(sock);
+      }
+    }
+
+    task_queue->shutdown();
+  }
+
+  is_decommisioned = !ret;
+  return ret;
+}
+
+inline bool Server::routing(Request &req, Response &res, Stream &strm) {
+  if (pre_routing_handler_ &&
+      pre_routing_handler_(req, res) == HandlerResponse::Handled) {
+    return true;
+  }
+
+  // File handler
+  auto is_head_request = req.method == "HEAD";
+  if ((req.method == "GET" || is_head_request) &&
+      handle_file_request(req, res, is_head_request)) {
+    return true;
+  }
+
+  if (detail::expect_content(req)) {
+    // Content reader handler
+    {
+      ContentReader reader(
+          [&](ContentReceiver receiver) {
+            return read_content_with_content_receiver(
+                strm, req, res, std::move(receiver), nullptr, nullptr);
+          },
+          [&](MultipartContentHeader header, ContentReceiver receiver) {
+            return read_content_with_content_receiver(strm, req, res, nullptr,
+                                                      std::move(header),
+                                                      std::move(receiver));
+          });
+
+      if (req.method == "POST") {
+        if (dispatch_request_for_content_reader(
+                req, res, std::move(reader),
+                post_handlers_for_content_reader_)) {
+          return true;
+        }
+      } else if (req.method == "PUT") {
+        if (dispatch_request_for_content_reader(
+                req, res, std::move(reader),
+                put_handlers_for_content_reader_)) {
+          return true;
+        }
+      } else if (req.method == "PATCH") {
+        if (dispatch_request_for_content_reader(
+                req, res, std::move(reader),
+                patch_handlers_for_content_reader_)) {
+          return true;
+        }
+      } else if (req.method == "DELETE") {
+        if (dispatch_request_for_content_reader(
+                req, res, std::move(reader),
+                delete_handlers_for_content_reader_)) {
+          return true;
+        }
+      }
+    }
+
+    // Read content into `req.body`
+    if (!read_content(strm, req, res)) { return false; }
+  }
+
+  // Regular handler
+  if (req.method == "GET" || req.method == "HEAD") {
+    return dispatch_request(req, res, get_handlers_);
+  } else if (req.method == "POST") {
+    return dispatch_request(req, res, post_handlers_);
+  } else if (req.method == "PUT") {
+    return dispatch_request(req, res, put_handlers_);
+  } else if (req.method == "DELETE") {
+    return dispatch_request(req, res, delete_handlers_);
+  } else if (req.method == "OPTIONS") {
+    return dispatch_request(req, res, options_handlers_);
+  } else if (req.method == "PATCH") {
+    return dispatch_request(req, res, patch_handlers_);
+  }
+
+  res.status = StatusCode::BadRequest_400;
+  return false;
+}
+
+inline bool Server::dispatch_request(Request &req, Response &res,
+                                     const Handlers &handlers) const {
+  for (const auto &x : handlers) {
+    const auto &matcher = x.first;
+    const auto &handler = x.second;
+
+    if (matcher->match(req)) {
+      handler(req, res);
+      return true;
+    }
+  }
+  return false;
+}
+
+inline void Server::apply_ranges(const Request &req, Response &res,
+                                 std::string &content_type,
+                                 std::string &boundary) const {
+  if (req.ranges.size() > 1 && res.status == StatusCode::PartialContent_206) {
+    auto it = res.headers.find("Content-Type");
+    if (it != res.headers.end()) {
+      content_type = it->second;
+      res.headers.erase(it);
+    }
+
+    boundary = detail::make_multipart_data_boundary();
+
+    res.set_header("Content-Type",
+                   "multipart/byteranges; boundary=" + boundary);
+  }
+
+  auto type = detail::encoding_type(req, res);
+
+  if (res.body.empty()) {
+    if (res.content_length_ > 0) {
+      size_t length = 0;
+      if (req.ranges.empty() || res.status != StatusCode::PartialContent_206) {
+        length = res.content_length_;
+      } else if (req.ranges.size() == 1) {
+        auto offset_and_length = detail::get_range_offset_and_length(
+            req.ranges[0], res.content_length_);
+
+        length = offset_and_length.second;
+
+        auto content_range = detail::make_content_range_header_field(
+            offset_and_length, res.content_length_);
+        res.set_header("Content-Range", content_range);
+      } else {
+        length = detail::get_multipart_ranges_data_length(
+            req, boundary, content_type, res.content_length_);
+      }
+      res.set_header("Content-Length", std::to_string(length));
+    } else {
+      if (res.content_provider_) {
+        if (res.is_chunked_content_provider_) {
+          res.set_header("Transfer-Encoding", "chunked");
+          if (type == detail::EncodingType::Gzip) {
+            res.set_header("Content-Encoding", "gzip");
+          } else if (type == detail::EncodingType::Brotli) {
+            res.set_header("Content-Encoding", "br");
+          }
+        }
+      }
+    }
+  } else {
+    if (req.ranges.empty() || res.status != StatusCode::PartialContent_206) {
+      ;
+    } else if (req.ranges.size() == 1) {
+      auto offset_and_length =
+          detail::get_range_offset_and_length(req.ranges[0], res.body.size());
+      auto offset = offset_and_length.first;
+      auto length = offset_and_length.second;
+
+      auto content_range = detail::make_content_range_header_field(
+          offset_and_length, res.body.size());
+      res.set_header("Content-Range", content_range);
+
+      assert(offset + length <= res.body.size());
+      res.body = res.body.substr(offset, length);
+    } else {
+      std::string data;
+      detail::make_multipart_ranges_data(req, res, boundary, content_type,
+                                         res.body.size(), data);
+      res.body.swap(data);
+    }
+
+    if (type != detail::EncodingType::None) {
+      std::unique_ptr<detail::compressor> compressor;
+      std::string content_encoding;
+
+      if (type == detail::EncodingType::Gzip) {
+#ifdef CPPHTTPLIB_ZLIB_SUPPORT
+        compressor = detail::make_unique<detail::gzip_compressor>();
+        content_encoding = "gzip";
+#endif
+      } else if (type == detail::EncodingType::Brotli) {
+#ifdef CPPHTTPLIB_BROTLI_SUPPORT
+        compressor = detail::make_unique<detail::brotli_compressor>();
+        content_encoding = "br";
+#endif
+      }
+
+      if (compressor) {
+        std::string compressed;
+        if (compressor->compress(res.body.data(), res.body.size(), true,
+                                 [&](const char *data, size_t data_len) {
+                                   compressed.append(data, data_len);
+                                   return true;
+                                 })) {
+          res.body.swap(compressed);
+          res.set_header("Content-Encoding", content_encoding);
+        }
+      }
+    }
+
+    auto length = std::to_string(res.body.size());
+    res.set_header("Content-Length", length);
+  }
+}
+
+inline bool Server::dispatch_request_for_content_reader(
+    Request &req, Response &res, ContentReader content_reader,
+    const HandlersForContentReader &handlers) const {
+  for (const auto &x : handlers) {
+    const auto &matcher = x.first;
+    const auto &handler = x.second;
+
+    if (matcher->match(req)) {
+      handler(req, res, content_reader);
+      return true;
+    }
+  }
+  return false;
+}
+
+inline bool
+Server::process_request(Stream &strm, const std::string &remote_addr,
+                        int remote_port, const std::string &local_addr,
+                        int local_port, bool close_connection,
+                        bool &connection_closed,
+                        const std::function<void(Request &)> &setup_request) {
+  std::array<char, 2048> buf{};
+
+  detail::stream_line_reader line_reader(strm, buf.data(), buf.size());
+
+  // Connection has been closed on client
+  if (!line_reader.getline()) { return false; }
+
+  Request req;
+
+  Response res;
+  res.version = "HTTP/1.1";
+  res.headers = default_headers_;
+
+#ifdef _WIN32
+  // TODO: Increase FD_SETSIZE statically (libzmq), dynamically (MySQL).
+#else
+#ifndef CPPHTTPLIB_USE_POLL
+  // Socket file descriptor exceeded FD_SETSIZE...
+  if (strm.socket() >= FD_SETSIZE) {
+    Headers dummy;
+    detail::read_headers(strm, dummy);
+    res.status = StatusCode::InternalServerError_500;
+    return write_response(strm, close_connection, req, res);
+  }
+#endif
+#endif
+
+  // Check if the request URI doesn't exceed the limit
+  if (line_reader.size() > CPPHTTPLIB_REQUEST_URI_MAX_LENGTH) {
+    Headers dummy;
+    detail::read_headers(strm, dummy);
+    res.status = StatusCode::UriTooLong_414;
+    return write_response(strm, close_connection, req, res);
+  }
+
+  // Request line and headers
+  if (!parse_request_line(line_reader.ptr(), req) ||
+      !detail::read_headers(strm, req.headers)) {
+    res.status = StatusCode::BadRequest_400;
+    return write_response(strm, close_connection, req, res);
+  }
+
+  if (req.get_header_value("Connection") == "close") {
+    connection_closed = true;
+  }
+
+  if (req.version == "HTTP/1.0" &&
+      req.get_header_value("Connection") != "Keep-Alive") {
+    connection_closed = true;
+  }
+
+  req.remote_addr = remote_addr;
+  req.remote_port = remote_port;
+  req.set_header("REMOTE_ADDR", req.remote_addr);
+  req.set_header("REMOTE_PORT", std::to_string(req.remote_port));
+
+  req.local_addr = local_addr;
+  req.local_port = local_port;
+  req.set_header("LOCAL_ADDR", req.local_addr);
+  req.set_header("LOCAL_PORT", std::to_string(req.local_port));
+
+  if (req.has_header("Range")) {
+    const auto &range_header_value = req.get_header_value("Range");
+    if (!detail::parse_range_header(range_header_value, req.ranges)) {
+      res.status = StatusCode::RangeNotSatisfiable_416;
+      return write_response(strm, close_connection, req, res);
+    }
+  }
+
+  if (setup_request) { setup_request(req); }
+
+  if (req.get_header_value("Expect") == "100-continue") {
+    int status = StatusCode::Continue_100;
+    if (expect_100_continue_handler_) {
+      status = expect_100_continue_handler_(req, res);
+    }
+    switch (status) {
+    case StatusCode::Continue_100:
+    case StatusCode::ExpectationFailed_417:
+      detail::write_response_line(strm, status);
+      strm.write("\r\n");
+      break;
+    default:
+      connection_closed = true;
+      return write_response(strm, true, req, res);
+    }
+  }
+
+  // Routing
+  auto routed = false;
+#ifdef CPPHTTPLIB_NO_EXCEPTIONS
+  routed = routing(req, res, strm);
+#else
+  try {
+    routed = routing(req, res, strm);
+  } catch (std::exception &e) {
+    if (exception_handler_) {
+      auto ep = std::current_exception();
+      exception_handler_(req, res, ep);
+      routed = true;
+    } else {
+      res.status = StatusCode::InternalServerError_500;
+      std::string val;
+      auto s = e.what();
+      for (size_t i = 0; s[i]; i++) {
+        switch (s[i]) {
+        case '\r': val += "\\r"; break;
+        case '\n': val += "\\n"; break;
+        default: val += s[i]; break;
+        }
+      }
+      res.set_header("EXCEPTION_WHAT", val);
+    }
+  } catch (...) {
+    if (exception_handler_) {
+      auto ep = std::current_exception();
+      exception_handler_(req, res, ep);
+      routed = true;
+    } else {
+      res.status = StatusCode::InternalServerError_500;
+      res.set_header("EXCEPTION_WHAT", "UNKNOWN");
+    }
+  }
+#endif
+  if (routed) {
+    if (res.status == -1) {
+      res.status = req.ranges.empty() ? StatusCode::OK_200
+                                      : StatusCode::PartialContent_206;
+    }
+
+    if (detail::range_error(req, res)) {
+      res.body.clear();
+      res.content_length_ = 0;
+      res.content_provider_ = nullptr;
+      res.status = StatusCode::RangeNotSatisfiable_416;
+      return write_response(strm, close_connection, req, res);
+    }
+
+    // Serve file content by using a content provider
+    if (!res.file_content_path_.empty()) {
+      const auto &path = res.file_content_path_;
+      auto mm = std::make_shared<detail::mmap>(path.c_str());
+      if (!mm->is_open()) {
+        res.body.clear();
+        res.content_length_ = 0;
+        res.content_provider_ = nullptr;
+        res.status = StatusCode::NotFound_404;
+        return write_response(strm, close_connection, req, res);
+      }
+
+      auto content_type = res.file_content_content_type_;
+      if (content_type.empty()) {
+        content_type = detail::find_content_type(
+            path, file_extension_and_mimetype_map_, default_file_mimetype_);
+      }
+
+      res.set_content_provider(
+          mm->size(), content_type,
+          [mm](size_t offset, size_t length, DataSink &sink) -> bool {
+            sink.write(mm->data() + offset, length);
+            return true;
+          });
+    }
+
+    return write_response_with_content(strm, close_connection, req, res);
+  } else {
+    if (res.status == -1) { res.status = StatusCode::NotFound_404; }
+
+    return write_response(strm, close_connection, req, res);
+  }
+}
+
+inline bool Server::is_valid() const { return true; }
+
+inline bool Server::process_and_close_socket(socket_t sock) {
+  std::string remote_addr;
+  int remote_port = 0;
+  detail::get_remote_ip_and_port(sock, remote_addr, remote_port);
+
+  std::string local_addr;
