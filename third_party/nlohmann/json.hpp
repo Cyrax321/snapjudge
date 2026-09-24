@@ -2948,3 +2948,593 @@ NLOHMANN_JSON_NAMESPACE_END
 
 
 // #include <nlohmann/detail/abi_macros.hpp>
+
+
+NLOHMANN_JSON_NAMESPACE_BEGIN
+namespace detail
+{
+
+/*!
+@brief replace all occurrences of a substring by another string
+
+@param[in,out] s  the string to manipulate; changed so that all
+               occurrences of @a f are replaced with @a t
+@param[in]     f  the substring to replace with @a t
+@param[in]     t  the string to replace @a f
+
+@pre The search string @a f must not be empty. **This precondition is
+enforced with an assertion.**
+
+@since version 2.0.0
+*/
+template<typename StringType>
+inline void replace_substring(StringType& s, const StringType& f,
+                              const StringType& t)
+{
+    JSON_ASSERT(!f.empty());
+    for (auto pos = s.find(f);                // find first occurrence of f
+            pos != StringType::npos;          // make sure f was found
+            s.replace(pos, f.size(), t),      // replace with t, and
+            pos = s.find(f, pos + t.size()))  // find next occurrence of f
+    {}
+}
+
+/*!
+ * @brief string escaping as described in RFC 6901 (Sect. 4)
+ * @param[in] s string to escape
+ * @return    escaped string
+ *
+ * Note the order of escaping "~" to "~0" and "/" to "~1" is important.
+ */
+template<typename StringType>
+inline StringType escape(StringType s)
+{
+    replace_substring(s, StringType{"~"}, StringType{"~0"});
+    replace_substring(s, StringType{"/"}, StringType{"~1"});
+    return s;
+}
+
+/*!
+ * @brief string unescaping as described in RFC 6901 (Sect. 4)
+ * @param[in] s string to unescape
+ * @return    unescaped string
+ *
+ * Note the order of escaping "~1" to "/" and "~0" to "~" is important.
+ */
+template<typename StringType>
+static void unescape(StringType& s)
+{
+    replace_substring(s, StringType{"~1"}, StringType{"/"});
+    replace_substring(s, StringType{"~0"}, StringType{"~"});
+}
+
+}  // namespace detail
+NLOHMANN_JSON_NAMESPACE_END
+
+// #include <nlohmann/detail/input/position_t.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
+
+
+#include <cstddef> // size_t
+
+// #include <nlohmann/detail/abi_macros.hpp>
+
+
+NLOHMANN_JSON_NAMESPACE_BEGIN
+namespace detail
+{
+
+/// struct to capture the start position of the current token
+struct position_t
+{
+    /// the total number of characters read
+    std::size_t chars_read_total = 0;
+    /// the number of characters read in the current line
+    std::size_t chars_read_current_line = 0;
+    /// the number of lines read
+    std::size_t lines_read = 0;
+
+    /// conversion to size_t to preserve SAX interface
+    constexpr operator size_t() const
+    {
+        return chars_read_total;
+    }
+};
+
+}  // namespace detail
+NLOHMANN_JSON_NAMESPACE_END
+
+// #include <nlohmann/detail/macro_scope.hpp>
+
+// #include <nlohmann/detail/meta/cpp_future.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-FileCopyrightText: 2018 The Abseil Authors
+// SPDX-License-Identifier: MIT
+
+
+
+#include <array> // array
+#include <cstddef> // size_t
+#include <type_traits> // conditional, enable_if, false_type, integral_constant, is_constructible, is_integral, is_same, remove_cv, remove_reference, true_type
+#include <utility> // index_sequence, make_index_sequence, index_sequence_for
+
+// #include <nlohmann/detail/macro_scope.hpp>
+
+
+NLOHMANN_JSON_NAMESPACE_BEGIN
+namespace detail
+{
+
+template<typename T>
+using uncvref_t = typename std::remove_cv<typename std::remove_reference<T>::type>::type;
+
+#ifdef JSON_HAS_CPP_14
+
+// the following utilities are natively available in C++14
+using std::enable_if_t;
+using std::index_sequence;
+using std::make_index_sequence;
+using std::index_sequence_for;
+
+#else
+
+// alias templates to reduce boilerplate
+template<bool B, typename T = void>
+using enable_if_t = typename std::enable_if<B, T>::type;
+
+// The following code is taken from https://github.com/abseil/abseil-cpp/blob/10cb35e459f5ecca5b2ff107635da0bfa41011b4/absl/utility/utility.h
+// which is part of Google Abseil (https://github.com/abseil/abseil-cpp), licensed under the Apache License 2.0.
+
+//// START OF CODE FROM GOOGLE ABSEIL
+
+// integer_sequence
+//
+// Class template representing a compile-time integer sequence. An instantiation
+// of `integer_sequence<T, Ints...>` has a sequence of integers encoded in its
+// type through its template arguments (which is a common need when
+// working with C++11 variadic templates). `absl::integer_sequence` is designed
+// to be a drop-in replacement for C++14's `std::integer_sequence`.
+//
+// Example:
+//
+//   template< class T, T... Ints >
+//   void user_function(integer_sequence<T, Ints...>);
+//
+//   int main()
+//   {
+//     // user_function's `T` will be deduced to `int` and `Ints...`
+//     // will be deduced to `0, 1, 2, 3, 4`.
+//     user_function(make_integer_sequence<int, 5>());
+//   }
+template <typename T, T... Ints>
+struct integer_sequence
+{
+    using value_type = T;
+    static constexpr std::size_t size() noexcept
+    {
+        return sizeof...(Ints);
+    }
+};
+
+// index_sequence
+//
+// A helper template for an `integer_sequence` of `size_t`,
+// `absl::index_sequence` is designed to be a drop-in replacement for C++14's
+// `std::index_sequence`.
+template <size_t... Ints>
+using index_sequence = integer_sequence<size_t, Ints...>;
+
+namespace utility_internal
+{
+
+template <typename Seq, size_t SeqSize, size_t Rem>
+struct Extend;
+
+// Note that SeqSize == sizeof...(Ints). It's passed explicitly for efficiency.
+template <typename T, T... Ints, size_t SeqSize>
+struct Extend<integer_sequence<T, Ints...>, SeqSize, 0>
+{
+    using type = integer_sequence < T, Ints..., (Ints + SeqSize)... >;
+};
+
+template <typename T, T... Ints, size_t SeqSize>
+struct Extend<integer_sequence<T, Ints...>, SeqSize, 1>
+{
+    using type = integer_sequence < T, Ints..., (Ints + SeqSize)..., 2 * SeqSize >;
+};
+
+// Recursion helper for 'make_integer_sequence<T, N>'.
+// 'Gen<T, N>::type' is an alias for 'integer_sequence<T, 0, 1, ... N-1>'.
+template <typename T, size_t N>
+struct Gen
+{
+    using type =
+        typename Extend < typename Gen < T, N / 2 >::type, N / 2, N % 2 >::type;
+};
+
+template <typename T>
+struct Gen<T, 0>
+{
+    using type = integer_sequence<T>;
+};
+
+}  // namespace utility_internal
+
+// Compile-time sequences of integers
+
+// make_integer_sequence
+//
+// This template alias is equivalent to
+// `integer_sequence<int, 0, 1, ..., N-1>`, and is designed to be a drop-in
+// replacement for C++14's `std::make_integer_sequence`.
+template <typename T, T N>
+using make_integer_sequence = typename utility_internal::Gen<T, N>::type;
+
+// make_index_sequence
+//
+// This template alias is equivalent to `index_sequence<0, 1, ..., N-1>`,
+// and is designed to be a drop-in replacement for C++14's
+// `std::make_index_sequence`.
+template <size_t N>
+using make_index_sequence = make_integer_sequence<size_t, N>;
+
+// index_sequence_for
+//
+// Converts a typename pack into an index sequence of the same length, and
+// is designed to be a drop-in replacement for C++14's
+// `std::index_sequence_for()`
+template <typename... Ts>
+using index_sequence_for = make_index_sequence<sizeof...(Ts)>;
+
+//// END OF CODE FROM GOOGLE ABSEIL
+
+#endif
+
+// dispatch utility (taken from ranges-v3)
+template<unsigned N> struct priority_tag : priority_tag < N - 1 > {};
+template<> struct priority_tag<0> {};
+
+// taken from ranges-v3
+template<typename T>
+struct static_const
+{
+    static JSON_INLINE_VARIABLE constexpr T value{};
+};
+
+#ifndef JSON_HAS_CPP_17
+    template<typename T>
+    constexpr T static_const<T>::value;
+#endif
+
+template<typename T, typename... Args>
+inline constexpr std::array<T, sizeof...(Args)> make_array(Args&& ... args)
+{
+    return std::array<T, sizeof...(Args)> {{static_cast<T>(std::forward<Args>(args))...}};
+}
+
+}  // namespace detail
+NLOHMANN_JSON_NAMESPACE_END
+
+// #include <nlohmann/detail/meta/type_traits.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
+
+
+#include <limits> // numeric_limits
+#include <type_traits> // false_type, is_constructible, is_integral, is_same, true_type
+#include <utility> // declval
+#include <tuple> // tuple
+#include <string> // char_traits
+
+// #include <nlohmann/detail/iterators/iterator_traits.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
+
+
+#include <iterator> // random_access_iterator_tag
+
+// #include <nlohmann/detail/abi_macros.hpp>
+
+// #include <nlohmann/detail/meta/void_t.hpp>
+
+// #include <nlohmann/detail/meta/cpp_future.hpp>
+
+
+NLOHMANN_JSON_NAMESPACE_BEGIN
+namespace detail
+{
+
+template<typename It, typename = void>
+struct iterator_types {};
+
+template<typename It>
+struct iterator_types <
+    It,
+    void_t<typename It::difference_type, typename It::value_type, typename It::pointer,
+    typename It::reference, typename It::iterator_category >>
+{
+    using difference_type = typename It::difference_type;
+    using value_type = typename It::value_type;
+    using pointer = typename It::pointer;
+    using reference = typename It::reference;
+    using iterator_category = typename It::iterator_category;
+};
+
+// This is required as some compilers implement std::iterator_traits in a way that
+// doesn't work with SFINAE. See https://github.com/nlohmann/json/issues/1341.
+template<typename T, typename = void>
+struct iterator_traits
+{
+};
+
+template<typename T>
+struct iterator_traits < T, enable_if_t < !std::is_pointer<T>::value >>
+            : iterator_types<T>
+{
+};
+
+template<typename T>
+struct iterator_traits<T*, enable_if_t<std::is_object<T>::value>>
+{
+    using iterator_category = std::random_access_iterator_tag;
+    using value_type = T;
+    using difference_type = ptrdiff_t;
+    using pointer = T*;
+    using reference = T&;
+};
+
+}  // namespace detail
+NLOHMANN_JSON_NAMESPACE_END
+
+// #include <nlohmann/detail/macro_scope.hpp>
+
+// #include <nlohmann/detail/meta/call_std/begin.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
+
+
+// #include <nlohmann/detail/macro_scope.hpp>
+
+
+NLOHMANN_JSON_NAMESPACE_BEGIN
+
+NLOHMANN_CAN_CALL_STD_FUNC_IMPL(begin);
+
+NLOHMANN_JSON_NAMESPACE_END
+
+// #include <nlohmann/detail/meta/call_std/end.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
+
+
+// #include <nlohmann/detail/macro_scope.hpp>
+
+
+NLOHMANN_JSON_NAMESPACE_BEGIN
+
+NLOHMANN_CAN_CALL_STD_FUNC_IMPL(end);
+
+NLOHMANN_JSON_NAMESPACE_END
+
+// #include <nlohmann/detail/meta/cpp_future.hpp>
+
+// #include <nlohmann/detail/meta/detected.hpp>
+
+// #include <nlohmann/json_fwd.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
+#ifndef INCLUDE_NLOHMANN_JSON_FWD_HPP_
+    #define INCLUDE_NLOHMANN_JSON_FWD_HPP_
+
+    #include <cstdint> // int64_t, uint64_t
+    #include <map> // map
+    #include <memory> // allocator
+    #include <string> // string
+    #include <vector> // vector
+
+    // #include <nlohmann/detail/abi_macros.hpp>
+
+
+    /*!
+    @brief namespace for Niels Lohmann
+    @see https://github.com/nlohmann
+    @since version 1.0.0
+    */
+    NLOHMANN_JSON_NAMESPACE_BEGIN
+
+    /*!
+    @brief default JSONSerializer template argument
+
+    This serializer ignores the template arguments and uses ADL
+    ([argument-dependent lookup](https://en.cppreference.com/w/cpp/language/adl))
+    for serialization.
+    */
+    template<typename T = void, typename SFINAE = void>
+    struct adl_serializer;
+
+    /// a class to store JSON values
+    /// @sa https://json.nlohmann.me/api/basic_json/
+    template<template<typename U, typename V, typename... Args> class ObjectType =
+    std::map,
+    template<typename U, typename... Args> class ArrayType = std::vector,
+    class StringType = std::string, class BooleanType = bool,
+    class NumberIntegerType = std::int64_t,
+    class NumberUnsignedType = std::uint64_t,
+    class NumberFloatType = double,
+    template<typename U> class AllocatorType = std::allocator,
+    template<typename T, typename SFINAE = void> class JSONSerializer =
+    adl_serializer,
+    class BinaryType = std::vector<std::uint8_t>, // cppcheck-suppress syntaxError
+    class CustomBaseClass = void>
+    class basic_json;
+
+    /// @brief JSON Pointer defines a string syntax for identifying a specific value within a JSON document
+    /// @sa https://json.nlohmann.me/api/json_pointer/
+    template<typename RefStringType>
+    class json_pointer;
+
+    /*!
+    @brief default specialization
+    @sa https://json.nlohmann.me/api/json/
+    */
+    using json = basic_json<>;
+
+    /// @brief a minimal map-like container that preserves insertion order
+    /// @sa https://json.nlohmann.me/api/ordered_map/
+    template<class Key, class T, class IgnoredLess, class Allocator>
+    struct ordered_map;
+
+    /// @brief specialization that maintains the insertion order of object keys
+    /// @sa https://json.nlohmann.me/api/ordered_json/
+    using ordered_json = basic_json<nlohmann::ordered_map>;
+
+    NLOHMANN_JSON_NAMESPACE_END
+
+#endif  // INCLUDE_NLOHMANN_JSON_FWD_HPP_
+
+
+NLOHMANN_JSON_NAMESPACE_BEGIN
+/*!
+@brief detail namespace with internal helper functions
+
+This namespace collects functions that should not be exposed,
+implementations of some @ref basic_json methods, and meta-programming helpers.
+
+@since version 2.1.0
+*/
+namespace detail
+{
+
+/////////////
+// helpers //
+/////////////
+
+// Note to maintainers:
+//
+// Every trait in this file expects a non CV-qualified type.
+// The only exceptions are in the 'aliases for detected' section
+// (i.e. those of the form: decltype(T::member_function(std::declval<T>())))
+//
+// In this case, T has to be properly CV-qualified to constraint the function arguments
+// (e.g. to_json(BasicJsonType&, const T&))
+
+template<typename> struct is_basic_json : std::false_type {};
+
+NLOHMANN_BASIC_JSON_TPL_DECLARATION
+struct is_basic_json<NLOHMANN_BASIC_JSON_TPL> : std::true_type {};
+
+// used by exceptions create() member functions
+// true_type for pointer to possibly cv-qualified basic_json or std::nullptr_t
+// false_type otherwise
+template<typename BasicJsonContext>
+struct is_basic_json_context :
+    std::integral_constant < bool,
+    is_basic_json<typename std::remove_cv<typename std::remove_pointer<BasicJsonContext>::type>::type>::value
+    || std::is_same<BasicJsonContext, std::nullptr_t>::value >
+{};
+
+//////////////////////
+// json_ref helpers //
+//////////////////////
+
+template<typename>
+class json_ref;
+
+template<typename>
+struct is_json_ref : std::false_type {};
+
+template<typename T>
+struct is_json_ref<json_ref<T>> : std::true_type {};
+
+//////////////////////////
+// aliases for detected //
+//////////////////////////
+
+template<typename T>
+using mapped_type_t = typename T::mapped_type;
+
+template<typename T>
+using key_type_t = typename T::key_type;
+
+template<typename T>
+using value_type_t = typename T::value_type;
+
+template<typename T>
+using difference_type_t = typename T::difference_type;
+
+template<typename T>
+using pointer_t = typename T::pointer;
+
+template<typename T>
+using reference_t = typename T::reference;
+
+template<typename T>
+using iterator_category_t = typename T::iterator_category;
+
+template<typename T, typename... Args>
+using to_json_function = decltype(T::to_json(std::declval<Args>()...));
+
+template<typename T, typename... Args>
+using from_json_function = decltype(T::from_json(std::declval<Args>()...));
+
+template<typename T, typename U>
+using get_template_function = decltype(std::declval<T>().template get<U>());
+
+// trait checking if JSONSerializer<T>::from_json(json const&, udt&) exists
+template<typename BasicJsonType, typename T, typename = void>
+struct has_from_json : std::false_type {};
+
+// trait checking if j.get<T> is valid
+// use this trait instead of std::is_constructible or std::is_convertible,
+// both rely on, or make use of implicit conversions, and thus fail when T
+// has several constructors/operator= (see https://github.com/nlohmann/json/issues/958)
+template <typename BasicJsonType, typename T>
+struct is_getable
+{
+    static constexpr bool value = is_detected<get_template_function, const BasicJsonType&, T>::value;
+};
+
+template<typename BasicJsonType, typename T>
+struct has_from_json < BasicJsonType, T, enable_if_t < !is_basic_json<T>::value >>
