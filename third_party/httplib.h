@@ -4798,3 +4798,603 @@ public:
         if (dash_boundary_crlf_.size() > buf_size()) { return true; }
         if (!buf_start_with(dash_boundary_crlf_)) { return false; }
         buf_erase(dash_boundary_crlf_.size());
+        state_ = 1;
+        break;
+      }
+      case 1: { // New entry
+        clear_file_info();
+        state_ = 2;
+        break;
+      }
+      case 2: { // Headers
+        auto pos = buf_find(crlf_);
+        if (pos > CPPHTTPLIB_HEADER_MAX_LENGTH) { return false; }
+        while (pos < buf_size()) {
+          // Empty line
+          if (pos == 0) {
+            if (!header_callback(file_)) {
+              is_valid_ = false;
+              return false;
+            }
+            buf_erase(crlf_.size());
+            state_ = 3;
+            break;
+          }
+
+          const auto header = buf_head(pos);
+
+          if (!parse_header(header.data(), header.data() + header.size(),
+                            [&](const std::string &, const std::string &) {})) {
+            is_valid_ = false;
+            return false;
+          }
+
+          static const std::string header_content_type = "Content-Type:";
+
+          if (start_with_case_ignore(header, header_content_type)) {
+            file_.content_type =
+                trim_copy(header.substr(header_content_type.size()));
+          } else {
+            static const std::regex re_content_disposition(
+                R"~(^Content-Disposition:\s*form-data;\s*(.*)$)~",
+                std::regex_constants::icase);
+
+            std::smatch m;
+            if (std::regex_match(header, m, re_content_disposition)) {
+              Params params;
+              parse_disposition_params(m[1], params);
+
+              auto it = params.find("name");
+              if (it != params.end()) {
+                file_.name = it->second;
+              } else {
+                is_valid_ = false;
+                return false;
+              }
+
+              it = params.find("filename");
+              if (it != params.end()) { file_.filename = it->second; }
+
+              it = params.find("filename*");
+              if (it != params.end()) {
+                // Only allow UTF-8 enconnding...
+                static const std::regex re_rfc5987_encoding(
+                    R"~(^UTF-8''(.+?)$)~", std::regex_constants::icase);
+
+                std::smatch m2;
+                if (std::regex_match(it->second, m2, re_rfc5987_encoding)) {
+                  file_.filename = decode_url(m2[1], false); // override...
+                } else {
+                  is_valid_ = false;
+                  return false;
+                }
+              }
+            }
+          }
+          buf_erase(pos + crlf_.size());
+          pos = buf_find(crlf_);
+        }
+        if (state_ != 3) { return true; }
+        break;
+      }
+      case 3: { // Body
+        if (crlf_dash_boundary_.size() > buf_size()) { return true; }
+        auto pos = buf_find(crlf_dash_boundary_);
+        if (pos < buf_size()) {
+          if (!content_callback(buf_data(), pos)) {
+            is_valid_ = false;
+            return false;
+          }
+          buf_erase(pos + crlf_dash_boundary_.size());
+          state_ = 4;
+        } else {
+          auto len = buf_size() - crlf_dash_boundary_.size();
+          if (len > 0) {
+            if (!content_callback(buf_data(), len)) {
+              is_valid_ = false;
+              return false;
+            }
+            buf_erase(len);
+          }
+          return true;
+        }
+        break;
+      }
+      case 4: { // Boundary
+        if (crlf_.size() > buf_size()) { return true; }
+        if (buf_start_with(crlf_)) {
+          buf_erase(crlf_.size());
+          state_ = 1;
+        } else {
+          if (dash_.size() > buf_size()) { return true; }
+          if (buf_start_with(dash_)) {
+            buf_erase(dash_.size());
+            is_valid_ = true;
+            buf_erase(buf_size()); // Remove epilogue
+          } else {
+            return true;
+          }
+        }
+        break;
+      }
+      }
+    }
+
+    return true;
+  }
+
+private:
+  void clear_file_info() {
+    file_.name.clear();
+    file_.filename.clear();
+    file_.content_type.clear();
+  }
+
+  bool start_with_case_ignore(const std::string &a,
+                              const std::string &b) const {
+    if (a.size() < b.size()) { return false; }
+    for (size_t i = 0; i < b.size(); i++) {
+      if (case_ignore::to_lower(a[i]) != case_ignore::to_lower(b[i])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  const std::string dash_ = "--";
+  const std::string crlf_ = "\r\n";
+  std::string boundary_;
+  std::string dash_boundary_crlf_;
+  std::string crlf_dash_boundary_;
+
+  size_t state_ = 0;
+  bool is_valid_ = false;
+  MultipartFormData file_;
+
+  // Buffer
+  bool start_with(const std::string &a, size_t spos, size_t epos,
+                  const std::string &b) const {
+    if (epos - spos < b.size()) { return false; }
+    for (size_t i = 0; i < b.size(); i++) {
+      if (a[i + spos] != b[i]) { return false; }
+    }
+    return true;
+  }
+
+  size_t buf_size() const { return buf_epos_ - buf_spos_; }
+
+  const char *buf_data() const { return &buf_[buf_spos_]; }
+
+  std::string buf_head(size_t l) const { return buf_.substr(buf_spos_, l); }
+
+  bool buf_start_with(const std::string &s) const {
+    return start_with(buf_, buf_spos_, buf_epos_, s);
+  }
+
+  size_t buf_find(const std::string &s) const {
+    auto c = s.front();
+
+    size_t off = buf_spos_;
+    while (off < buf_epos_) {
+      auto pos = off;
+      while (true) {
+        if (pos == buf_epos_) { return buf_size(); }
+        if (buf_[pos] == c) { break; }
+        pos++;
+      }
+
+      auto remaining_size = buf_epos_ - pos;
+      if (s.size() > remaining_size) { return buf_size(); }
+
+      if (start_with(buf_, pos, buf_epos_, s)) { return pos - buf_spos_; }
+
+      off = pos + 1;
+    }
+
+    return buf_size();
+  }
+
+  void buf_append(const char *data, size_t n) {
+    auto remaining_size = buf_size();
+    if (remaining_size > 0 && buf_spos_ > 0) {
+      for (size_t i = 0; i < remaining_size; i++) {
+        buf_[i] = buf_[buf_spos_ + i];
+      }
+    }
+    buf_spos_ = 0;
+    buf_epos_ = remaining_size;
+
+    if (remaining_size + n > buf_.size()) { buf_.resize(remaining_size + n); }
+
+    for (size_t i = 0; i < n; i++) {
+      buf_[buf_epos_ + i] = data[i];
+    }
+    buf_epos_ += n;
+  }
+
+  void buf_erase(size_t size) { buf_spos_ += size; }
+
+  std::string buf_;
+  size_t buf_spos_ = 0;
+  size_t buf_epos_ = 0;
+};
+
+inline std::string random_string(size_t length) {
+  static const char data[] =
+      "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+  // std::random_device might actually be deterministic on some
+  // platforms, but due to lack of support in the c++ standard library,
+  // doing better requires either some ugly hacks or breaking portability.
+  static std::random_device seed_gen;
+
+  // Request 128 bits of entropy for initialization
+  static std::seed_seq seed_sequence{seed_gen(), seed_gen(), seed_gen(),
+                                     seed_gen()};
+
+  static std::mt19937 engine(seed_sequence);
+
+  std::string result;
+  for (size_t i = 0; i < length; i++) {
+    result += data[engine() % (sizeof(data) - 1)];
+  }
+  return result;
+}
+
+inline std::string make_multipart_data_boundary() {
+  return "--cpp-httplib-multipart-data-" + detail::random_string(16);
+}
+
+inline bool is_multipart_boundary_chars_valid(const std::string &boundary) {
+  auto valid = true;
+  for (size_t i = 0; i < boundary.size(); i++) {
+    auto c = boundary[i];
+    if (!std::isalnum(c) && c != '-' && c != '_') {
+      valid = false;
+      break;
+    }
+  }
+  return valid;
+}
+
+template <typename T>
+inline std::string
+serialize_multipart_formdata_item_begin(const T &item,
+                                        const std::string &boundary) {
+  std::string body = "--" + boundary + "\r\n";
+  body += "Content-Disposition: form-data; name=\"" + item.name + "\"";
+  if (!item.filename.empty()) {
+    body += "; filename=\"" + item.filename + "\"";
+  }
+  body += "\r\n";
+  if (!item.content_type.empty()) {
+    body += "Content-Type: " + item.content_type + "\r\n";
+  }
+  body += "\r\n";
+
+  return body;
+}
+
+inline std::string serialize_multipart_formdata_item_end() { return "\r\n"; }
+
+inline std::string
+serialize_multipart_formdata_finish(const std::string &boundary) {
+  return "--" + boundary + "--\r\n";
+}
+
+inline std::string
+serialize_multipart_formdata_get_content_type(const std::string &boundary) {
+  return "multipart/form-data; boundary=" + boundary;
+}
+
+inline std::string
+serialize_multipart_formdata(const MultipartFormDataItems &items,
+                             const std::string &boundary, bool finish = true) {
+  std::string body;
+
+  for (const auto &item : items) {
+    body += serialize_multipart_formdata_item_begin(item, boundary);
+    body += item.content + serialize_multipart_formdata_item_end();
+  }
+
+  if (finish) { body += serialize_multipart_formdata_finish(boundary); }
+
+  return body;
+}
+
+inline bool range_error(Request &req, Response &res) {
+  if (!req.ranges.empty() && 200 <= res.status && res.status < 300) {
+    ssize_t contant_len = static_cast<ssize_t>(
+        res.content_length_ ? res.content_length_ : res.body.size());
+
+    ssize_t prev_first_pos = -1;
+    ssize_t prev_last_pos = -1;
+    size_t overwrapping_count = 0;
+
+    // NOTE: The following Range check is based on '14.2. Range' in RFC 9110
+    // 'HTTP Semantics' to avoid potential denial-of-service attacks.
+    // https://www.rfc-editor.org/rfc/rfc9110#section-14.2
+
+    // Too many ranges
+    if (req.ranges.size() > CPPHTTPLIB_RANGE_MAX_COUNT) { return true; }
+
+    for (auto &r : req.ranges) {
+      auto &first_pos = r.first;
+      auto &last_pos = r.second;
+
+      if (first_pos == -1 && last_pos == -1) {
+        first_pos = 0;
+        last_pos = contant_len;
+      }
+
+      if (first_pos == -1) {
+        first_pos = contant_len - last_pos;
+        last_pos = contant_len - 1;
+      }
+
+      if (last_pos == -1) { last_pos = contant_len - 1; }
+
+      // Range must be within content length
+      if (!(0 <= first_pos && first_pos <= last_pos &&
+            last_pos <= contant_len - 1)) {
+        return true;
+      }
+
+      // Ranges must be in ascending order
+      if (first_pos <= prev_first_pos) { return true; }
+
+      // Request must not have more than two overlapping ranges
+      if (first_pos <= prev_last_pos) {
+        overwrapping_count++;
+        if (overwrapping_count > 2) { return true; }
+      }
+
+      prev_first_pos = (std::max)(prev_first_pos, first_pos);
+      prev_last_pos = (std::max)(prev_last_pos, last_pos);
+    }
+  }
+
+  return false;
+}
+
+inline std::pair<size_t, size_t>
+get_range_offset_and_length(Range r, size_t content_length) {
+  assert(r.first != -1 && r.second != -1);
+  assert(0 <= r.first && r.first < static_cast<ssize_t>(content_length));
+  assert(r.first <= r.second &&
+         r.second < static_cast<ssize_t>(content_length));
+  (void)(content_length);
+  return std::make_pair(r.first, static_cast<size_t>(r.second - r.first) + 1);
+}
+
+inline std::string make_content_range_header_field(
+    const std::pair<size_t, size_t> &offset_and_length, size_t content_length) {
+  auto st = offset_and_length.first;
+  auto ed = st + offset_and_length.second - 1;
+
+  std::string field = "bytes ";
+  field += std::to_string(st);
+  field += "-";
+  field += std::to_string(ed);
+  field += "/";
+  field += std::to_string(content_length);
+  return field;
+}
+
+template <typename SToken, typename CToken, typename Content>
+bool process_multipart_ranges_data(const Request &req,
+                                   const std::string &boundary,
+                                   const std::string &content_type,
+                                   size_t content_length, SToken stoken,
+                                   CToken ctoken, Content content) {
+  for (size_t i = 0; i < req.ranges.size(); i++) {
+    ctoken("--");
+    stoken(boundary);
+    ctoken("\r\n");
+    if (!content_type.empty()) {
+      ctoken("Content-Type: ");
+      stoken(content_type);
+      ctoken("\r\n");
+    }
+
+    auto offset_and_length =
+        get_range_offset_and_length(req.ranges[i], content_length);
+
+    ctoken("Content-Range: ");
+    stoken(make_content_range_header_field(offset_and_length, content_length));
+    ctoken("\r\n");
+    ctoken("\r\n");
+
+    if (!content(offset_and_length.first, offset_and_length.second)) {
+      return false;
+    }
+    ctoken("\r\n");
+  }
+
+  ctoken("--");
+  stoken(boundary);
+  ctoken("--");
+
+  return true;
+}
+
+inline void make_multipart_ranges_data(const Request &req, Response &res,
+                                       const std::string &boundary,
+                                       const std::string &content_type,
+                                       size_t content_length,
+                                       std::string &data) {
+  process_multipart_ranges_data(
+      req, boundary, content_type, content_length,
+      [&](const std::string &token) { data += token; },
+      [&](const std::string &token) { data += token; },
+      [&](size_t offset, size_t length) {
+        assert(offset + length <= content_length);
+        data += res.body.substr(offset, length);
+        return true;
+      });
+}
+
+inline size_t get_multipart_ranges_data_length(const Request &req,
+                                               const std::string &boundary,
+                                               const std::string &content_type,
+                                               size_t content_length) {
+  size_t data_length = 0;
+
+  process_multipart_ranges_data(
+      req, boundary, content_type, content_length,
+      [&](const std::string &token) { data_length += token.size(); },
+      [&](const std::string &token) { data_length += token.size(); },
+      [&](size_t /*offset*/, size_t length) {
+        data_length += length;
+        return true;
+      });
+
+  return data_length;
+}
+
+template <typename T>
+inline bool
+write_multipart_ranges_data(Stream &strm, const Request &req, Response &res,
+                            const std::string &boundary,
+                            const std::string &content_type,
+                            size_t content_length, const T &is_shutting_down) {
+  return process_multipart_ranges_data(
+      req, boundary, content_type, content_length,
+      [&](const std::string &token) { strm.write(token); },
+      [&](const std::string &token) { strm.write(token); },
+      [&](size_t offset, size_t length) {
+        return write_content(strm, res.content_provider_, offset, length,
+                             is_shutting_down);
+      });
+}
+
+inline bool expect_content(const Request &req) {
+  if (req.method == "POST" || req.method == "PUT" || req.method == "PATCH" ||
+      req.method == "PRI" || req.method == "DELETE") {
+    return true;
+  }
+  // TODO: check if Content-Length is set
+  return false;
+}
+
+inline bool has_crlf(const std::string &s) {
+  auto p = s.c_str();
+  while (*p) {
+    if (*p == '\r' || *p == '\n') { return true; }
+    p++;
+  }
+  return false;
+}
+
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+inline std::string message_digest(const std::string &s, const EVP_MD *algo) {
+  auto context = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>(
+      EVP_MD_CTX_new(), EVP_MD_CTX_free);
+
+  unsigned int hash_length = 0;
+  unsigned char hash[EVP_MAX_MD_SIZE];
+
+  EVP_DigestInit_ex(context.get(), algo, nullptr);
+  EVP_DigestUpdate(context.get(), s.c_str(), s.size());
+  EVP_DigestFinal_ex(context.get(), hash, &hash_length);
+
+  std::stringstream ss;
+  for (auto i = 0u; i < hash_length; ++i) {
+    ss << std::hex << std::setw(2) << std::setfill('0')
+       << static_cast<unsigned int>(hash[i]);
+  }
+
+  return ss.str();
+}
+
+inline std::string MD5(const std::string &s) {
+  return message_digest(s, EVP_md5());
+}
+
+inline std::string SHA_256(const std::string &s) {
+  return message_digest(s, EVP_sha256());
+}
+
+inline std::string SHA_512(const std::string &s) {
+  return message_digest(s, EVP_sha512());
+}
+#endif
+
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+#ifdef _WIN32
+// NOTE: This code came up with the following stackoverflow post:
+// https://stackoverflow.com/questions/9507184/can-openssl-on-windows-use-the-system-certificate-store
+inline bool load_system_certs_on_windows(X509_STORE *store) {
+  auto hStore = CertOpenSystemStoreW((HCRYPTPROV_LEGACY)NULL, L"ROOT");
+  if (!hStore) { return false; }
+
+  auto result = false;
+  PCCERT_CONTEXT pContext = NULL;
+  while ((pContext = CertEnumCertificatesInStore(hStore, pContext)) !=
+         nullptr) {
+    auto encoded_cert =
+        static_cast<const unsigned char *>(pContext->pbCertEncoded);
+
+    auto x509 = d2i_X509(NULL, &encoded_cert, pContext->cbCertEncoded);
+    if (x509) {
+      X509_STORE_add_cert(store, x509);
+      X509_free(x509);
+      result = true;
+    }
+  }
+
+  CertFreeCertificateContext(pContext);
+  CertCloseStore(hStore, 0);
+
+  return result;
+}
+#elif defined(CPPHTTPLIB_USE_CERTS_FROM_MACOSX_KEYCHAIN) && defined(__APPLE__)
+#if TARGET_OS_OSX
+template <typename T>
+using CFObjectPtr =
+    std::unique_ptr<typename std::remove_pointer<T>::type, void (*)(CFTypeRef)>;
+
+inline void cf_object_ptr_deleter(CFTypeRef obj) {
+  if (obj) { CFRelease(obj); }
+}
+
+inline bool retrieve_certs_from_keychain(CFObjectPtr<CFArrayRef> &certs) {
+  CFStringRef keys[] = {kSecClass, kSecMatchLimit, kSecReturnRef};
+  CFTypeRef values[] = {kSecClassCertificate, kSecMatchLimitAll,
+                        kCFBooleanTrue};
+
+  CFObjectPtr<CFDictionaryRef> query(
+      CFDictionaryCreate(nullptr, reinterpret_cast<const void **>(keys), values,
+                         sizeof(keys) / sizeof(keys[0]),
+                         &kCFTypeDictionaryKeyCallBacks,
+                         &kCFTypeDictionaryValueCallBacks),
+      cf_object_ptr_deleter);
+
+  if (!query) { return false; }
+
+  CFTypeRef security_items = nullptr;
+  if (SecItemCopyMatching(query.get(), &security_items) != errSecSuccess ||
+      CFArrayGetTypeID() != CFGetTypeID(security_items)) {
+    return false;
+  }
+
+  certs.reset(reinterpret_cast<CFArrayRef>(security_items));
+  return true;
+}
+
+inline bool retrieve_root_certs_from_keychain(CFObjectPtr<CFArrayRef> &certs) {
+  CFArrayRef root_security_items = nullptr;
+  if (SecTrustCopyAnchorCertificates(&root_security_items) != errSecSuccess) {
+    return false;
+  }
+
+  certs.reset(root_security_items);
+  return true;
+}
+
+inline bool add_certs_to_x509_store(CFArrayRef certs, X509_STORE *store) {
+  auto result = false;
+  for (auto i = 0; i < CFArrayGetCount(certs); ++i) {
+    const auto cert = reinterpret_cast<const __SecCertificate *>(
+        CFArrayGetValueAtIndex(certs, i));
+
