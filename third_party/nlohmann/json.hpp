@@ -21828,3 +21828,593 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                     AllocatorType<string_t> alloc;
                     std::allocator_traits<decltype(alloc)>::destroy(alloc, m_data.m_value.string);
                     std::allocator_traits<decltype(alloc)>::deallocate(alloc, m_data.m_value.string, 1);
+                    m_data.m_value.string = nullptr;
+                }
+                else if (is_binary())
+                {
+                    AllocatorType<binary_t> alloc;
+                    std::allocator_traits<decltype(alloc)>::destroy(alloc, m_data.m_value.binary);
+                    std::allocator_traits<decltype(alloc)>::deallocate(alloc, m_data.m_value.binary, 1);
+                    m_data.m_value.binary = nullptr;
+                }
+
+                m_data.m_type = value_t::null;
+                assert_invariant();
+                break;
+            }
+
+            case value_t::object:
+            {
+                result.m_it.object_iterator = m_data.m_value.object->erase(first.m_it.object_iterator,
+                                              last.m_it.object_iterator);
+                break;
+            }
+
+            case value_t::array:
+            {
+                result.m_it.array_iterator = m_data.m_value.array->erase(first.m_it.array_iterator,
+                                             last.m_it.array_iterator);
+                break;
+            }
+
+            case value_t::null:
+            case value_t::discarded:
+            default:
+                JSON_THROW(type_error::create(307, detail::concat("cannot use erase() with ", type_name()), this));
+        }
+
+        return result;
+    }
+
+  private:
+    template < typename KeyType, detail::enable_if_t <
+                   detail::has_erase_with_key_type<basic_json_t, KeyType>::value, int > = 0 >
+    size_type erase_internal(KeyType && key)
+    {
+        // this erase only works for objects
+        if (JSON_HEDLEY_UNLIKELY(!is_object()))
+        {
+            JSON_THROW(type_error::create(307, detail::concat("cannot use erase() with ", type_name()), this));
+        }
+
+        return m_data.m_value.object->erase(std::forward<KeyType>(key));
+    }
+
+    template < typename KeyType, detail::enable_if_t <
+                   !detail::has_erase_with_key_type<basic_json_t, KeyType>::value, int > = 0 >
+    size_type erase_internal(KeyType && key)
+    {
+        // this erase only works for objects
+        if (JSON_HEDLEY_UNLIKELY(!is_object()))
+        {
+            JSON_THROW(type_error::create(307, detail::concat("cannot use erase() with ", type_name()), this));
+        }
+
+        const auto it = m_data.m_value.object->find(std::forward<KeyType>(key));
+        if (it != m_data.m_value.object->end())
+        {
+            m_data.m_value.object->erase(it);
+            return 1;
+        }
+        return 0;
+    }
+
+  public:
+
+    /// @brief remove element from a JSON object given a key
+    /// @sa https://json.nlohmann.me/api/basic_json/erase/
+    size_type erase(const typename object_t::key_type& key)
+    {
+        // the indirection via erase_internal() is added to avoid making this
+        // function a template and thus de-rank it during overload resolution
+        return erase_internal(key);
+    }
+
+    /// @brief remove element from a JSON object given a key
+    /// @sa https://json.nlohmann.me/api/basic_json/erase/
+    template<class KeyType, detail::enable_if_t<
+                 detail::is_usable_as_basic_json_key_type<basic_json_t, KeyType>::value, int> = 0>
+    size_type erase(KeyType && key)
+    {
+        return erase_internal(std::forward<KeyType>(key));
+    }
+
+    /// @brief remove element from a JSON array given an index
+    /// @sa https://json.nlohmann.me/api/basic_json/erase/
+    void erase(const size_type idx)
+    {
+        // this erase only works for arrays
+        if (JSON_HEDLEY_LIKELY(is_array()))
+        {
+            if (JSON_HEDLEY_UNLIKELY(idx >= size()))
+            {
+                JSON_THROW(out_of_range::create(401, detail::concat("array index ", std::to_string(idx), " is out of range"), this));
+            }
+
+            m_data.m_value.array->erase(m_data.m_value.array->begin() + static_cast<difference_type>(idx));
+        }
+        else
+        {
+            JSON_THROW(type_error::create(307, detail::concat("cannot use erase() with ", type_name()), this));
+        }
+    }
+
+    /// @}
+
+    ////////////
+    // lookup //
+    ////////////
+
+    /// @name lookup
+    /// @{
+
+    /// @brief find an element in a JSON object
+    /// @sa https://json.nlohmann.me/api/basic_json/find/
+    iterator find(const typename object_t::key_type& key)
+    {
+        auto result = end();
+
+        if (is_object())
+        {
+            result.m_it.object_iterator = m_data.m_value.object->find(key);
+        }
+
+        return result;
+    }
+
+    /// @brief find an element in a JSON object
+    /// @sa https://json.nlohmann.me/api/basic_json/find/
+    const_iterator find(const typename object_t::key_type& key) const
+    {
+        auto result = cend();
+
+        if (is_object())
+        {
+            result.m_it.object_iterator = m_data.m_value.object->find(key);
+        }
+
+        return result;
+    }
+
+    /// @brief find an element in a JSON object
+    /// @sa https://json.nlohmann.me/api/basic_json/find/
+    template<class KeyType, detail::enable_if_t<
+                 detail::is_usable_as_basic_json_key_type<basic_json_t, KeyType>::value, int> = 0>
+    iterator find(KeyType && key)
+    {
+        auto result = end();
+
+        if (is_object())
+        {
+            result.m_it.object_iterator = m_data.m_value.object->find(std::forward<KeyType>(key));
+        }
+
+        return result;
+    }
+
+    /// @brief find an element in a JSON object
+    /// @sa https://json.nlohmann.me/api/basic_json/find/
+    template<class KeyType, detail::enable_if_t<
+                 detail::is_usable_as_basic_json_key_type<basic_json_t, KeyType>::value, int> = 0>
+    const_iterator find(KeyType && key) const
+    {
+        auto result = cend();
+
+        if (is_object())
+        {
+            result.m_it.object_iterator = m_data.m_value.object->find(std::forward<KeyType>(key));
+        }
+
+        return result;
+    }
+
+    /// @brief returns the number of occurrences of a key in a JSON object
+    /// @sa https://json.nlohmann.me/api/basic_json/count/
+    size_type count(const typename object_t::key_type& key) const
+    {
+        // return 0 for all nonobject types
+        return is_object() ? m_data.m_value.object->count(key) : 0;
+    }
+
+    /// @brief returns the number of occurrences of a key in a JSON object
+    /// @sa https://json.nlohmann.me/api/basic_json/count/
+    template<class KeyType, detail::enable_if_t<
+                 detail::is_usable_as_basic_json_key_type<basic_json_t, KeyType>::value, int> = 0>
+    size_type count(KeyType && key) const
+    {
+        // return 0 for all nonobject types
+        return is_object() ? m_data.m_value.object->count(std::forward<KeyType>(key)) : 0;
+    }
+
+    /// @brief check the existence of an element in a JSON object
+    /// @sa https://json.nlohmann.me/api/basic_json/contains/
+    bool contains(const typename object_t::key_type& key) const
+    {
+        return is_object() && m_data.m_value.object->find(key) != m_data.m_value.object->end();
+    }
+
+    /// @brief check the existence of an element in a JSON object
+    /// @sa https://json.nlohmann.me/api/basic_json/contains/
+    template<class KeyType, detail::enable_if_t<
+                 detail::is_usable_as_basic_json_key_type<basic_json_t, KeyType>::value, int> = 0>
+    bool contains(KeyType && key) const
+    {
+        return is_object() && m_data.m_value.object->find(std::forward<KeyType>(key)) != m_data.m_value.object->end();
+    }
+
+    /// @brief check the existence of an element in a JSON object given a JSON pointer
+    /// @sa https://json.nlohmann.me/api/basic_json/contains/
+    bool contains(const json_pointer& ptr) const
+    {
+        return ptr.contains(this);
+    }
+
+    template<typename BasicJsonType, detail::enable_if_t<detail::is_basic_json<BasicJsonType>::value, int> = 0>
+    JSON_HEDLEY_DEPRECATED_FOR(3.11.0, basic_json::json_pointer or nlohmann::json_pointer<basic_json::string_t>) // NOLINT(readability/alt_tokens)
+    bool contains(const typename ::nlohmann::json_pointer<BasicJsonType>& ptr) const
+    {
+        return ptr.contains(this);
+    }
+
+    /// @}
+
+    ///////////////
+    // iterators //
+    ///////////////
+
+    /// @name iterators
+    /// @{
+
+    /// @brief returns an iterator to the first element
+    /// @sa https://json.nlohmann.me/api/basic_json/begin/
+    iterator begin() noexcept
+    {
+        iterator result(this);
+        result.set_begin();
+        return result;
+    }
+
+    /// @brief returns an iterator to the first element
+    /// @sa https://json.nlohmann.me/api/basic_json/begin/
+    const_iterator begin() const noexcept
+    {
+        return cbegin();
+    }
+
+    /// @brief returns a const iterator to the first element
+    /// @sa https://json.nlohmann.me/api/basic_json/cbegin/
+    const_iterator cbegin() const noexcept
+    {
+        const_iterator result(this);
+        result.set_begin();
+        return result;
+    }
+
+    /// @brief returns an iterator to one past the last element
+    /// @sa https://json.nlohmann.me/api/basic_json/end/
+    iterator end() noexcept
+    {
+        iterator result(this);
+        result.set_end();
+        return result;
+    }
+
+    /// @brief returns an iterator to one past the last element
+    /// @sa https://json.nlohmann.me/api/basic_json/end/
+    const_iterator end() const noexcept
+    {
+        return cend();
+    }
+
+    /// @brief returns an iterator to one past the last element
+    /// @sa https://json.nlohmann.me/api/basic_json/cend/
+    const_iterator cend() const noexcept
+    {
+        const_iterator result(this);
+        result.set_end();
+        return result;
+    }
+
+    /// @brief returns an iterator to the reverse-beginning
+    /// @sa https://json.nlohmann.me/api/basic_json/rbegin/
+    reverse_iterator rbegin() noexcept
+    {
+        return reverse_iterator(end());
+    }
+
+    /// @brief returns an iterator to the reverse-beginning
+    /// @sa https://json.nlohmann.me/api/basic_json/rbegin/
+    const_reverse_iterator rbegin() const noexcept
+    {
+        return crbegin();
+    }
+
+    /// @brief returns an iterator to the reverse-end
+    /// @sa https://json.nlohmann.me/api/basic_json/rend/
+    reverse_iterator rend() noexcept
+    {
+        return reverse_iterator(begin());
+    }
+
+    /// @brief returns an iterator to the reverse-end
+    /// @sa https://json.nlohmann.me/api/basic_json/rend/
+    const_reverse_iterator rend() const noexcept
+    {
+        return crend();
+    }
+
+    /// @brief returns a const reverse iterator to the last element
+    /// @sa https://json.nlohmann.me/api/basic_json/crbegin/
+    const_reverse_iterator crbegin() const noexcept
+    {
+        return const_reverse_iterator(cend());
+    }
+
+    /// @brief returns a const reverse iterator to one before the first
+    /// @sa https://json.nlohmann.me/api/basic_json/crend/
+    const_reverse_iterator crend() const noexcept
+    {
+        return const_reverse_iterator(cbegin());
+    }
+
+  public:
+    /// @brief wrapper to access iterator member functions in range-based for
+    /// @sa https://json.nlohmann.me/api/basic_json/items/
+    /// @deprecated This function is deprecated since 3.1.0 and will be removed in
+    ///             version 4.0.0 of the library. Please use @ref items() instead;
+    ///             that is, replace `json::iterator_wrapper(j)` with `j.items()`.
+    JSON_HEDLEY_DEPRECATED_FOR(3.1.0, items())
+    static iteration_proxy<iterator> iterator_wrapper(reference ref) noexcept
+    {
+        return ref.items();
+    }
+
+    /// @brief wrapper to access iterator member functions in range-based for
+    /// @sa https://json.nlohmann.me/api/basic_json/items/
+    /// @deprecated This function is deprecated since 3.1.0 and will be removed in
+    ///         version 4.0.0 of the library. Please use @ref items() instead;
+    ///         that is, replace `json::iterator_wrapper(j)` with `j.items()`.
+    JSON_HEDLEY_DEPRECATED_FOR(3.1.0, items())
+    static iteration_proxy<const_iterator> iterator_wrapper(const_reference ref) noexcept
+    {
+        return ref.items();
+    }
+
+    /// @brief helper to access iterator member functions in range-based for
+    /// @sa https://json.nlohmann.me/api/basic_json/items/
+    iteration_proxy<iterator> items() noexcept
+    {
+        return iteration_proxy<iterator>(*this);
+    }
+
+    /// @brief helper to access iterator member functions in range-based for
+    /// @sa https://json.nlohmann.me/api/basic_json/items/
+    iteration_proxy<const_iterator> items() const noexcept
+    {
+        return iteration_proxy<const_iterator>(*this);
+    }
+
+    /// @}
+
+    //////////////
+    // capacity //
+    //////////////
+
+    /// @name capacity
+    /// @{
+
+    /// @brief checks whether the container is empty.
+    /// @sa https://json.nlohmann.me/api/basic_json/empty/
+    bool empty() const noexcept
+    {
+        switch (m_data.m_type)
+        {
+            case value_t::null:
+            {
+                // null values are empty
+                return true;
+            }
+
+            case value_t::array:
+            {
+                // delegate call to array_t::empty()
+                return m_data.m_value.array->empty();
+            }
+
+            case value_t::object:
+            {
+                // delegate call to object_t::empty()
+                return m_data.m_value.object->empty();
+            }
+
+            case value_t::string:
+            case value_t::boolean:
+            case value_t::number_integer:
+            case value_t::number_unsigned:
+            case value_t::number_float:
+            case value_t::binary:
+            case value_t::discarded:
+            default:
+            {
+                // all other types are nonempty
+                return false;
+            }
+        }
+    }
+
+    /// @brief returns the number of elements
+    /// @sa https://json.nlohmann.me/api/basic_json/size/
+    size_type size() const noexcept
+    {
+        switch (m_data.m_type)
+        {
+            case value_t::null:
+            {
+                // null values are empty
+                return 0;
+            }
+
+            case value_t::array:
+            {
+                // delegate call to array_t::size()
+                return m_data.m_value.array->size();
+            }
+
+            case value_t::object:
+            {
+                // delegate call to object_t::size()
+                return m_data.m_value.object->size();
+            }
+
+            case value_t::string:
+            case value_t::boolean:
+            case value_t::number_integer:
+            case value_t::number_unsigned:
+            case value_t::number_float:
+            case value_t::binary:
+            case value_t::discarded:
+            default:
+            {
+                // all other types have size 1
+                return 1;
+            }
+        }
+    }
+
+    /// @brief returns the maximum possible number of elements
+    /// @sa https://json.nlohmann.me/api/basic_json/max_size/
+    size_type max_size() const noexcept
+    {
+        switch (m_data.m_type)
+        {
+            case value_t::array:
+            {
+                // delegate call to array_t::max_size()
+                return m_data.m_value.array->max_size();
+            }
+
+            case value_t::object:
+            {
+                // delegate call to object_t::max_size()
+                return m_data.m_value.object->max_size();
+            }
+
+            case value_t::null:
+            case value_t::string:
+            case value_t::boolean:
+            case value_t::number_integer:
+            case value_t::number_unsigned:
+            case value_t::number_float:
+            case value_t::binary:
+            case value_t::discarded:
+            default:
+            {
+                // all other types have max_size() == size()
+                return size();
+            }
+        }
+    }
+
+    /// @}
+
+    ///////////////
+    // modifiers //
+    ///////////////
+
+    /// @name modifiers
+    /// @{
+
+    /// @brief clears the contents
+    /// @sa https://json.nlohmann.me/api/basic_json/clear/
+    void clear() noexcept
+    {
+        switch (m_data.m_type)
+        {
+            case value_t::number_integer:
+            {
+                m_data.m_value.number_integer = 0;
+                break;
+            }
+
+            case value_t::number_unsigned:
+            {
+                m_data.m_value.number_unsigned = 0;
+                break;
+            }
+
+            case value_t::number_float:
+            {
+                m_data.m_value.number_float = 0.0;
+                break;
+            }
+
+            case value_t::boolean:
+            {
+                m_data.m_value.boolean = false;
+                break;
+            }
+
+            case value_t::string:
+            {
+                m_data.m_value.string->clear();
+                break;
+            }
+
+            case value_t::binary:
+            {
+                m_data.m_value.binary->clear();
+                break;
+            }
+
+            case value_t::array:
+            {
+                m_data.m_value.array->clear();
+                break;
+            }
+
+            case value_t::object:
+            {
+                m_data.m_value.object->clear();
+                break;
+            }
+
+            case value_t::null:
+            case value_t::discarded:
+            default:
+                break;
+        }
+    }
+
+    /// @brief add an object to an array
+    /// @sa https://json.nlohmann.me/api/basic_json/push_back/
+    void push_back(basic_json&& val)
+    {
+        // push_back only works for null objects or arrays
+        if (JSON_HEDLEY_UNLIKELY(!(is_null() || is_array())))
+        {
+            JSON_THROW(type_error::create(308, detail::concat("cannot use push_back() with ", type_name()), this));
+        }
+
+        // transform null object into an array
+        if (is_null())
+        {
+            m_data.m_type = value_t::array;
+            m_data.m_value = value_t::array;
+            assert_invariant();
+        }
+
+        // add element to array (move semantics)
+        const auto old_capacity = m_data.m_value.array->capacity();
+        m_data.m_value.array->push_back(std::move(val));
+        set_parent(m_data.m_value.array->back(), old_capacity);
+        // if val is moved from, basic_json move constructor marks it null, so we do not call the destructor
+    }
+
+    /// @brief add an object to an array
+    /// @sa https://json.nlohmann.me/api/basic_json/operator+=/
+    reference operator+=(basic_json&& val)
+    {
+        push_back(std::move(val));
+        return *this;
+    }
+
