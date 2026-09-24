@@ -3018,3 +3018,607 @@ unsigned lodepng_palette_add(LodePNGColorMode* info,
   if(info->palettesize >= 256) {
     return 108; /*too many palette values*/
   }
+  info->palette[4 * info->palettesize + 0] = r;
+  info->palette[4 * info->palettesize + 1] = g;
+  info->palette[4 * info->palettesize + 2] = b;
+  info->palette[4 * info->palettesize + 3] = a;
+  ++info->palettesize;
+  return 0;
+}
+
+/*calculate bits per pixel out of colortype and bitdepth*/
+unsigned lodepng_get_bpp(const LodePNGColorMode* info) {
+  return lodepng_get_bpp_lct(info->colortype, info->bitdepth);
+}
+
+unsigned lodepng_get_channels(const LodePNGColorMode* info) {
+  return getNumColorChannels(info->colortype);
+}
+
+unsigned lodepng_is_greyscale_type(const LodePNGColorMode* info) {
+  return info->colortype == LCT_GREY || info->colortype == LCT_GREY_ALPHA;
+}
+
+unsigned lodepng_is_alpha_type(const LodePNGColorMode* info) {
+  return (info->colortype & 4) != 0; /*4 or 6*/
+}
+
+unsigned lodepng_is_palette_type(const LodePNGColorMode* info) {
+  return info->colortype == LCT_PALETTE;
+}
+
+unsigned lodepng_has_palette_alpha(const LodePNGColorMode* info) {
+  size_t i;
+  for(i = 0; i != info->palettesize; ++i) {
+    if(info->palette[i * 4 + 3] < 255) return 1;
+  }
+  return 0;
+}
+
+unsigned lodepng_can_have_alpha(const LodePNGColorMode* info) {
+  return info->key_defined
+      || lodepng_is_alpha_type(info)
+      || lodepng_has_palette_alpha(info);
+}
+
+static size_t lodepng_get_raw_size_lct(unsigned w, unsigned h, LodePNGColorType colortype, unsigned bitdepth) {
+  size_t bpp = lodepng_get_bpp_lct(colortype, bitdepth);
+  size_t n = (size_t)w * (size_t)h;
+  return ((n / 8u) * bpp) + ((n & 7u) * bpp + 7u) / 8u;
+}
+
+size_t lodepng_get_raw_size(unsigned w, unsigned h, const LodePNGColorMode* color) {
+  return lodepng_get_raw_size_lct(w, h, color->colortype, color->bitdepth);
+}
+
+
+#ifdef LODEPNG_COMPILE_PNG
+
+/*in an idat chunk, each scanline is a multiple of 8 bits, unlike the lodepng output buffer,
+and in addition has one extra byte per line: the filter byte. So this gives a larger
+result than lodepng_get_raw_size. Set h to 1 to get the size of 1 row including filter byte. */
+static size_t lodepng_get_raw_size_idat(unsigned w, unsigned h, unsigned bpp) {
+  /* + 1 for the filter byte, and possibly plus padding bits per line. */
+  /* Ignoring casts, the expression is equal to (w * bpp + 7) / 8 + 1, but avoids overflow of w * bpp */
+  size_t line = ((size_t)(w / 8u) * bpp) + 1u + ((w & 7u) * bpp + 7u) / 8u;
+  return (size_t)h * line;
+}
+
+#ifdef LODEPNG_COMPILE_DECODER
+/*Safely checks whether size_t overflow can be caused due to amount of pixels.
+This check is overcautious rather than precise. If this check indicates no overflow,
+you can safely compute in a size_t (but not an unsigned):
+-(size_t)w * (size_t)h * 8
+-amount of bytes in IDAT (including filter, padding and Adam7 bytes)
+-amount of bytes in raw color model
+Returns 1 if overflow possible, 0 if not.
+*/
+static int lodepng_pixel_overflow(unsigned w, unsigned h,
+                                  const LodePNGColorMode* pngcolor, const LodePNGColorMode* rawcolor) {
+  size_t bpp = LODEPNG_MAX(lodepng_get_bpp(pngcolor), lodepng_get_bpp(rawcolor));
+  size_t numpixels, total;
+  size_t line; /* bytes per line in worst case */
+
+  if(lodepng_mulofl((size_t)w, (size_t)h, &numpixels)) return 1;
+  if(lodepng_mulofl(numpixels, 8, &total)) return 1; /* bit pointer with 8-bit color, or 8 bytes per channel color */
+
+  /* Bytes per scanline with the expression "(w / 8u) * bpp) + ((w & 7u) * bpp + 7u) / 8u" */
+  if(lodepng_mulofl((size_t)(w / 8u), bpp, &line)) return 1;
+  if(lodepng_addofl(line, ((w & 7u) * bpp + 7u) / 8u, &line)) return 1;
+
+  if(lodepng_addofl(line, 5, &line)) return 1; /* 5 bytes overhead per line: 1 filterbyte, 4 for Adam7 worst case */
+  if(lodepng_mulofl(line, h, &total)) return 1; /* Total bytes in worst case */
+
+  return 0; /* no overflow */
+}
+#endif /*LODEPNG_COMPILE_DECODER*/
+#endif /*LODEPNG_COMPILE_PNG*/
+
+#ifdef LODEPNG_COMPILE_ANCILLARY_CHUNKS
+
+static void LodePNGUnknownChunks_init(LodePNGInfo* info) {
+  unsigned i;
+  for(i = 0; i != 3; ++i) info->unknown_chunks_data[i] = 0;
+  for(i = 0; i != 3; ++i) info->unknown_chunks_size[i] = 0;
+}
+
+static void LodePNGUnknownChunks_cleanup(LodePNGInfo* info) {
+  unsigned i;
+  for(i = 0; i != 3; ++i) lodepng_free(info->unknown_chunks_data[i]);
+}
+
+static unsigned LodePNGUnknownChunks_copy(LodePNGInfo* dest, const LodePNGInfo* src) {
+  unsigned i;
+
+  LodePNGUnknownChunks_cleanup(dest);
+
+  for(i = 0; i != 3; ++i) {
+    size_t j;
+    dest->unknown_chunks_size[i] = src->unknown_chunks_size[i];
+    dest->unknown_chunks_data[i] = (unsigned char*)lodepng_malloc(src->unknown_chunks_size[i]);
+    if(!dest->unknown_chunks_data[i] && dest->unknown_chunks_size[i]) return 83; /*alloc fail*/
+    for(j = 0; j < src->unknown_chunks_size[i]; ++j) {
+      dest->unknown_chunks_data[i][j] = src->unknown_chunks_data[i][j];
+    }
+  }
+
+  return 0;
+}
+
+/******************************************************************************/
+
+static void LodePNGText_init(LodePNGInfo* info) {
+  info->text_num = 0;
+  info->text_keys = NULL;
+  info->text_strings = NULL;
+}
+
+static void LodePNGText_cleanup(LodePNGInfo* info) {
+  size_t i;
+  for(i = 0; i != info->text_num; ++i) {
+    lodepng_free(info->text_keys[i]);
+    lodepng_free(info->text_strings[i]);
+  }
+  lodepng_free(info->text_keys);
+  lodepng_free(info->text_strings);
+}
+
+static unsigned LodePNGText_copy(LodePNGInfo* dest, const LodePNGInfo* source) {
+  size_t i = 0;
+  dest->text_keys = NULL;
+  dest->text_strings = NULL;
+  dest->text_num = 0;
+  for(i = 0; i != source->text_num; ++i) {
+    CERROR_TRY_RETURN(lodepng_add_text(dest, source->text_keys[i], source->text_strings[i]));
+  }
+  return 0;
+}
+
+static unsigned lodepng_add_text_sized(LodePNGInfo* info, const char* key, const char* str, size_t size) {
+  char** new_keys = (char**)(lodepng_realloc(info->text_keys, sizeof(char*) * (info->text_num + 1)));
+  char** new_strings = (char**)(lodepng_realloc(info->text_strings, sizeof(char*) * (info->text_num + 1)));
+
+  if(new_keys) info->text_keys = new_keys;
+  if(new_strings) info->text_strings = new_strings;
+
+  if(!new_keys || !new_strings) return 83; /*alloc fail*/
+
+  ++info->text_num;
+  info->text_keys[info->text_num - 1] = alloc_string(key);
+  info->text_strings[info->text_num - 1] = alloc_string_sized(str, size);
+  if(!info->text_keys[info->text_num - 1] || !info->text_strings[info->text_num - 1]) return 83; /*alloc fail*/
+
+  return 0;
+}
+
+unsigned lodepng_add_text(LodePNGInfo* info, const char* key, const char* str) {
+  return lodepng_add_text_sized(info, key, str, lodepng_strlen(str));
+}
+
+void lodepng_clear_text(LodePNGInfo* info) {
+  LodePNGText_cleanup(info);
+  /*cleanup only deconstructs, need to init again to set appropriate pointers to NULL*/
+  LodePNGText_init(info);
+}
+
+/******************************************************************************/
+
+static void LodePNGIText_init(LodePNGInfo* info) {
+  info->itext_num = 0;
+  info->itext_keys = NULL;
+  info->itext_langtags = NULL;
+  info->itext_transkeys = NULL;
+  info->itext_strings = NULL;
+}
+
+static void LodePNGIText_cleanup(LodePNGInfo* info) {
+  size_t i;
+  for(i = 0; i != info->itext_num; ++i) {
+    lodepng_free(info->itext_keys[i]);
+    lodepng_free(info->itext_langtags[i]);
+    lodepng_free(info->itext_transkeys[i]);
+    lodepng_free(info->itext_strings[i]);
+  }
+  lodepng_free(info->itext_keys);
+  lodepng_free(info->itext_langtags);
+  lodepng_free(info->itext_transkeys);
+  lodepng_free(info->itext_strings);
+}
+
+static unsigned LodePNGIText_copy(LodePNGInfo* dest, const LodePNGInfo* source) {
+  size_t i = 0;
+  dest->itext_keys = NULL;
+  dest->itext_langtags = NULL;
+  dest->itext_transkeys = NULL;
+  dest->itext_strings = NULL;
+  dest->itext_num = 0;
+  for(i = 0; i != source->itext_num; ++i) {
+    CERROR_TRY_RETURN(lodepng_add_itext(dest, source->itext_keys[i], source->itext_langtags[i],
+                                        source->itext_transkeys[i], source->itext_strings[i]));
+  }
+  return 0;
+}
+
+void lodepng_clear_itext(LodePNGInfo* info) {
+  LodePNGIText_cleanup(info);
+  /*cleanup only deconstructs, need to init again to set appropriate pointers to NULL*/
+  LodePNGIText_init(info);
+}
+
+static unsigned lodepng_add_itext_sized(LodePNGInfo* info, const char* key, const char* langtag,
+                                        const char* transkey, const char* str, size_t size) {
+  char** new_keys = (char**)(lodepng_realloc(info->itext_keys, sizeof(char*) * (info->itext_num + 1)));
+  char** new_langtags = (char**)(lodepng_realloc(info->itext_langtags, sizeof(char*) * (info->itext_num + 1)));
+  char** new_transkeys = (char**)(lodepng_realloc(info->itext_transkeys, sizeof(char*) * (info->itext_num + 1)));
+  char** new_strings = (char**)(lodepng_realloc(info->itext_strings, sizeof(char*) * (info->itext_num + 1)));
+
+  if(new_keys) info->itext_keys = new_keys;
+  if(new_langtags) info->itext_langtags = new_langtags;
+  if(new_transkeys) info->itext_transkeys = new_transkeys;
+  if(new_strings) info->itext_strings = new_strings;
+
+  if(!new_keys || !new_langtags || !new_transkeys || !new_strings) return 83; /*alloc fail*/
+
+  ++info->itext_num;
+
+  info->itext_keys[info->itext_num - 1] = alloc_string(key);
+  info->itext_langtags[info->itext_num - 1] = alloc_string(langtag);
+  info->itext_transkeys[info->itext_num - 1] = alloc_string(transkey);
+  info->itext_strings[info->itext_num - 1] = alloc_string_sized(str, size);
+
+  return 0;
+}
+
+unsigned lodepng_add_itext(LodePNGInfo* info, const char* key, const char* langtag,
+                           const char* transkey, const char* str) {
+  return lodepng_add_itext_sized(info, key, langtag, transkey, str, lodepng_strlen(str));
+}
+
+unsigned lodepng_set_icc(LodePNGInfo* info, const char* name, const unsigned char* profile, unsigned profile_size) {
+  if(info->iccp_defined) lodepng_clear_icc(info);
+
+  if(profile_size == 0) return 123; /*invalid ICC profile size*/
+
+  info->iccp_name = alloc_string(name);
+  if(!info->iccp_name) return 83; /*alloc fail*/
+
+  info->iccp_profile = (unsigned char*)lodepng_malloc(profile_size);
+  if(!info->iccp_profile) {
+    lodepng_free(info->iccp_name);
+    return 83; /*alloc fail*/
+  }
+
+  lodepng_memcpy(info->iccp_profile, profile, profile_size);
+  info->iccp_profile_size = profile_size;
+  info->iccp_defined = 1;
+
+  return 0; /*ok*/
+}
+
+static void lodepng_init_icc(LodePNGInfo* info) {
+  info->iccp_defined = 0;
+  info->iccp_name = NULL;
+  info->iccp_profile = NULL;
+  info->iccp_profile_size = 0;
+}
+
+void lodepng_clear_icc(LodePNGInfo* info) {
+  lodepng_free(info->iccp_name);
+  lodepng_free(info->iccp_profile);
+  lodepng_init_icc(info);
+}
+
+unsigned lodepng_set_exif(LodePNGInfo* info, const unsigned char* exif, unsigned exif_size) {
+  if(info->exif_defined) lodepng_clear_exif(info);
+  info->exif = (unsigned char*)lodepng_malloc(exif_size);
+
+  if(!info->exif) return 83; /*alloc fail*/
+
+  lodepng_memcpy(info->exif, exif, exif_size);
+  info->exif_size = exif_size;
+  info->exif_defined = 1;
+
+  return 0; /*ok*/
+}
+
+static void lodepng_init_exif(LodePNGInfo* info) {
+  info->exif_defined = 0;
+  info->exif = NULL;
+  info->exif_size = 0;
+}
+
+void lodepng_clear_exif(LodePNGInfo* info) {
+  lodepng_free(info->exif);
+  lodepng_init_exif(info);
+}
+#endif /*LODEPNG_COMPILE_ANCILLARY_CHUNKS*/
+
+void lodepng_info_init(LodePNGInfo* info) {
+  lodepng_color_mode_init(&info->color);
+  info->interlace_method = 0;
+  info->compression_method = 0;
+  info->filter_method = 0;
+#ifdef LODEPNG_COMPILE_ANCILLARY_CHUNKS
+  info->background_defined = 0;
+  info->background_r = info->background_g = info->background_b = 0;
+
+  LodePNGText_init(info);
+  LodePNGIText_init(info);
+  lodepng_init_icc(info);
+  lodepng_init_exif(info);
+
+  info->time_defined = 0;
+  info->phys_defined = 0;
+
+  info->gama_defined = 0;
+  info->chrm_defined = 0;
+  info->srgb_defined = 0;
+  info->cicp_defined = 0;
+  info->cicp_color_primaries = 0;
+  info->cicp_transfer_function = 0;
+  info->cicp_matrix_coefficients = 0;
+  info->cicp_video_full_range_flag = 0;
+  info->mdcv_defined = 0;
+  info->mdcv_red_x = 0;
+  info->mdcv_red_y = 0;
+  info->mdcv_green_x = 0;
+  info->mdcv_green_y = 0;
+  info->mdcv_blue_x = 0;
+  info->mdcv_blue_y = 0;
+  info->mdcv_white_x = 0;
+  info->mdcv_white_y = 0;
+  info->mdcv_max_luminance = 0;
+  info->mdcv_min_luminance = 0;
+  info->clli_defined = 0;
+  info->clli_max_cll = 0;
+  info->clli_max_fall = 0;
+
+  info->sbit_defined = 0;
+  info->sbit_r = info->sbit_g = info->sbit_b = info->sbit_a = 0;
+
+  LodePNGUnknownChunks_init(info);
+#endif /*LODEPNG_COMPILE_ANCILLARY_CHUNKS*/
+}
+
+void lodepng_info_cleanup(LodePNGInfo* info) {
+  lodepng_color_mode_cleanup(&info->color);
+#ifdef LODEPNG_COMPILE_ANCILLARY_CHUNKS
+  LodePNGText_cleanup(info);
+  LodePNGIText_cleanup(info);
+
+  lodepng_clear_icc(info);
+  lodepng_clear_exif(info);
+
+  LodePNGUnknownChunks_cleanup(info);
+#endif /*LODEPNG_COMPILE_ANCILLARY_CHUNKS*/
+}
+
+unsigned lodepng_info_copy(LodePNGInfo* dest, const LodePNGInfo* source) {
+  lodepng_info_cleanup(dest);
+  lodepng_memcpy(dest, source, sizeof(LodePNGInfo));
+
+  /*ensure to initialize all fields pointing to allocated data to NULL first*/
+  lodepng_color_mode_init(&dest->color);
+#ifdef LODEPNG_COMPILE_ANCILLARY_CHUNKS
+  LodePNGText_init(dest);
+  LodePNGIText_init(dest);
+  lodepng_init_icc(dest);
+  lodepng_init_exif(dest);
+  LodePNGUnknownChunks_init(dest);
+#endif /*LODEPNG_COMPILE_ANCILLARY_CHUNKS*/
+
+  CERROR_TRY_RETURN(lodepng_color_mode_copy(&dest->color, &source->color));
+#ifdef LODEPNG_COMPILE_ANCILLARY_CHUNKS
+  CERROR_TRY_RETURN(LodePNGText_copy(dest, source));
+  CERROR_TRY_RETURN(LodePNGIText_copy(dest, source));
+  if(source->iccp_defined) {
+    CERROR_TRY_RETURN(lodepng_set_icc(dest, source->iccp_name, source->iccp_profile, source->iccp_profile_size));
+  }
+  if(source->exif_defined) {
+    CERROR_TRY_RETURN(lodepng_set_exif(dest, source->exif, source->exif_size));
+  }
+  CERROR_TRY_RETURN(LodePNGUnknownChunks_copy(dest, source));
+#endif /*LODEPNG_COMPILE_ANCILLARY_CHUNKS*/
+
+  return 0;
+}
+
+/* ////////////////////////////////////////////////////////////////////////// */
+
+/*index: bitgroup index, bits: bitgroup size(1, 2 or 4), in: bitgroup value, out: octet array to add bits to*/
+static void addColorBits(unsigned char* out, size_t index, unsigned bits, unsigned in) {
+  unsigned m = bits == 1 ? 7 : bits == 2 ? 3 : 1; /*8 / bits - 1*/
+  /*p = the partial index in the byte, e.g. with 4 palettebits it is 0 for first half or 1 for second half*/
+  unsigned p = index & m;
+  in &= (1u << bits) - 1u; /*filter out any other bits of the input value*/
+  in = in << (bits * (m - p));
+  if(p == 0) out[index * bits / 8u] = in;
+  else out[index * bits / 8u] |= in;
+}
+
+typedef struct ColorTree ColorTree;
+
+/*
+One node of a color tree
+This is the data structure used to count the number of unique colors and to get a palette
+index for a color. It's like an octree, but because the alpha channel is used too, each
+node has 16 instead of 8 children.
+*/
+struct ColorTree {
+  ColorTree* children[16]; /*up to 16 pointers to ColorTree of next level*/
+  int index; /*the payload. Only has a meaningful value if this is in the last level*/
+};
+
+static void color_tree_init(ColorTree* tree) {
+  lodepng_memset(tree->children, 0, 16 * sizeof(*tree->children));
+  tree->index = -1;
+}
+
+static void color_tree_cleanup(ColorTree* tree) {
+  int i;
+  for(i = 0; i != 16; ++i) {
+    if(tree->children[i]) {
+      color_tree_cleanup(tree->children[i]);
+      lodepng_free(tree->children[i]);
+    }
+  }
+}
+
+/*returns -1 if color not present, its index otherwise*/
+static int color_tree_get(ColorTree* tree, unsigned char r, unsigned char g, unsigned char b, unsigned char a) {
+  int bit = 0;
+  for(bit = 0; bit < 8; ++bit) {
+    int i = 8 * ((r >> bit) & 1) + 4 * ((g >> bit) & 1) + 2 * ((b >> bit) & 1) + 1 * ((a >> bit) & 1);
+    if(!tree->children[i]) return -1;
+    else tree = tree->children[i];
+  }
+  return tree ? tree->index : -1;
+}
+
+#ifdef LODEPNG_COMPILE_ENCODER
+static int color_tree_has(ColorTree* tree, unsigned char r, unsigned char g, unsigned char b, unsigned char a) {
+  return color_tree_get(tree, r, g, b, a) >= 0;
+}
+#endif /*LODEPNG_COMPILE_ENCODER*/
+
+/*color is not allowed to already exist.
+Index should be >= 0 (it's signed to be compatible with using -1 for "doesn't exist")
+Returns error code, or 0 if ok*/
+static unsigned color_tree_add(ColorTree* tree,
+                               unsigned char r, unsigned char g, unsigned char b, unsigned char a, unsigned index) {
+  int bit;
+  for(bit = 0; bit < 8; ++bit) {
+    int i = 8 * ((r >> bit) & 1) + 4 * ((g >> bit) & 1) + 2 * ((b >> bit) & 1) + 1 * ((a >> bit) & 1);
+    if(!tree->children[i]) {
+      tree->children[i] = (ColorTree*)lodepng_malloc(sizeof(ColorTree));
+      if(!tree->children[i]) return 83; /*alloc fail*/
+      color_tree_init(tree->children[i]);
+    }
+    tree = tree->children[i];
+  }
+  tree->index = (int)index;
+  return 0;
+}
+
+/*put a pixel, given its RGBA color, into image of any color type*/
+static unsigned rgba8ToPixel(unsigned char* out, size_t i,
+                             const LodePNGColorMode* mode, ColorTree* tree /*for palette*/,
+                             unsigned char r, unsigned char g, unsigned char b, unsigned char a) {
+  if(mode->colortype == LCT_GREY) {
+    unsigned char gray = r; /*((unsigned short)r + g + b) / 3u;*/
+    if(mode->bitdepth == 8) out[i] = gray;
+    else if(mode->bitdepth == 16) out[i * 2 + 0] = out[i * 2 + 1] = gray;
+    else {
+      /*take the most significant bits of gray*/
+      gray = ((unsigned)gray >> (8u - mode->bitdepth)) & ((1u << mode->bitdepth) - 1u);
+      addColorBits(out, i, mode->bitdepth, gray);
+    }
+  } else if(mode->colortype == LCT_RGB) {
+    if(mode->bitdepth == 8) {
+      out[i * 3 + 0] = r;
+      out[i * 3 + 1] = g;
+      out[i * 3 + 2] = b;
+    } else {
+      out[i * 6 + 0] = out[i * 6 + 1] = r;
+      out[i * 6 + 2] = out[i * 6 + 3] = g;
+      out[i * 6 + 4] = out[i * 6 + 5] = b;
+    }
+  } else if(mode->colortype == LCT_PALETTE) {
+    int index = color_tree_get(tree, r, g, b, a);
+    if(index < 0) return 82; /*color not in palette*/
+    if(mode->bitdepth == 8) out[i] = index;
+    else addColorBits(out, i, mode->bitdepth, (unsigned)index);
+  } else if(mode->colortype == LCT_GREY_ALPHA) {
+    unsigned char gray = r; /*((unsigned short)r + g + b) / 3u;*/
+    if(mode->bitdepth == 8) {
+      out[i * 2 + 0] = gray;
+      out[i * 2 + 1] = a;
+    } else if(mode->bitdepth == 16) {
+      out[i * 4 + 0] = out[i * 4 + 1] = gray;
+      out[i * 4 + 2] = out[i * 4 + 3] = a;
+    }
+  } else if(mode->colortype == LCT_RGBA) {
+    if(mode->bitdepth == 8) {
+      out[i * 4 + 0] = r;
+      out[i * 4 + 1] = g;
+      out[i * 4 + 2] = b;
+      out[i * 4 + 3] = a;
+    } else {
+      out[i * 8 + 0] = out[i * 8 + 1] = r;
+      out[i * 8 + 2] = out[i * 8 + 3] = g;
+      out[i * 8 + 4] = out[i * 8 + 5] = b;
+      out[i * 8 + 6] = out[i * 8 + 7] = a;
+    }
+  }
+
+  return 0; /*no error*/
+}
+
+/*put a pixel, given its RGBA16 color, into image of any color 16-bitdepth type*/
+static void rgba16ToPixel(unsigned char* out, size_t i,
+                         const LodePNGColorMode* mode,
+                         unsigned short r, unsigned short g, unsigned short b, unsigned short a) {
+  if(mode->colortype == LCT_GREY) {
+    unsigned short gray = r; /*((unsigned)r + g + b) / 3u;*/
+    out[i * 2 + 0] = (gray >> 8) & 255;
+    out[i * 2 + 1] = gray & 255;
+  } else if(mode->colortype == LCT_RGB) {
+    out[i * 6 + 0] = (r >> 8) & 255;
+    out[i * 6 + 1] = r & 255;
+    out[i * 6 + 2] = (g >> 8) & 255;
+    out[i * 6 + 3] = g & 255;
+    out[i * 6 + 4] = (b >> 8) & 255;
+    out[i * 6 + 5] = b & 255;
+  } else if(mode->colortype == LCT_GREY_ALPHA) {
+    unsigned short gray = r; /*((unsigned)r + g + b) / 3u;*/
+    out[i * 4 + 0] = (gray >> 8) & 255;
+    out[i * 4 + 1] = gray & 255;
+    out[i * 4 + 2] = (a >> 8) & 255;
+    out[i * 4 + 3] = a & 255;
+  } else if(mode->colortype == LCT_RGBA) {
+    out[i * 8 + 0] = (r >> 8) & 255;
+    out[i * 8 + 1] = r & 255;
+    out[i * 8 + 2] = (g >> 8) & 255;
+    out[i * 8 + 3] = g & 255;
+    out[i * 8 + 4] = (b >> 8) & 255;
+    out[i * 8 + 5] = b & 255;
+    out[i * 8 + 6] = (a >> 8) & 255;
+    out[i * 8 + 7] = a & 255;
+  }
+}
+
+/*Get RGBA8 color of pixel with index i (y * width + x) from the raw image with given color type.*/
+static void getPixelColorRGBA8(unsigned char* r, unsigned char* g,
+                               unsigned char* b, unsigned char* a,
+                               const unsigned char* in, size_t i,
+                               const LodePNGColorMode* mode) {
+  if(mode->colortype == LCT_GREY) {
+    if(mode->bitdepth == 8) {
+      *r = *g = *b = in[i];
+      if(mode->key_defined && *r == mode->key_r) *a = 0;
+      else *a = 255;
+    } else if(mode->bitdepth == 16) {
+      *r = *g = *b = in[i * 2 + 0];
+      if(mode->key_defined && 256U * in[i * 2 + 0] + in[i * 2 + 1] == mode->key_r) *a = 0;
+      else *a = 255;
+    } else {
+      unsigned highest = ((1U << mode->bitdepth) - 1U); /*highest possible value for this bit depth*/
+      size_t j = i * mode->bitdepth;
+      unsigned value = readBitsFromReversedStream(&j, in, mode->bitdepth);
+      *r = *g = *b = (value * 255) / highest;
+      if(mode->key_defined && value == mode->key_r) *a = 0;
+      else *a = 255;
+    }
+  } else if(mode->colortype == LCT_RGB) {
+    if(mode->bitdepth == 8) {
+      *r = in[i * 3 + 0]; *g = in[i * 3 + 1]; *b = in[i * 3 + 2];
+      if(mode->key_defined && *r == mode->key_r && *g == mode->key_g && *b == mode->key_b) *a = 0;
+      else *a = 255;
+    } else {
+      *r = in[i * 6 + 0];
+      *g = in[i * 6 + 2];
+      *b = in[i * 6 + 4];
+      if(mode->key_defined && 256U * in[i * 6 + 0] + in[i * 6 + 1] == mode->key_r
+         && 256U * in[i * 6 + 2] + in[i * 6 + 3] == mode->key_g
+         && 256U * in[i * 6 + 4] + in[i * 6 + 5] == mode->key_b) *a = 0;
+      else *a = 255;
