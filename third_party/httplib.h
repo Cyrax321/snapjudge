@@ -3598,3 +3598,603 @@ inline std::string if2ip(int address_family, const std::string &ifn) {
 #endif
 
 inline socket_t create_client_socket(
+    const std::string &host, const std::string &ip, int port,
+    int address_family, bool tcp_nodelay, bool ipv6_v6only,
+    SocketOptions socket_options, time_t connection_timeout_sec,
+    time_t connection_timeout_usec, time_t read_timeout_sec,
+    time_t read_timeout_usec, time_t write_timeout_sec,
+    time_t write_timeout_usec, const std::string &intf, Error &error) {
+  auto sock = create_socket(
+      host, ip, port, address_family, 0, tcp_nodelay, ipv6_v6only,
+      std::move(socket_options),
+      [&](socket_t sock2, struct addrinfo &ai, bool &quit) -> bool {
+        if (!intf.empty()) {
+#ifdef USE_IF2IP
+          auto ip_from_if = if2ip(address_family, intf);
+          if (ip_from_if.empty()) { ip_from_if = intf; }
+          if (!bind_ip_address(sock2, ip_from_if)) {
+            error = Error::BindIPAddress;
+            return false;
+          }
+#endif
+        }
+
+        set_nonblocking(sock2, true);
+
+        auto ret =
+            ::connect(sock2, ai.ai_addr, static_cast<socklen_t>(ai.ai_addrlen));
+
+        if (ret < 0) {
+          if (is_connection_error()) {
+            error = Error::Connection;
+            return false;
+          }
+          error = wait_until_socket_is_ready(sock2, connection_timeout_sec,
+                                             connection_timeout_usec);
+          if (error != Error::Success) {
+            if (error == Error::ConnectionTimeout) { quit = true; }
+            return false;
+          }
+        }
+
+        set_nonblocking(sock2, false);
+
+        {
+#ifdef _WIN32
+          auto timeout = static_cast<uint32_t>(read_timeout_sec * 1000 +
+                                               read_timeout_usec / 1000);
+          setsockopt(sock2, SOL_SOCKET, SO_RCVTIMEO,
+                     reinterpret_cast<const char *>(&timeout), sizeof(timeout));
+#else
+          timeval tv;
+          tv.tv_sec = static_cast<long>(read_timeout_sec);
+          tv.tv_usec = static_cast<decltype(tv.tv_usec)>(read_timeout_usec);
+          setsockopt(sock2, SOL_SOCKET, SO_RCVTIMEO,
+                     reinterpret_cast<const void *>(&tv), sizeof(tv));
+#endif
+        }
+        {
+
+#ifdef _WIN32
+          auto timeout = static_cast<uint32_t>(write_timeout_sec * 1000 +
+                                               write_timeout_usec / 1000);
+          setsockopt(sock2, SOL_SOCKET, SO_SNDTIMEO,
+                     reinterpret_cast<const char *>(&timeout), sizeof(timeout));
+#else
+          timeval tv;
+          tv.tv_sec = static_cast<long>(write_timeout_sec);
+          tv.tv_usec = static_cast<decltype(tv.tv_usec)>(write_timeout_usec);
+          setsockopt(sock2, SOL_SOCKET, SO_SNDTIMEO,
+                     reinterpret_cast<const void *>(&tv), sizeof(tv));
+#endif
+        }
+
+        error = Error::Success;
+        return true;
+      });
+
+  if (sock != INVALID_SOCKET) {
+    error = Error::Success;
+  } else {
+    if (error == Error::Success) { error = Error::Connection; }
+  }
+
+  return sock;
+}
+
+inline bool get_ip_and_port(const struct sockaddr_storage &addr,
+                            socklen_t addr_len, std::string &ip, int &port) {
+  if (addr.ss_family == AF_INET) {
+    port = ntohs(reinterpret_cast<const struct sockaddr_in *>(&addr)->sin_port);
+  } else if (addr.ss_family == AF_INET6) {
+    port =
+        ntohs(reinterpret_cast<const struct sockaddr_in6 *>(&addr)->sin6_port);
+  } else {
+    return false;
+  }
+
+  std::array<char, NI_MAXHOST> ipstr{};
+  if (getnameinfo(reinterpret_cast<const struct sockaddr *>(&addr), addr_len,
+                  ipstr.data(), static_cast<socklen_t>(ipstr.size()), nullptr,
+                  0, NI_NUMERICHOST)) {
+    return false;
+  }
+
+  ip = ipstr.data();
+  return true;
+}
+
+inline void get_local_ip_and_port(socket_t sock, std::string &ip, int &port) {
+  struct sockaddr_storage addr;
+  socklen_t addr_len = sizeof(addr);
+  if (!getsockname(sock, reinterpret_cast<struct sockaddr *>(&addr),
+                   &addr_len)) {
+    get_ip_and_port(addr, addr_len, ip, port);
+  }
+}
+
+inline void get_remote_ip_and_port(socket_t sock, std::string &ip, int &port) {
+  struct sockaddr_storage addr;
+  socklen_t addr_len = sizeof(addr);
+
+  if (!getpeername(sock, reinterpret_cast<struct sockaddr *>(&addr),
+                   &addr_len)) {
+#ifndef _WIN32
+    if (addr.ss_family == AF_UNIX) {
+#if defined(__linux__)
+      struct ucred ucred;
+      socklen_t len = sizeof(ucred);
+      if (getsockopt(sock, SOL_SOCKET, SO_PEERCRED, &ucred, &len) == 0) {
+        port = ucred.pid;
+      }
+#elif defined(SOL_LOCAL) && defined(SO_PEERPID) // __APPLE__
+      pid_t pid;
+      socklen_t len = sizeof(pid);
+      if (getsockopt(sock, SOL_LOCAL, SO_PEERPID, &pid, &len) == 0) {
+        port = pid;
+      }
+#endif
+      return;
+    }
+#endif
+    get_ip_and_port(addr, addr_len, ip, port);
+  }
+}
+
+inline constexpr unsigned int str2tag_core(const char *s, size_t l,
+                                           unsigned int h) {
+  return (l == 0)
+             ? h
+             : str2tag_core(
+                   s + 1, l - 1,
+                   // Unsets the 6 high bits of h, therefore no overflow happens
+                   (((std::numeric_limits<unsigned int>::max)() >> 6) &
+                    h * 33) ^
+                       static_cast<unsigned char>(*s));
+}
+
+inline unsigned int str2tag(const std::string &s) {
+  return str2tag_core(s.data(), s.size(), 0);
+}
+
+namespace udl {
+
+inline constexpr unsigned int operator""_t(const char *s, size_t l) {
+  return str2tag_core(s, l, 0);
+}
+
+} // namespace udl
+
+inline std::string
+find_content_type(const std::string &path,
+                  const std::map<std::string, std::string> &user_data,
+                  const std::string &default_content_type) {
+  auto ext = file_extension(path);
+
+  auto it = user_data.find(ext);
+  if (it != user_data.end()) { return it->second; }
+
+  using udl::operator""_t;
+
+  switch (str2tag(ext)) {
+  default: return default_content_type;
+
+  case "css"_t: return "text/css";
+  case "csv"_t: return "text/csv";
+  case "htm"_t:
+  case "html"_t: return "text/html";
+  case "js"_t:
+  case "mjs"_t: return "text/javascript";
+  case "txt"_t: return "text/plain";
+  case "vtt"_t: return "text/vtt";
+
+  case "apng"_t: return "image/apng";
+  case "avif"_t: return "image/avif";
+  case "bmp"_t: return "image/bmp";
+  case "gif"_t: return "image/gif";
+  case "png"_t: return "image/png";
+  case "svg"_t: return "image/svg+xml";
+  case "webp"_t: return "image/webp";
+  case "ico"_t: return "image/x-icon";
+  case "tif"_t: return "image/tiff";
+  case "tiff"_t: return "image/tiff";
+  case "jpg"_t:
+  case "jpeg"_t: return "image/jpeg";
+
+  case "mp4"_t: return "video/mp4";
+  case "mpeg"_t: return "video/mpeg";
+  case "webm"_t: return "video/webm";
+
+  case "mp3"_t: return "audio/mp3";
+  case "mpga"_t: return "audio/mpeg";
+  case "weba"_t: return "audio/webm";
+  case "wav"_t: return "audio/wave";
+
+  case "otf"_t: return "font/otf";
+  case "ttf"_t: return "font/ttf";
+  case "woff"_t: return "font/woff";
+  case "woff2"_t: return "font/woff2";
+
+  case "7z"_t: return "application/x-7z-compressed";
+  case "atom"_t: return "application/atom+xml";
+  case "pdf"_t: return "application/pdf";
+  case "json"_t: return "application/json";
+  case "rss"_t: return "application/rss+xml";
+  case "tar"_t: return "application/x-tar";
+  case "xht"_t:
+  case "xhtml"_t: return "application/xhtml+xml";
+  case "xslt"_t: return "application/xslt+xml";
+  case "xml"_t: return "application/xml";
+  case "gz"_t: return "application/gzip";
+  case "zip"_t: return "application/zip";
+  case "wasm"_t: return "application/wasm";
+  }
+}
+
+inline bool can_compress_content_type(const std::string &content_type) {
+  using udl::operator""_t;
+
+  auto tag = str2tag(content_type);
+
+  switch (tag) {
+  case "image/svg+xml"_t:
+  case "application/javascript"_t:
+  case "application/json"_t:
+  case "application/xml"_t:
+  case "application/protobuf"_t:
+  case "application/xhtml+xml"_t: return true;
+
+  case "text/event-stream"_t: return false;
+
+  default: return !content_type.rfind("text/", 0);
+  }
+}
+
+inline EncodingType encoding_type(const Request &req, const Response &res) {
+  auto ret =
+      detail::can_compress_content_type(res.get_header_value("Content-Type"));
+  if (!ret) { return EncodingType::None; }
+
+  const auto &s = req.get_header_value("Accept-Encoding");
+  (void)(s);
+
+#ifdef CPPHTTPLIB_BROTLI_SUPPORT
+  // TODO: 'Accept-Encoding' has br, not br;q=0
+  ret = s.find("br") != std::string::npos;
+  if (ret) { return EncodingType::Brotli; }
+#endif
+
+#ifdef CPPHTTPLIB_ZLIB_SUPPORT
+  // TODO: 'Accept-Encoding' has gzip, not gzip;q=0
+  ret = s.find("gzip") != std::string::npos;
+  if (ret) { return EncodingType::Gzip; }
+#endif
+
+  return EncodingType::None;
+}
+
+inline bool nocompressor::compress(const char *data, size_t data_length,
+                                   bool /*last*/, Callback callback) {
+  if (!data_length) { return true; }
+  return callback(data, data_length);
+}
+
+#ifdef CPPHTTPLIB_ZLIB_SUPPORT
+inline gzip_compressor::gzip_compressor() {
+  std::memset(&strm_, 0, sizeof(strm_));
+  strm_.zalloc = Z_NULL;
+  strm_.zfree = Z_NULL;
+  strm_.opaque = Z_NULL;
+
+  is_valid_ = deflateInit2(&strm_, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 31, 8,
+                           Z_DEFAULT_STRATEGY) == Z_OK;
+}
+
+inline gzip_compressor::~gzip_compressor() { deflateEnd(&strm_); }
+
+inline bool gzip_compressor::compress(const char *data, size_t data_length,
+                                      bool last, Callback callback) {
+  assert(is_valid_);
+
+  do {
+    constexpr size_t max_avail_in =
+        (std::numeric_limits<decltype(strm_.avail_in)>::max)();
+
+    strm_.avail_in = static_cast<decltype(strm_.avail_in)>(
+        (std::min)(data_length, max_avail_in));
+    strm_.next_in = const_cast<Bytef *>(reinterpret_cast<const Bytef *>(data));
+
+    data_length -= strm_.avail_in;
+    data += strm_.avail_in;
+
+    auto flush = (last && data_length == 0) ? Z_FINISH : Z_NO_FLUSH;
+    auto ret = Z_OK;
+
+    std::array<char, CPPHTTPLIB_COMPRESSION_BUFSIZ> buff{};
+    do {
+      strm_.avail_out = static_cast<uInt>(buff.size());
+      strm_.next_out = reinterpret_cast<Bytef *>(buff.data());
+
+      ret = deflate(&strm_, flush);
+      if (ret == Z_STREAM_ERROR) { return false; }
+
+      if (!callback(buff.data(), buff.size() - strm_.avail_out)) {
+        return false;
+      }
+    } while (strm_.avail_out == 0);
+
+    assert((flush == Z_FINISH && ret == Z_STREAM_END) ||
+           (flush == Z_NO_FLUSH && ret == Z_OK));
+    assert(strm_.avail_in == 0);
+  } while (data_length > 0);
+
+  return true;
+}
+
+inline gzip_decompressor::gzip_decompressor() {
+  std::memset(&strm_, 0, sizeof(strm_));
+  strm_.zalloc = Z_NULL;
+  strm_.zfree = Z_NULL;
+  strm_.opaque = Z_NULL;
+
+  // 15 is the value of wbits, which should be at the maximum possible value
+  // to ensure that any gzip stream can be decoded. The offset of 32 specifies
+  // that the stream type should be automatically detected either gzip or
+  // deflate.
+  is_valid_ = inflateInit2(&strm_, 32 + 15) == Z_OK;
+}
+
+inline gzip_decompressor::~gzip_decompressor() { inflateEnd(&strm_); }
+
+inline bool gzip_decompressor::is_valid() const { return is_valid_; }
+
+inline bool gzip_decompressor::decompress(const char *data, size_t data_length,
+                                          Callback callback) {
+  assert(is_valid_);
+
+  auto ret = Z_OK;
+
+  do {
+    constexpr size_t max_avail_in =
+        (std::numeric_limits<decltype(strm_.avail_in)>::max)();
+
+    strm_.avail_in = static_cast<decltype(strm_.avail_in)>(
+        (std::min)(data_length, max_avail_in));
+    strm_.next_in = const_cast<Bytef *>(reinterpret_cast<const Bytef *>(data));
+
+    data_length -= strm_.avail_in;
+    data += strm_.avail_in;
+
+    std::array<char, CPPHTTPLIB_COMPRESSION_BUFSIZ> buff{};
+    while (strm_.avail_in > 0 && ret == Z_OK) {
+      strm_.avail_out = static_cast<uInt>(buff.size());
+      strm_.next_out = reinterpret_cast<Bytef *>(buff.data());
+
+      ret = inflate(&strm_, Z_NO_FLUSH);
+
+      assert(ret != Z_STREAM_ERROR);
+      switch (ret) {
+      case Z_NEED_DICT:
+      case Z_DATA_ERROR:
+      case Z_MEM_ERROR: inflateEnd(&strm_); return false;
+      }
+
+      if (!callback(buff.data(), buff.size() - strm_.avail_out)) {
+        return false;
+      }
+    }
+
+    if (ret != Z_OK && ret != Z_STREAM_END) { return false; }
+
+  } while (data_length > 0);
+
+  return true;
+}
+#endif
+
+#ifdef CPPHTTPLIB_BROTLI_SUPPORT
+inline brotli_compressor::brotli_compressor() {
+  state_ = BrotliEncoderCreateInstance(nullptr, nullptr, nullptr);
+}
+
+inline brotli_compressor::~brotli_compressor() {
+  BrotliEncoderDestroyInstance(state_);
+}
+
+inline bool brotli_compressor::compress(const char *data, size_t data_length,
+                                        bool last, Callback callback) {
+  std::array<uint8_t, CPPHTTPLIB_COMPRESSION_BUFSIZ> buff{};
+
+  auto operation = last ? BROTLI_OPERATION_FINISH : BROTLI_OPERATION_PROCESS;
+  auto available_in = data_length;
+  auto next_in = reinterpret_cast<const uint8_t *>(data);
+
+  for (;;) {
+    if (last) {
+      if (BrotliEncoderIsFinished(state_)) { break; }
+    } else {
+      if (!available_in) { break; }
+    }
+
+    auto available_out = buff.size();
+    auto next_out = buff.data();
+
+    if (!BrotliEncoderCompressStream(state_, operation, &available_in, &next_in,
+                                     &available_out, &next_out, nullptr)) {
+      return false;
+    }
+
+    auto output_bytes = buff.size() - available_out;
+    if (output_bytes) {
+      callback(reinterpret_cast<const char *>(buff.data()), output_bytes);
+    }
+  }
+
+  return true;
+}
+
+inline brotli_decompressor::brotli_decompressor() {
+  decoder_s = BrotliDecoderCreateInstance(0, 0, 0);
+  decoder_r = decoder_s ? BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT
+                        : BROTLI_DECODER_RESULT_ERROR;
+}
+
+inline brotli_decompressor::~brotli_decompressor() {
+  if (decoder_s) { BrotliDecoderDestroyInstance(decoder_s); }
+}
+
+inline bool brotli_decompressor::is_valid() const { return decoder_s; }
+
+inline bool brotli_decompressor::decompress(const char *data,
+                                            size_t data_length,
+                                            Callback callback) {
+  if (decoder_r == BROTLI_DECODER_RESULT_SUCCESS ||
+      decoder_r == BROTLI_DECODER_RESULT_ERROR) {
+    return 0;
+  }
+
+  auto next_in = reinterpret_cast<const uint8_t *>(data);
+  size_t avail_in = data_length;
+  size_t total_out;
+
+  decoder_r = BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT;
+
+  std::array<char, CPPHTTPLIB_COMPRESSION_BUFSIZ> buff{};
+  while (decoder_r == BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT) {
+    char *next_out = buff.data();
+    size_t avail_out = buff.size();
+
+    decoder_r = BrotliDecoderDecompressStream(
+        decoder_s, &avail_in, &next_in, &avail_out,
+        reinterpret_cast<uint8_t **>(&next_out), &total_out);
+
+    if (decoder_r == BROTLI_DECODER_RESULT_ERROR) { return false; }
+
+    if (!callback(buff.data(), buff.size() - avail_out)) { return false; }
+  }
+
+  return decoder_r == BROTLI_DECODER_RESULT_SUCCESS ||
+         decoder_r == BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT;
+}
+#endif
+
+inline bool has_header(const Headers &headers, const std::string &key) {
+  return headers.find(key) != headers.end();
+}
+
+inline const char *get_header_value(const Headers &headers,
+                                    const std::string &key, const char *def,
+                                    size_t id) {
+  auto rng = headers.equal_range(key);
+  auto it = rng.first;
+  std::advance(it, static_cast<ssize_t>(id));
+  if (it != rng.second) { return it->second.c_str(); }
+  return def;
+}
+
+template <typename T>
+inline bool parse_header(const char *beg, const char *end, T fn) {
+  // Skip trailing spaces and tabs.
+  while (beg < end && is_space_or_tab(end[-1])) {
+    end--;
+  }
+
+  auto p = beg;
+  while (p < end && *p != ':') {
+    p++;
+  }
+
+  if (p == end) { return false; }
+
+  auto key_end = p;
+
+  if (*p++ != ':') { return false; }
+
+  while (p < end && is_space_or_tab(*p)) {
+    p++;
+  }
+
+  if (p <= end) {
+    auto key_len = key_end - beg;
+    if (!key_len) { return false; }
+
+    auto key = std::string(beg, key_end);
+    auto val = case_ignore::equal(key, "Location")
+                   ? std::string(p, end)
+                   : decode_url(std::string(p, end), false);
+
+    // NOTE: From RFC 9110:
+    // Field values containing CR, LF, or NUL characters are
+    // invalid and dangerous, due to the varying ways that
+    // implementations might parse and interpret those
+    // characters; a recipient of CR, LF, or NUL within a field
+    // value MUST either reject the message or replace each of
+    // those characters with SP before further processing or
+    // forwarding of that message.
+    static const std::string CR_LF_NUL("\r\n\0", 3);
+    if (val.find_first_of(CR_LF_NUL) != std::string::npos) { return false; }
+
+    fn(key, val);
+    return true;
+  }
+
+  return false;
+}
+
+inline bool read_headers(Stream &strm, Headers &headers) {
+  const auto bufsiz = 2048;
+  char buf[bufsiz];
+  stream_line_reader line_reader(strm, buf, bufsiz);
+
+  for (;;) {
+    if (!line_reader.getline()) { return false; }
+
+    // Check if the line ends with CRLF.
+    auto line_terminator_len = 2;
+    if (line_reader.end_with_crlf()) {
+      // Blank line indicates end of headers.
+      if (line_reader.size() == 2) { break; }
+    } else {
+#ifdef CPPHTTPLIB_ALLOW_LF_AS_LINE_TERMINATOR
+      // Blank line indicates end of headers.
+      if (line_reader.size() == 1) { break; }
+      line_terminator_len = 1;
+#else
+      continue; // Skip invalid line.
+#endif
+    }
+
+    if (line_reader.size() > CPPHTTPLIB_HEADER_MAX_LENGTH) { return false; }
+
+    // Exclude line terminator
+    auto end = line_reader.ptr() + line_reader.size() - line_terminator_len;
+
+    if (!parse_header(line_reader.ptr(), end,
+                      [&](const std::string &key, std::string &val) {
+                        headers.emplace(key, val);
+                      })) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+inline bool read_content_with_length(Stream &strm, uint64_t len,
+                                     Progress progress,
+                                     ContentReceiverWithProgress out) {
+  char buf[CPPHTTPLIB_RECV_BUFSIZ];
+
+  uint64_t r = 0;
+  while (r < len) {
+    auto read_len = static_cast<size_t>(len - r);
+    auto n = strm.read(buf, (std::min)(read_len, CPPHTTPLIB_RECV_BUFSIZ));
+    if (n <= 0) { return false; }
+
+    if (!out(buf, static_cast<size_t>(n), r, len)) { return false; }
+    r += static_cast<uint64_t>(n);
+
+    if (progress) {
+      if (!progress(r, len)) { return false; }
+    }
+  }
