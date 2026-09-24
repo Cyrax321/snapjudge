@@ -149,6 +149,21 @@ ctest --test-dir build --output-on-failure
 | `SNAPJUDGE_BUILD_TESTS` | ON | doctest suites |
 | `SNAPJUDGE_PCRE2` | ON | system PCRE2 (else fetch/build it) |
 
+## Production serve
+
+The built-in server is HTTP-only and loopback-first:
+
+- Default bind: `127.0.0.1:8000`. `POST /v1/systemone` still honors
+  `SNAPJUDGE_API_KEY` when set; `GET /health` stays unauthenticated (it only
+  reports "ok" + loaded checkpoint names).
+- To serve on a network interface: you must set `SNAPJUDGE_API_KEY`
+  (fail-closed on startup if missing). Any non-loopback bind without a key
+  refuses to start.
+- Request bodies are capped at 4 MiB, question count at 256 per call.
+- For internet-facing deployments, put a TLS-terminating reverse proxy (nginx,
+  Caddy, Traefik) in front. snapjudge listens on localhost; TLS, certs, and
+  rate limiting live at the proxy.
+
 ## Environment
 
 `SNAPJUDGE_HOST/PORT/DEVICE/PRELOAD/MODELS/THREADS/AUTO_TASK/API_KEY/LOG_LEVEL`
