@@ -15338,3 +15338,593 @@ class binary_writer
             }
 
             case value_t::binary:
+            {
+                if (j.m_data.m_value.binary->has_subtype())
+                {
+                    if (j.m_data.m_value.binary->subtype() <= (std::numeric_limits<std::uint8_t>::max)())
+                    {
+                        write_number(static_cast<std::uint8_t>(0xd8));
+                        write_number(static_cast<std::uint8_t>(j.m_data.m_value.binary->subtype()));
+                    }
+                    else if (j.m_data.m_value.binary->subtype() <= (std::numeric_limits<std::uint16_t>::max)())
+                    {
+                        write_number(static_cast<std::uint8_t>(0xd9));
+                        write_number(static_cast<std::uint16_t>(j.m_data.m_value.binary->subtype()));
+                    }
+                    else if (j.m_data.m_value.binary->subtype() <= (std::numeric_limits<std::uint32_t>::max)())
+                    {
+                        write_number(static_cast<std::uint8_t>(0xda));
+                        write_number(static_cast<std::uint32_t>(j.m_data.m_value.binary->subtype()));
+                    }
+                    else if (j.m_data.m_value.binary->subtype() <= (std::numeric_limits<std::uint64_t>::max)())
+                    {
+                        write_number(static_cast<std::uint8_t>(0xdb));
+                        write_number(static_cast<std::uint64_t>(j.m_data.m_value.binary->subtype()));
+                    }
+                }
+
+                // step 1: write control byte and the binary array size
+                const auto N = j.m_data.m_value.binary->size();
+                if (N <= 0x17)
+                {
+                    write_number(static_cast<std::uint8_t>(0x40 + N));
+                }
+                else if (N <= (std::numeric_limits<std::uint8_t>::max)())
+                {
+                    oa->write_character(to_char_type(0x58));
+                    write_number(static_cast<std::uint8_t>(N));
+                }
+                else if (N <= (std::numeric_limits<std::uint16_t>::max)())
+                {
+                    oa->write_character(to_char_type(0x59));
+                    write_number(static_cast<std::uint16_t>(N));
+                }
+                else if (N <= (std::numeric_limits<std::uint32_t>::max)())
+                {
+                    oa->write_character(to_char_type(0x5A));
+                    write_number(static_cast<std::uint32_t>(N));
+                }
+                // LCOV_EXCL_START
+                else if (N <= (std::numeric_limits<std::uint64_t>::max)())
+                {
+                    oa->write_character(to_char_type(0x5B));
+                    write_number(static_cast<std::uint64_t>(N));
+                }
+                // LCOV_EXCL_STOP
+
+                // step 2: write each element
+                oa->write_characters(
+                    reinterpret_cast<const CharType*>(j.m_data.m_value.binary->data()),
+                    N);
+
+                break;
+            }
+
+            case value_t::object:
+            {
+                // step 1: write control byte and the object size
+                const auto N = j.m_data.m_value.object->size();
+                if (N <= 0x17)
+                {
+                    write_number(static_cast<std::uint8_t>(0xA0 + N));
+                }
+                else if (N <= (std::numeric_limits<std::uint8_t>::max)())
+                {
+                    oa->write_character(to_char_type(0xB8));
+                    write_number(static_cast<std::uint8_t>(N));
+                }
+                else if (N <= (std::numeric_limits<std::uint16_t>::max)())
+                {
+                    oa->write_character(to_char_type(0xB9));
+                    write_number(static_cast<std::uint16_t>(N));
+                }
+                else if (N <= (std::numeric_limits<std::uint32_t>::max)())
+                {
+                    oa->write_character(to_char_type(0xBA));
+                    write_number(static_cast<std::uint32_t>(N));
+                }
+                // LCOV_EXCL_START
+                else if (N <= (std::numeric_limits<std::uint64_t>::max)())
+                {
+                    oa->write_character(to_char_type(0xBB));
+                    write_number(static_cast<std::uint64_t>(N));
+                }
+                // LCOV_EXCL_STOP
+
+                // step 2: write each element
+                for (const auto& el : *j.m_data.m_value.object)
+                {
+                    write_cbor(el.first);
+                    write_cbor(el.second);
+                }
+                break;
+            }
+
+            case value_t::discarded:
+            default:
+                break;
+        }
+    }
+
+    /*!
+    @param[in] j  JSON value to serialize
+    */
+    void write_msgpack(const BasicJsonType& j)
+    {
+        switch (j.type())
+        {
+            case value_t::null: // nil
+            {
+                oa->write_character(to_char_type(0xC0));
+                break;
+            }
+
+            case value_t::boolean: // true and false
+            {
+                oa->write_character(j.m_data.m_value.boolean
+                                    ? to_char_type(0xC3)
+                                    : to_char_type(0xC2));
+                break;
+            }
+
+            case value_t::number_integer:
+            {
+                if (j.m_data.m_value.number_integer >= 0)
+                {
+                    // MessagePack does not differentiate between positive
+                    // signed integers and unsigned integers. Therefore, we used
+                    // the code from the value_t::number_unsigned case here.
+                    if (j.m_data.m_value.number_unsigned < 128)
+                    {
+                        // positive fixnum
+                        write_number(static_cast<std::uint8_t>(j.m_data.m_value.number_integer));
+                    }
+                    else if (j.m_data.m_value.number_unsigned <= (std::numeric_limits<std::uint8_t>::max)())
+                    {
+                        // uint 8
+                        oa->write_character(to_char_type(0xCC));
+                        write_number(static_cast<std::uint8_t>(j.m_data.m_value.number_integer));
+                    }
+                    else if (j.m_data.m_value.number_unsigned <= (std::numeric_limits<std::uint16_t>::max)())
+                    {
+                        // uint 16
+                        oa->write_character(to_char_type(0xCD));
+                        write_number(static_cast<std::uint16_t>(j.m_data.m_value.number_integer));
+                    }
+                    else if (j.m_data.m_value.number_unsigned <= (std::numeric_limits<std::uint32_t>::max)())
+                    {
+                        // uint 32
+                        oa->write_character(to_char_type(0xCE));
+                        write_number(static_cast<std::uint32_t>(j.m_data.m_value.number_integer));
+                    }
+                    else if (j.m_data.m_value.number_unsigned <= (std::numeric_limits<std::uint64_t>::max)())
+                    {
+                        // uint 64
+                        oa->write_character(to_char_type(0xCF));
+                        write_number(static_cast<std::uint64_t>(j.m_data.m_value.number_integer));
+                    }
+                }
+                else
+                {
+                    if (j.m_data.m_value.number_integer >= -32)
+                    {
+                        // negative fixnum
+                        write_number(static_cast<std::int8_t>(j.m_data.m_value.number_integer));
+                    }
+                    else if (j.m_data.m_value.number_integer >= (std::numeric_limits<std::int8_t>::min)() &&
+                             j.m_data.m_value.number_integer <= (std::numeric_limits<std::int8_t>::max)())
+                    {
+                        // int 8
+                        oa->write_character(to_char_type(0xD0));
+                        write_number(static_cast<std::int8_t>(j.m_data.m_value.number_integer));
+                    }
+                    else if (j.m_data.m_value.number_integer >= (std::numeric_limits<std::int16_t>::min)() &&
+                             j.m_data.m_value.number_integer <= (std::numeric_limits<std::int16_t>::max)())
+                    {
+                        // int 16
+                        oa->write_character(to_char_type(0xD1));
+                        write_number(static_cast<std::int16_t>(j.m_data.m_value.number_integer));
+                    }
+                    else if (j.m_data.m_value.number_integer >= (std::numeric_limits<std::int32_t>::min)() &&
+                             j.m_data.m_value.number_integer <= (std::numeric_limits<std::int32_t>::max)())
+                    {
+                        // int 32
+                        oa->write_character(to_char_type(0xD2));
+                        write_number(static_cast<std::int32_t>(j.m_data.m_value.number_integer));
+                    }
+                    else if (j.m_data.m_value.number_integer >= (std::numeric_limits<std::int64_t>::min)() &&
+                             j.m_data.m_value.number_integer <= (std::numeric_limits<std::int64_t>::max)())
+                    {
+                        // int 64
+                        oa->write_character(to_char_type(0xD3));
+                        write_number(static_cast<std::int64_t>(j.m_data.m_value.number_integer));
+                    }
+                }
+                break;
+            }
+
+            case value_t::number_unsigned:
+            {
+                if (j.m_data.m_value.number_unsigned < 128)
+                {
+                    // positive fixnum
+                    write_number(static_cast<std::uint8_t>(j.m_data.m_value.number_integer));
+                }
+                else if (j.m_data.m_value.number_unsigned <= (std::numeric_limits<std::uint8_t>::max)())
+                {
+                    // uint 8
+                    oa->write_character(to_char_type(0xCC));
+                    write_number(static_cast<std::uint8_t>(j.m_data.m_value.number_integer));
+                }
+                else if (j.m_data.m_value.number_unsigned <= (std::numeric_limits<std::uint16_t>::max)())
+                {
+                    // uint 16
+                    oa->write_character(to_char_type(0xCD));
+                    write_number(static_cast<std::uint16_t>(j.m_data.m_value.number_integer));
+                }
+                else if (j.m_data.m_value.number_unsigned <= (std::numeric_limits<std::uint32_t>::max)())
+                {
+                    // uint 32
+                    oa->write_character(to_char_type(0xCE));
+                    write_number(static_cast<std::uint32_t>(j.m_data.m_value.number_integer));
+                }
+                else if (j.m_data.m_value.number_unsigned <= (std::numeric_limits<std::uint64_t>::max)())
+                {
+                    // uint 64
+                    oa->write_character(to_char_type(0xCF));
+                    write_number(static_cast<std::uint64_t>(j.m_data.m_value.number_integer));
+                }
+                break;
+            }
+
+            case value_t::number_float:
+            {
+                write_compact_float(j.m_data.m_value.number_float, detail::input_format_t::msgpack);
+                break;
+            }
+
+            case value_t::string:
+            {
+                // step 1: write control byte and the string length
+                const auto N = j.m_data.m_value.string->size();
+                if (N <= 31)
+                {
+                    // fixstr
+                    write_number(static_cast<std::uint8_t>(0xA0 | N));
+                }
+                else if (N <= (std::numeric_limits<std::uint8_t>::max)())
+                {
+                    // str 8
+                    oa->write_character(to_char_type(0xD9));
+                    write_number(static_cast<std::uint8_t>(N));
+                }
+                else if (N <= (std::numeric_limits<std::uint16_t>::max)())
+                {
+                    // str 16
+                    oa->write_character(to_char_type(0xDA));
+                    write_number(static_cast<std::uint16_t>(N));
+                }
+                else if (N <= (std::numeric_limits<std::uint32_t>::max)())
+                {
+                    // str 32
+                    oa->write_character(to_char_type(0xDB));
+                    write_number(static_cast<std::uint32_t>(N));
+                }
+
+                // step 2: write the string
+                oa->write_characters(
+                    reinterpret_cast<const CharType*>(j.m_data.m_value.string->c_str()),
+                    j.m_data.m_value.string->size());
+                break;
+            }
+
+            case value_t::array:
+            {
+                // step 1: write control byte and the array size
+                const auto N = j.m_data.m_value.array->size();
+                if (N <= 15)
+                {
+                    // fixarray
+                    write_number(static_cast<std::uint8_t>(0x90 | N));
+                }
+                else if (N <= (std::numeric_limits<std::uint16_t>::max)())
+                {
+                    // array 16
+                    oa->write_character(to_char_type(0xDC));
+                    write_number(static_cast<std::uint16_t>(N));
+                }
+                else if (N <= (std::numeric_limits<std::uint32_t>::max)())
+                {
+                    // array 32
+                    oa->write_character(to_char_type(0xDD));
+                    write_number(static_cast<std::uint32_t>(N));
+                }
+
+                // step 2: write each element
+                for (const auto& el : *j.m_data.m_value.array)
+                {
+                    write_msgpack(el);
+                }
+                break;
+            }
+
+            case value_t::binary:
+            {
+                // step 0: determine if the binary type has a set subtype to
+                // determine whether or not to use the ext or fixext types
+                const bool use_ext = j.m_data.m_value.binary->has_subtype();
+
+                // step 1: write control byte and the byte string length
+                const auto N = j.m_data.m_value.binary->size();
+                if (N <= (std::numeric_limits<std::uint8_t>::max)())
+                {
+                    std::uint8_t output_type{};
+                    bool fixed = true;
+                    if (use_ext)
+                    {
+                        switch (N)
+                        {
+                            case 1:
+                                output_type = 0xD4; // fixext 1
+                                break;
+                            case 2:
+                                output_type = 0xD5; // fixext 2
+                                break;
+                            case 4:
+                                output_type = 0xD6; // fixext 4
+                                break;
+                            case 8:
+                                output_type = 0xD7; // fixext 8
+                                break;
+                            case 16:
+                                output_type = 0xD8; // fixext 16
+                                break;
+                            default:
+                                output_type = 0xC7; // ext 8
+                                fixed = false;
+                                break;
+                        }
+
+                    }
+                    else
+                    {
+                        output_type = 0xC4; // bin 8
+                        fixed = false;
+                    }
+
+                    oa->write_character(to_char_type(output_type));
+                    if (!fixed)
+                    {
+                        write_number(static_cast<std::uint8_t>(N));
+                    }
+                }
+                else if (N <= (std::numeric_limits<std::uint16_t>::max)())
+                {
+                    const std::uint8_t output_type = use_ext
+                                                     ? 0xC8 // ext 16
+                                                     : 0xC5; // bin 16
+
+                    oa->write_character(to_char_type(output_type));
+                    write_number(static_cast<std::uint16_t>(N));
+                }
+                else if (N <= (std::numeric_limits<std::uint32_t>::max)())
+                {
+                    const std::uint8_t output_type = use_ext
+                                                     ? 0xC9 // ext 32
+                                                     : 0xC6; // bin 32
+
+                    oa->write_character(to_char_type(output_type));
+                    write_number(static_cast<std::uint32_t>(N));
+                }
+
+                // step 1.5: if this is an ext type, write the subtype
+                if (use_ext)
+                {
+                    write_number(static_cast<std::int8_t>(j.m_data.m_value.binary->subtype()));
+                }
+
+                // step 2: write the byte string
+                oa->write_characters(
+                    reinterpret_cast<const CharType*>(j.m_data.m_value.binary->data()),
+                    N);
+
+                break;
+            }
+
+            case value_t::object:
+            {
+                // step 1: write control byte and the object size
+                const auto N = j.m_data.m_value.object->size();
+                if (N <= 15)
+                {
+                    // fixmap
+                    write_number(static_cast<std::uint8_t>(0x80 | (N & 0xF)));
+                }
+                else if (N <= (std::numeric_limits<std::uint16_t>::max)())
+                {
+                    // map 16
+                    oa->write_character(to_char_type(0xDE));
+                    write_number(static_cast<std::uint16_t>(N));
+                }
+                else if (N <= (std::numeric_limits<std::uint32_t>::max)())
+                {
+                    // map 32
+                    oa->write_character(to_char_type(0xDF));
+                    write_number(static_cast<std::uint32_t>(N));
+                }
+
+                // step 2: write each element
+                for (const auto& el : *j.m_data.m_value.object)
+                {
+                    write_msgpack(el.first);
+                    write_msgpack(el.second);
+                }
+                break;
+            }
+
+            case value_t::discarded:
+            default:
+                break;
+        }
+    }
+
+    /*!
+    @param[in] j  JSON value to serialize
+    @param[in] use_count   whether to use '#' prefixes (optimized format)
+    @param[in] use_type    whether to use '$' prefixes (optimized format)
+    @param[in] add_prefix  whether prefixes need to be used for this value
+    @param[in] use_bjdata  whether write in BJData format, default is false
+    */
+    void write_ubjson(const BasicJsonType& j, const bool use_count,
+                      const bool use_type, const bool add_prefix = true,
+                      const bool use_bjdata = false)
+    {
+        switch (j.type())
+        {
+            case value_t::null:
+            {
+                if (add_prefix)
+                {
+                    oa->write_character(to_char_type('Z'));
+                }
+                break;
+            }
+
+            case value_t::boolean:
+            {
+                if (add_prefix)
+                {
+                    oa->write_character(j.m_data.m_value.boolean
+                                        ? to_char_type('T')
+                                        : to_char_type('F'));
+                }
+                break;
+            }
+
+            case value_t::number_integer:
+            {
+                write_number_with_ubjson_prefix(j.m_data.m_value.number_integer, add_prefix, use_bjdata);
+                break;
+            }
+
+            case value_t::number_unsigned:
+            {
+                write_number_with_ubjson_prefix(j.m_data.m_value.number_unsigned, add_prefix, use_bjdata);
+                break;
+            }
+
+            case value_t::number_float:
+            {
+                write_number_with_ubjson_prefix(j.m_data.m_value.number_float, add_prefix, use_bjdata);
+                break;
+            }
+
+            case value_t::string:
+            {
+                if (add_prefix)
+                {
+                    oa->write_character(to_char_type('S'));
+                }
+                write_number_with_ubjson_prefix(j.m_data.m_value.string->size(), true, use_bjdata);
+                oa->write_characters(
+                    reinterpret_cast<const CharType*>(j.m_data.m_value.string->c_str()),
+                    j.m_data.m_value.string->size());
+                break;
+            }
+
+            case value_t::array:
+            {
+                if (add_prefix)
+                {
+                    oa->write_character(to_char_type('['));
+                }
+
+                bool prefix_required = true;
+                if (use_type && !j.m_data.m_value.array->empty())
+                {
+                    JSON_ASSERT(use_count);
+                    const CharType first_prefix = ubjson_prefix(j.front(), use_bjdata);
+                    const bool same_prefix = std::all_of(j.begin() + 1, j.end(),
+                                                         [this, first_prefix, use_bjdata](const BasicJsonType & v)
+                    {
+                        return ubjson_prefix(v, use_bjdata) == first_prefix;
+                    });
+
+                    std::vector<CharType> bjdx = {'[', '{', 'S', 'H', 'T', 'F', 'N', 'Z'}; // excluded markers in bjdata optimized type
+
+                    if (same_prefix && !(use_bjdata && std::find(bjdx.begin(), bjdx.end(), first_prefix) != bjdx.end()))
+                    {
+                        prefix_required = false;
+                        oa->write_character(to_char_type('$'));
+                        oa->write_character(first_prefix);
+                    }
+                }
+
+                if (use_count)
+                {
+                    oa->write_character(to_char_type('#'));
+                    write_number_with_ubjson_prefix(j.m_data.m_value.array->size(), true, use_bjdata);
+                }
+
+                for (const auto& el : *j.m_data.m_value.array)
+                {
+                    write_ubjson(el, use_count, use_type, prefix_required, use_bjdata);
+                }
+
+                if (!use_count)
+                {
+                    oa->write_character(to_char_type(']'));
+                }
+
+                break;
+            }
+
+            case value_t::binary:
+            {
+                if (add_prefix)
+                {
+                    oa->write_character(to_char_type('['));
+                }
+
+                if (use_type && !j.m_data.m_value.binary->empty())
+                {
+                    JSON_ASSERT(use_count);
+                    oa->write_character(to_char_type('$'));
+                    oa->write_character('U');
+                }
+
+                if (use_count)
+                {
+                    oa->write_character(to_char_type('#'));
+                    write_number_with_ubjson_prefix(j.m_data.m_value.binary->size(), true, use_bjdata);
+                }
+
+                if (use_type)
+                {
+                    oa->write_characters(
+                        reinterpret_cast<const CharType*>(j.m_data.m_value.binary->data()),
+                        j.m_data.m_value.binary->size());
+                }
+                else
+                {
+                    for (size_t i = 0; i < j.m_data.m_value.binary->size(); ++i)
+                    {
+                        oa->write_character(to_char_type('U'));
+                        oa->write_character(j.m_data.m_value.binary->data()[i]);
+                    }
+                }
+
+                if (!use_count)
+                {
+                    oa->write_character(to_char_type(']'));
+                }
+
+                break;
+            }
+
+            case value_t::object:
+            {
+                if (use_bjdata && j.m_data.m_value.object->size() == 3 && j.m_data.m_value.object->find("_ArrayType_") != j.m_data.m_value.object->end() && j.m_data.m_value.object->find("_ArraySize_") != j.m_data.m_value.object->end() && j.m_data.m_value.object->find("_ArrayData_") != j.m_data.m_value.object->end())
+                {
+                    if (!write_bjdata_ndarray(*j.m_data.m_value.object, use_count, use_type))  // decode bjdata ndarray in the JData format (https://github.com/NeuroJSON/jdata)
+                    {
