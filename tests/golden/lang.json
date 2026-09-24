@@ -1,0 +1,380 @@
+{
+  "cases": [
+    {
+      "state": "I was charged twice, please refund my money.",
+      "state_text": "I was charged twice, please refund my money.",
+      "detect_script": "latin",
+      "script_profile": {
+        "latin": 1.0
+      },
+      "analyse": {
+        "script": "latin",
+        "script_profile": {
+          "latin": 1.0
+        },
+        "language": "en",
+        "is_english": true,
+        "language_undecided": false,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "is_english": true
+    },
+    {
+      "state": "Refactor this service to use fewer tokens",
+      "state_text": "Refactor this service to use fewer tokens",
+      "detect_script": "latin",
+      "script_profile": {
+        "latin": 1.0
+      },
+      "analyse": {
+        "script": "latin",
+        "script_profile": {
+          "latin": 1.0
+        },
+        "language": "en",
+        "is_english": true,
+        "language_undecided": false,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "is_english": true
+    },
+    {
+      "state": "I'm charged twice - didn't expect that! It's re: bill #42.",
+      "state_text": "I'm charged twice - didn't expect that! It's re: bill #42.",
+      "detect_script": "latin",
+      "script_profile": {
+        "latin": 1.0
+      },
+      "analyse": {
+        "script": "latin",
+        "script_profile": {
+          "latin": 1.0
+        },
+        "language": "en",
+        "is_english": true,
+        "language_undecided": false,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "is_english": true
+    },
+    {
+      "state": "multiple   spaces\ttabs\nnewlines\n\n\r\nend",
+      "state_text": "multiple   spaces\ttabs\nnewlines\n\n\r\nend",
+      "detect_script": "latin",
+      "script_profile": {
+        "latin": 1.0
+      },
+      "analyse": {
+        "script": "latin",
+        "script_profile": {
+          "latin": 1.0
+        },
+        "language": null,
+        "is_english": true,
+        "language_undecided": true,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "is_english": true
+    },
+    {
+      "state": " hello world",
+      "state_text": " hello world",
+      "detect_script": "latin",
+      "script_profile": {
+        "latin": 1.0
+      },
+      "analyse": {
+        "script": "latin",
+        "script_profile": {
+          "latin": 1.0
+        },
+        "language": null,
+        "is_english": true,
+        "language_undecided": true,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "is_english": true
+    },
+    {
+      "state": "hello world ",
+      "state_text": "hello world ",
+      "detect_script": "latin",
+      "script_profile": {
+        "latin": 1.0
+      },
+      "analyse": {
+        "script": "latin",
+        "script_profile": {
+          "latin": 1.0
+        },
+        "language": null,
+        "is_english": true,
+        "language_undecided": true,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "is_english": true
+    },
+    {
+      "state": "trailing spaces   ",
+      "state_text": "trailing spaces   ",
+      "detect_script": "latin",
+      "script_profile": {
+        "latin": 1.0
+      },
+      "analyse": {
+        "script": "latin",
+        "script_profile": {
+          "latin": 1.0
+        },
+        "language": null,
+        "is_english": true,
+        "language_undecided": true,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "is_english": true
+    },
+    {
+      "state": "   leading",
+      "state_text": "   leading",
+      "detect_script": "latin",
+      "script_profile": {
+        "latin": 1.0
+      },
+      "analyse": {
+        "script": "latin",
+        "script_profile": {
+          "latin": 1.0
+        },
+        "language": null,
+        "is_english": true,
+        "language_undecided": true,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "is_english": true
+    },
+    {
+      "state": "Mein Konto wurde zweimal belastet, bitte erstatten!",
+      "state_text": "Mein Konto wurde zweimal belastet, bitte erstatten!",
+      "detect_script": "latin",
+      "script_profile": {
+        "latin": 1.0
+      },
+      "analyse": {
+        "script": "latin",
+        "script_profile": {
+          "latin": 1.0
+        },
+        "language": null,
+        "is_english": true,
+        "language_undecided": true,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "is_english": true
+    },
+    {
+      "state": "O cliente foi cobrado duas vezes e quer reembolso agora.",
+      "state_text": "O cliente foi cobrado duas vezes e quer reembolso agora.",
+      "detect_script": "latin",
+      "script_profile": {
+        "latin": 1.0
+      },
+      "analyse": {
+        "script": "latin",
+        "script_profile": {
+          "latin": 1.0
+        },
+        "language": "pt",
+        "is_english": false,
+        "language_undecided": false,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "is_english": false
+    },
+    {
+      "state": "Donde esta mi reembolso? Lo necesito urgentemente!",
+      "state_text": "Donde esta mi reembolso? Lo necesito urgentemente!",
+      "detect_script": "latin",
+      "script_profile": {
+        "latin": 1.0
+      },
+      "analyse": {
+        "script": "latin",
+        "script_profile": {
+          "latin": 1.0
+        },
+        "language": "es",
+        "is_english": false,
+        "language_undecided": false,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "is_english": false
+    },
+    {
+      "state": "naive cafe resume Zurich ubermensch facade",
+      "state_text": "naive cafe resume Zurich ubermensch facade",
+      "detect_script": "latin",
+      "script_profile": {
+        "latin": 1.0
+      },
+      "analyse": {
+        "script": "latin",
+        "script_profile": {
+          "latin": 1.0
+        },
+        "language": null,
+        "is_english": true,
+        "language_undecided": true,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "is_english": true
+    },
+    {
+      "state": "my account was charged twice",
+      "state_text": "my account was charged twice",
+      "detect_script": "latin",
+      "script_profile": {
+        "latin": 1.0
+      },
+      "analyse": {
+        "script": "latin",
+        "script_profile": {
+          "latin": 1.0
+        },
+        "language": "en",
+        "is_english": true,
+        "language_undecided": false,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "is_english": true
+    },
+    {
+      "state": "refund please double charge",
+      "state_text": "refund please double charge",
+      "detect_script": "latin",
+      "script_profile": {
+        "latin": 1.0
+      },
+      "analyse": {
+        "script": "latin",
+        "script_profile": {
+          "latin": 1.0
+        },
+        "language": "en",
+        "is_english": true,
+        "language_undecided": false,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "is_english": true
+    },
+    {
+      "state": "a/b testing: 3.14 approx pi, x to y, 50% off!",
+      "state_text": "a/b testing: 3.14 approx pi, x to y, 50% off!",
+      "detect_script": "latin",
+      "script_profile": {
+        "latin": 1.0
+      },
+      "analyse": {
+        "script": "latin",
+        "script_profile": {
+          "latin": 1.0
+        },
+        "language": "en",
+        "is_english": true,
+        "language_undecided": false,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "is_english": true
+    },
+    {
+      "state": "see https://github.com/Cyrax321/snapjudge and user@acme.com v1.2.3",
+      "state_text": "see https://github.com/Cyrax321/snapjudge and user@acme.com v1.2.3",
+      "detect_script": "latin",
+      "script_profile": {
+        "latin": 1.0
+      },
+      "analyse": {
+        "script": "latin",
+        "script_profile": {
+          "latin": 1.0
+        },
+        "language": "en",
+        "is_english": true,
+        "language_undecided": false,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "is_english": true
+    },
+    {
+      "state": "The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog.",
+      "state_text": "The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog.",
+      "detect_script": "latin",
+      "script_profile": {
+        "latin": 1.0
+      },
+      "analyse": {
+        "script": "latin",
+        "script_profile": {
+          "latin": 1.0
+        },
+        "language": "en",
+        "is_english": true,
+        "language_undecided": false,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "is_english": true
+    },
+    {
+      "state": " ",
+      "state_text": " ",
+      "detect_script": "unknown",
+      "script_profile": {},
+      "analyse": {
+        "script": "unknown",
+        "script_profile": {},
+        "language": null,
+        "is_english": true,
+        "language_undecided": true,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "is_english": true
+    },
+    {
+      "state": "a",
+      "state_text": "a",
+      "detect_script": "latin",
+      "script_profile": {
+        "latin": 1.0
+      },
+      "analyse": {
+        "script": "latin",
+        "script_profile": {
+          "latin": 1.0
+        },
+        "language": null,
+        "is_english": true,
+        "language_undecided": true,
+        "diacritic_rate": 0.0,
+        "non_latin_fraction": 0.0
+      },
+      "is_english": true
+    }
+  ]
+}
