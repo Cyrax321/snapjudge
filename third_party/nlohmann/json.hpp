@@ -9438,3 +9438,593 @@ class binary_reader
 
             case 0x04: // array
             {
+                return parse_bson_array();
+            }
+
+            case 0x05: // binary
+            {
+                std::int32_t len{};
+                binary_t value;
+                return get_number<std::int32_t, true>(input_format_t::bson, len) && get_bson_binary(len, value) && sax->binary(value);
+            }
+
+            case 0x08: // boolean
+            {
+                return sax->boolean(get() != 0);
+            }
+
+            case 0x0A: // null
+            {
+                return sax->null();
+            }
+
+            case 0x10: // int32
+            {
+                std::int32_t value{};
+                return get_number<std::int32_t, true>(input_format_t::bson, value) && sax->number_integer(value);
+            }
+
+            case 0x12: // int64
+            {
+                std::int64_t value{};
+                return get_number<std::int64_t, true>(input_format_t::bson, value) && sax->number_integer(value);
+            }
+
+            default: // anything else not supported (yet)
+            {
+                std::array<char, 3> cr{{}};
+                static_cast<void>((std::snprintf)(cr.data(), cr.size(), "%.2hhX", static_cast<unsigned char>(element_type))); // NOLINT(cppcoreguidelines-pro-type-vararg,hicpp-vararg)
+                const std::string cr_str{cr.data()};
+                return sax->parse_error(element_type_parse_position, cr_str,
+                                        parse_error::create(114, element_type_parse_position, concat("Unsupported BSON record type 0x", cr_str), nullptr));
+            }
+        }
+    }
+
+    /*!
+    @brief Read a BSON element list (as specified in the BSON-spec)
+
+    The same binary layout is used for objects and arrays, hence it must be
+    indicated with the argument @a is_array which one is expected
+    (true --> array, false --> object).
+
+    @param[in] is_array Determines if the element list being read is to be
+                        treated as an object (@a is_array == false), or as an
+                        array (@a is_array == true).
+    @return whether a valid BSON-object/array was passed to the SAX parser
+    */
+    bool parse_bson_element_list(const bool is_array)
+    {
+        string_t key;
+
+        while (auto element_type = get())
+        {
+            if (JSON_HEDLEY_UNLIKELY(!unexpect_eof(input_format_t::bson, "element list")))
+            {
+                return false;
+            }
+
+            const std::size_t element_type_parse_position = chars_read;
+            if (JSON_HEDLEY_UNLIKELY(!get_bson_cstr(key)))
+            {
+                return false;
+            }
+
+            if (!is_array && !sax->key(key))
+            {
+                return false;
+            }
+
+            if (JSON_HEDLEY_UNLIKELY(!parse_bson_element_internal(element_type, element_type_parse_position)))
+            {
+                return false;
+            }
+
+            // get_bson_cstr only appends
+            key.clear();
+        }
+
+        return true;
+    }
+
+    /*!
+    @brief Reads an array from the BSON input and passes it to the SAX-parser.
+    @return whether a valid BSON-array was passed to the SAX parser
+    */
+    bool parse_bson_array()
+    {
+        std::int32_t document_size{};
+        get_number<std::int32_t, true>(input_format_t::bson, document_size);
+
+        if (JSON_HEDLEY_UNLIKELY(!sax->start_array(static_cast<std::size_t>(-1))))
+        {
+            return false;
+        }
+
+        if (JSON_HEDLEY_UNLIKELY(!parse_bson_element_list(/*is_array*/true)))
+        {
+            return false;
+        }
+
+        return sax->end_array();
+    }
+
+    //////////
+    // CBOR //
+    //////////
+
+    /*!
+    @param[in] get_char  whether a new character should be retrieved from the
+                         input (true) or whether the last read character should
+                         be considered instead (false)
+    @param[in] tag_handler how CBOR tags should be treated
+
+    @return whether a valid CBOR value was passed to the SAX parser
+    */
+    bool parse_cbor_internal(const bool get_char,
+                             const cbor_tag_handler_t tag_handler)
+    {
+        switch (get_char ? get() : current)
+        {
+            // EOF
+            case char_traits<char_type>::eof():
+                return unexpect_eof(input_format_t::cbor, "value");
+
+            // Integer 0x00..0x17 (0..23)
+            case 0x00:
+            case 0x01:
+            case 0x02:
+            case 0x03:
+            case 0x04:
+            case 0x05:
+            case 0x06:
+            case 0x07:
+            case 0x08:
+            case 0x09:
+            case 0x0A:
+            case 0x0B:
+            case 0x0C:
+            case 0x0D:
+            case 0x0E:
+            case 0x0F:
+            case 0x10:
+            case 0x11:
+            case 0x12:
+            case 0x13:
+            case 0x14:
+            case 0x15:
+            case 0x16:
+            case 0x17:
+                return sax->number_unsigned(static_cast<number_unsigned_t>(current));
+
+            case 0x18: // Unsigned integer (one-byte uint8_t follows)
+            {
+                std::uint8_t number{};
+                return get_number(input_format_t::cbor, number) && sax->number_unsigned(number);
+            }
+
+            case 0x19: // Unsigned integer (two-byte uint16_t follows)
+            {
+                std::uint16_t number{};
+                return get_number(input_format_t::cbor, number) && sax->number_unsigned(number);
+            }
+
+            case 0x1A: // Unsigned integer (four-byte uint32_t follows)
+            {
+                std::uint32_t number{};
+                return get_number(input_format_t::cbor, number) && sax->number_unsigned(number);
+            }
+
+            case 0x1B: // Unsigned integer (eight-byte uint64_t follows)
+            {
+                std::uint64_t number{};
+                return get_number(input_format_t::cbor, number) && sax->number_unsigned(number);
+            }
+
+            // Negative integer -1-0x00..-1-0x17 (-1..-24)
+            case 0x20:
+            case 0x21:
+            case 0x22:
+            case 0x23:
+            case 0x24:
+            case 0x25:
+            case 0x26:
+            case 0x27:
+            case 0x28:
+            case 0x29:
+            case 0x2A:
+            case 0x2B:
+            case 0x2C:
+            case 0x2D:
+            case 0x2E:
+            case 0x2F:
+            case 0x30:
+            case 0x31:
+            case 0x32:
+            case 0x33:
+            case 0x34:
+            case 0x35:
+            case 0x36:
+            case 0x37:
+                return sax->number_integer(static_cast<std::int8_t>(0x20 - 1 - current));
+
+            case 0x38: // Negative integer (one-byte uint8_t follows)
+            {
+                std::uint8_t number{};
+                return get_number(input_format_t::cbor, number) && sax->number_integer(static_cast<number_integer_t>(-1) - number);
+            }
+
+            case 0x39: // Negative integer -1-n (two-byte uint16_t follows)
+            {
+                std::uint16_t number{};
+                return get_number(input_format_t::cbor, number) && sax->number_integer(static_cast<number_integer_t>(-1) - number);
+            }
+
+            case 0x3A: // Negative integer -1-n (four-byte uint32_t follows)
+            {
+                std::uint32_t number{};
+                return get_number(input_format_t::cbor, number) && sax->number_integer(static_cast<number_integer_t>(-1) - number);
+            }
+
+            case 0x3B: // Negative integer -1-n (eight-byte uint64_t follows)
+            {
+                std::uint64_t number{};
+                return get_number(input_format_t::cbor, number) && sax->number_integer(static_cast<number_integer_t>(-1)
+                        - static_cast<number_integer_t>(number));
+            }
+
+            // Binary data (0x00..0x17 bytes follow)
+            case 0x40:
+            case 0x41:
+            case 0x42:
+            case 0x43:
+            case 0x44:
+            case 0x45:
+            case 0x46:
+            case 0x47:
+            case 0x48:
+            case 0x49:
+            case 0x4A:
+            case 0x4B:
+            case 0x4C:
+            case 0x4D:
+            case 0x4E:
+            case 0x4F:
+            case 0x50:
+            case 0x51:
+            case 0x52:
+            case 0x53:
+            case 0x54:
+            case 0x55:
+            case 0x56:
+            case 0x57:
+            case 0x58: // Binary data (one-byte uint8_t for n follows)
+            case 0x59: // Binary data (two-byte uint16_t for n follow)
+            case 0x5A: // Binary data (four-byte uint32_t for n follow)
+            case 0x5B: // Binary data (eight-byte uint64_t for n follow)
+            case 0x5F: // Binary data (indefinite length)
+            {
+                binary_t b;
+                return get_cbor_binary(b) && sax->binary(b);
+            }
+
+            // UTF-8 string (0x00..0x17 bytes follow)
+            case 0x60:
+            case 0x61:
+            case 0x62:
+            case 0x63:
+            case 0x64:
+            case 0x65:
+            case 0x66:
+            case 0x67:
+            case 0x68:
+            case 0x69:
+            case 0x6A:
+            case 0x6B:
+            case 0x6C:
+            case 0x6D:
+            case 0x6E:
+            case 0x6F:
+            case 0x70:
+            case 0x71:
+            case 0x72:
+            case 0x73:
+            case 0x74:
+            case 0x75:
+            case 0x76:
+            case 0x77:
+            case 0x78: // UTF-8 string (one-byte uint8_t for n follows)
+            case 0x79: // UTF-8 string (two-byte uint16_t for n follow)
+            case 0x7A: // UTF-8 string (four-byte uint32_t for n follow)
+            case 0x7B: // UTF-8 string (eight-byte uint64_t for n follow)
+            case 0x7F: // UTF-8 string (indefinite length)
+            {
+                string_t s;
+                return get_cbor_string(s) && sax->string(s);
+            }
+
+            // array (0x00..0x17 data items follow)
+            case 0x80:
+            case 0x81:
+            case 0x82:
+            case 0x83:
+            case 0x84:
+            case 0x85:
+            case 0x86:
+            case 0x87:
+            case 0x88:
+            case 0x89:
+            case 0x8A:
+            case 0x8B:
+            case 0x8C:
+            case 0x8D:
+            case 0x8E:
+            case 0x8F:
+            case 0x90:
+            case 0x91:
+            case 0x92:
+            case 0x93:
+            case 0x94:
+            case 0x95:
+            case 0x96:
+            case 0x97:
+                return get_cbor_array(
+                           conditional_static_cast<std::size_t>(static_cast<unsigned int>(current) & 0x1Fu), tag_handler);
+
+            case 0x98: // array (one-byte uint8_t for n follows)
+            {
+                std::uint8_t len{};
+                return get_number(input_format_t::cbor, len) && get_cbor_array(static_cast<std::size_t>(len), tag_handler);
+            }
+
+            case 0x99: // array (two-byte uint16_t for n follow)
+            {
+                std::uint16_t len{};
+                return get_number(input_format_t::cbor, len) && get_cbor_array(static_cast<std::size_t>(len), tag_handler);
+            }
+
+            case 0x9A: // array (four-byte uint32_t for n follow)
+            {
+                std::uint32_t len{};
+                return get_number(input_format_t::cbor, len) && get_cbor_array(conditional_static_cast<std::size_t>(len), tag_handler);
+            }
+
+            case 0x9B: // array (eight-byte uint64_t for n follow)
+            {
+                std::uint64_t len{};
+                return get_number(input_format_t::cbor, len) && get_cbor_array(conditional_static_cast<std::size_t>(len), tag_handler);
+            }
+
+            case 0x9F: // array (indefinite length)
+                return get_cbor_array(static_cast<std::size_t>(-1), tag_handler);
+
+            // map (0x00..0x17 pairs of data items follow)
+            case 0xA0:
+            case 0xA1:
+            case 0xA2:
+            case 0xA3:
+            case 0xA4:
+            case 0xA5:
+            case 0xA6:
+            case 0xA7:
+            case 0xA8:
+            case 0xA9:
+            case 0xAA:
+            case 0xAB:
+            case 0xAC:
+            case 0xAD:
+            case 0xAE:
+            case 0xAF:
+            case 0xB0:
+            case 0xB1:
+            case 0xB2:
+            case 0xB3:
+            case 0xB4:
+            case 0xB5:
+            case 0xB6:
+            case 0xB7:
+                return get_cbor_object(conditional_static_cast<std::size_t>(static_cast<unsigned int>(current) & 0x1Fu), tag_handler);
+
+            case 0xB8: // map (one-byte uint8_t for n follows)
+            {
+                std::uint8_t len{};
+                return get_number(input_format_t::cbor, len) && get_cbor_object(static_cast<std::size_t>(len), tag_handler);
+            }
+
+            case 0xB9: // map (two-byte uint16_t for n follow)
+            {
+                std::uint16_t len{};
+                return get_number(input_format_t::cbor, len) && get_cbor_object(static_cast<std::size_t>(len), tag_handler);
+            }
+
+            case 0xBA: // map (four-byte uint32_t for n follow)
+            {
+                std::uint32_t len{};
+                return get_number(input_format_t::cbor, len) && get_cbor_object(conditional_static_cast<std::size_t>(len), tag_handler);
+            }
+
+            case 0xBB: // map (eight-byte uint64_t for n follow)
+            {
+                std::uint64_t len{};
+                return get_number(input_format_t::cbor, len) && get_cbor_object(conditional_static_cast<std::size_t>(len), tag_handler);
+            }
+
+            case 0xBF: // map (indefinite length)
+                return get_cbor_object(static_cast<std::size_t>(-1), tag_handler);
+
+            case 0xC6: // tagged item
+            case 0xC7:
+            case 0xC8:
+            case 0xC9:
+            case 0xCA:
+            case 0xCB:
+            case 0xCC:
+            case 0xCD:
+            case 0xCE:
+            case 0xCF:
+            case 0xD0:
+            case 0xD1:
+            case 0xD2:
+            case 0xD3:
+            case 0xD4:
+            case 0xD8: // tagged item (1 bytes follow)
+            case 0xD9: // tagged item (2 bytes follow)
+            case 0xDA: // tagged item (4 bytes follow)
+            case 0xDB: // tagged item (8 bytes follow)
+            {
+                switch (tag_handler)
+                {
+                    case cbor_tag_handler_t::error:
+                    {
+                        auto last_token = get_token_string();
+                        return sax->parse_error(chars_read, last_token, parse_error::create(112, chars_read,
+                                                exception_message(input_format_t::cbor, concat("invalid byte: 0x", last_token), "value"), nullptr));
+                    }
+
+                    case cbor_tag_handler_t::ignore:
+                    {
+                        // ignore binary subtype
+                        switch (current)
+                        {
+                            case 0xD8:
+                            {
+                                std::uint8_t subtype_to_ignore{};
+                                get_number(input_format_t::cbor, subtype_to_ignore);
+                                break;
+                            }
+                            case 0xD9:
+                            {
+                                std::uint16_t subtype_to_ignore{};
+                                get_number(input_format_t::cbor, subtype_to_ignore);
+                                break;
+                            }
+                            case 0xDA:
+                            {
+                                std::uint32_t subtype_to_ignore{};
+                                get_number(input_format_t::cbor, subtype_to_ignore);
+                                break;
+                            }
+                            case 0xDB:
+                            {
+                                std::uint64_t subtype_to_ignore{};
+                                get_number(input_format_t::cbor, subtype_to_ignore);
+                                break;
+                            }
+                            default:
+                                break;
+                        }
+                        return parse_cbor_internal(true, tag_handler);
+                    }
+
+                    case cbor_tag_handler_t::store:
+                    {
+                        binary_t b;
+                        // use binary subtype and store in binary container
+                        switch (current)
+                        {
+                            case 0xD8:
+                            {
+                                std::uint8_t subtype{};
+                                get_number(input_format_t::cbor, subtype);
+                                b.set_subtype(detail::conditional_static_cast<typename binary_t::subtype_type>(subtype));
+                                break;
+                            }
+                            case 0xD9:
+                            {
+                                std::uint16_t subtype{};
+                                get_number(input_format_t::cbor, subtype);
+                                b.set_subtype(detail::conditional_static_cast<typename binary_t::subtype_type>(subtype));
+                                break;
+                            }
+                            case 0xDA:
+                            {
+                                std::uint32_t subtype{};
+                                get_number(input_format_t::cbor, subtype);
+                                b.set_subtype(detail::conditional_static_cast<typename binary_t::subtype_type>(subtype));
+                                break;
+                            }
+                            case 0xDB:
+                            {
+                                std::uint64_t subtype{};
+                                get_number(input_format_t::cbor, subtype);
+                                b.set_subtype(detail::conditional_static_cast<typename binary_t::subtype_type>(subtype));
+                                break;
+                            }
+                            default:
+                                return parse_cbor_internal(true, tag_handler);
+                        }
+                        get();
+                        return get_cbor_binary(b) && sax->binary(b);
+                    }
+
+                    default:                 // LCOV_EXCL_LINE
+                        JSON_ASSERT(false); // NOLINT(cert-dcl03-c,hicpp-static-assert,misc-static-assert) LCOV_EXCL_LINE
+                        return false;        // LCOV_EXCL_LINE
+                }
+            }
+
+            case 0xF4: // false
+                return sax->boolean(false);
+
+            case 0xF5: // true
+                return sax->boolean(true);
+
+            case 0xF6: // null
+                return sax->null();
+
+            case 0xF9: // Half-Precision Float (two-byte IEEE 754)
+            {
+                const auto byte1_raw = get();
+                if (JSON_HEDLEY_UNLIKELY(!unexpect_eof(input_format_t::cbor, "number")))
+                {
+                    return false;
+                }
+                const auto byte2_raw = get();
+                if (JSON_HEDLEY_UNLIKELY(!unexpect_eof(input_format_t::cbor, "number")))
+                {
+                    return false;
+                }
+
+                const auto byte1 = static_cast<unsigned char>(byte1_raw);
+                const auto byte2 = static_cast<unsigned char>(byte2_raw);
+
+                // code from RFC 7049, Appendix D, Figure 3:
+                // As half-precision floating-point numbers were only added
+                // to IEEE 754 in 2008, today's programming platforms often
+                // still only have limited support for them. It is very
+                // easy to include at least decoding support for them even
+                // without such support. An example of a small decoder for
+                // half-precision floating-point numbers in the C language
+                // is shown in Fig. 3.
+                const auto half = static_cast<unsigned int>((byte1 << 8u) + byte2);
+                const double val = [&half]
+                {
+                    const int exp = (half >> 10u) & 0x1Fu;
+                    const unsigned int mant = half & 0x3FFu;
+                    JSON_ASSERT(0 <= exp&& exp <= 32);
+                    JSON_ASSERT(mant <= 1024);
+                    switch (exp)
+                    {
+                        case 0:
+                            return std::ldexp(mant, -24);
+                        case 31:
+                            return (mant == 0)
+                            ? std::numeric_limits<double>::infinity()
+                            : std::numeric_limits<double>::quiet_NaN();
+                        default:
+                            return std::ldexp(mant + 1024, exp - 25);
+                    }
+                }();
+                return sax->number_float((half & 0x8000u) != 0
+                                         ? static_cast<number_float_t>(-val)
+                                         : static_cast<number_float_t>(val), "");
+            }
+
+            case 0xFA: // Single-Precision Float (four-byte IEEE 754)
+            {
+                float number{};
+                return get_number(input_format_t::cbor, number) && sax->number_float(static_cast<number_float_t>(number), "");
+            }
+
+            case 0xFB: // Double-Precision Float (eight-byte IEEE 754)
+            {
