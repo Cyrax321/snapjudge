@@ -20058,3 +20058,593 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         if (old_capacity != static_cast<std::size_t>(-1))
         {
             // see https://github.com/nlohmann/json/issues/2838
+            JSON_ASSERT(type() == value_t::array);
+            if (JSON_HEDLEY_UNLIKELY(m_data.m_value.array->capacity() != old_capacity))
+            {
+                // capacity has changed: update all parents
+                set_parents();
+                return j;
+            }
+        }
+
+        // ordered_json uses a vector internally, so pointers could have
+        // been invalidated; see https://github.com/nlohmann/json/issues/2962
+#ifdef JSON_HEDLEY_MSVC_VERSION
+#pragma warning(push )
+#pragma warning(disable : 4127) // ignore warning to replace if with if constexpr
+#endif
+        if (detail::is_ordered_map<object_t>::value)
+        {
+            set_parents();
+            return j;
+        }
+#ifdef JSON_HEDLEY_MSVC_VERSION
+#pragma warning( pop )
+#endif
+
+        j.m_parent = this;
+#else
+        static_cast<void>(j);
+        static_cast<void>(old_capacity);
+#endif
+        return j;
+    }
+
+  public:
+    //////////////////////////
+    // JSON parser callback //
+    //////////////////////////
+
+    /// @brief parser event types
+    /// @sa https://json.nlohmann.me/api/basic_json/parse_event_t/
+    using parse_event_t = detail::parse_event_t;
+
+    /// @brief per-element parser callback type
+    /// @sa https://json.nlohmann.me/api/basic_json/parser_callback_t/
+    using parser_callback_t = detail::parser_callback_t<basic_json>;
+
+    //////////////////
+    // constructors //
+    //////////////////
+
+    /// @name constructors and destructors
+    /// Constructors of class @ref basic_json, copy/move constructor, copy
+    /// assignment, static functions creating objects, and the destructor.
+    /// @{
+
+    /// @brief create an empty value with a given type
+    /// @sa https://json.nlohmann.me/api/basic_json/basic_json/
+    basic_json(const value_t v)
+        : m_data(v)
+    {
+        assert_invariant();
+    }
+
+    /// @brief create a null object
+    /// @sa https://json.nlohmann.me/api/basic_json/basic_json/
+    basic_json(std::nullptr_t = nullptr) noexcept // NOLINT(bugprone-exception-escape)
+        : basic_json(value_t::null)
+    {
+        assert_invariant();
+    }
+
+    /// @brief create a JSON value from compatible types
+    /// @sa https://json.nlohmann.me/api/basic_json/basic_json/
+    template < typename CompatibleType,
+               typename U = detail::uncvref_t<CompatibleType>,
+               detail::enable_if_t <
+                   !detail::is_basic_json<U>::value && detail::is_compatible_type<basic_json_t, U>::value, int > = 0 >
+    basic_json(CompatibleType && val) noexcept(noexcept( // NOLINT(bugprone-forwarding-reference-overload,bugprone-exception-escape)
+                JSONSerializer<U>::to_json(std::declval<basic_json_t&>(),
+                                           std::forward<CompatibleType>(val))))
+    {
+        JSONSerializer<U>::to_json(*this, std::forward<CompatibleType>(val));
+        set_parents();
+        assert_invariant();
+    }
+
+    /// @brief create a JSON value from an existing one
+    /// @sa https://json.nlohmann.me/api/basic_json/basic_json/
+    template < typename BasicJsonType,
+               detail::enable_if_t <
+                   detail::is_basic_json<BasicJsonType>::value&& !std::is_same<basic_json, BasicJsonType>::value, int > = 0 >
+    basic_json(const BasicJsonType& val)
+    {
+        using other_boolean_t = typename BasicJsonType::boolean_t;
+        using other_number_float_t = typename BasicJsonType::number_float_t;
+        using other_number_integer_t = typename BasicJsonType::number_integer_t;
+        using other_number_unsigned_t = typename BasicJsonType::number_unsigned_t;
+        using other_string_t = typename BasicJsonType::string_t;
+        using other_object_t = typename BasicJsonType::object_t;
+        using other_array_t = typename BasicJsonType::array_t;
+        using other_binary_t = typename BasicJsonType::binary_t;
+
+        switch (val.type())
+        {
+            case value_t::boolean:
+                JSONSerializer<other_boolean_t>::to_json(*this, val.template get<other_boolean_t>());
+                break;
+            case value_t::number_float:
+                JSONSerializer<other_number_float_t>::to_json(*this, val.template get<other_number_float_t>());
+                break;
+            case value_t::number_integer:
+                JSONSerializer<other_number_integer_t>::to_json(*this, val.template get<other_number_integer_t>());
+                break;
+            case value_t::number_unsigned:
+                JSONSerializer<other_number_unsigned_t>::to_json(*this, val.template get<other_number_unsigned_t>());
+                break;
+            case value_t::string:
+                JSONSerializer<other_string_t>::to_json(*this, val.template get_ref<const other_string_t&>());
+                break;
+            case value_t::object:
+                JSONSerializer<other_object_t>::to_json(*this, val.template get_ref<const other_object_t&>());
+                break;
+            case value_t::array:
+                JSONSerializer<other_array_t>::to_json(*this, val.template get_ref<const other_array_t&>());
+                break;
+            case value_t::binary:
+                JSONSerializer<other_binary_t>::to_json(*this, val.template get_ref<const other_binary_t&>());
+                break;
+            case value_t::null:
+                *this = nullptr;
+                break;
+            case value_t::discarded:
+                m_data.m_type = value_t::discarded;
+                break;
+            default:            // LCOV_EXCL_LINE
+                JSON_ASSERT(false); // NOLINT(cert-dcl03-c,hicpp-static-assert,misc-static-assert) LCOV_EXCL_LINE
+        }
+        JSON_ASSERT(m_data.m_type == val.type());
+        set_parents();
+        assert_invariant();
+    }
+
+    /// @brief create a container (array or object) from an initializer list
+    /// @sa https://json.nlohmann.me/api/basic_json/basic_json/
+    basic_json(initializer_list_t init,
+               bool type_deduction = true,
+               value_t manual_type = value_t::array)
+    {
+        // check if each element is an array with two elements whose first
+        // element is a string
+        bool is_an_object = std::all_of(init.begin(), init.end(),
+                                        [](const detail::json_ref<basic_json>& element_ref)
+        {
+            // The cast is to ensure op[size_type] is called, bearing in mind size_type may not be int;
+            // (many string types can be constructed from 0 via its null-pointer guise, so we get a
+            // broken call to op[key_type], the wrong semantics and a 4804 warning on Windows)
+            return element_ref->is_array() && element_ref->size() == 2 && (*element_ref)[static_cast<size_type>(0)].is_string();
+        });
+
+        // adjust type if type deduction is not wanted
+        if (!type_deduction)
+        {
+            // if array is wanted, do not create an object though possible
+            if (manual_type == value_t::array)
+            {
+                is_an_object = false;
+            }
+
+            // if object is wanted but impossible, throw an exception
+            if (JSON_HEDLEY_UNLIKELY(manual_type == value_t::object && !is_an_object))
+            {
+                JSON_THROW(type_error::create(301, "cannot create object from initializer list", nullptr));
+            }
+        }
+
+        if (is_an_object)
+        {
+            // the initializer list is a list of pairs -> create object
+            m_data.m_type = value_t::object;
+            m_data.m_value = value_t::object;
+
+            for (auto& element_ref : init)
+            {
+                auto element = element_ref.moved_or_copied();
+                m_data.m_value.object->emplace(
+                    std::move(*((*element.m_data.m_value.array)[0].m_data.m_value.string)),
+                    std::move((*element.m_data.m_value.array)[1]));
+            }
+        }
+        else
+        {
+            // the initializer list describes an array -> create array
+            m_data.m_type = value_t::array;
+            m_data.m_value.array = create<array_t>(init.begin(), init.end());
+        }
+
+        set_parents();
+        assert_invariant();
+    }
+
+    /// @brief explicitly create a binary array (without subtype)
+    /// @sa https://json.nlohmann.me/api/basic_json/binary/
+    JSON_HEDLEY_WARN_UNUSED_RESULT
+    static basic_json binary(const typename binary_t::container_type& init)
+    {
+        auto res = basic_json();
+        res.m_data.m_type = value_t::binary;
+        res.m_data.m_value = init;
+        return res;
+    }
+
+    /// @brief explicitly create a binary array (with subtype)
+    /// @sa https://json.nlohmann.me/api/basic_json/binary/
+    JSON_HEDLEY_WARN_UNUSED_RESULT
+    static basic_json binary(const typename binary_t::container_type& init, typename binary_t::subtype_type subtype)
+    {
+        auto res = basic_json();
+        res.m_data.m_type = value_t::binary;
+        res.m_data.m_value = binary_t(init, subtype);
+        return res;
+    }
+
+    /// @brief explicitly create a binary array
+    /// @sa https://json.nlohmann.me/api/basic_json/binary/
+    JSON_HEDLEY_WARN_UNUSED_RESULT
+    static basic_json binary(typename binary_t::container_type&& init)
+    {
+        auto res = basic_json();
+        res.m_data.m_type = value_t::binary;
+        res.m_data.m_value = std::move(init);
+        return res;
+    }
+
+    /// @brief explicitly create a binary array (with subtype)
+    /// @sa https://json.nlohmann.me/api/basic_json/binary/
+    JSON_HEDLEY_WARN_UNUSED_RESULT
+    static basic_json binary(typename binary_t::container_type&& init, typename binary_t::subtype_type subtype)
+    {
+        auto res = basic_json();
+        res.m_data.m_type = value_t::binary;
+        res.m_data.m_value = binary_t(std::move(init), subtype);
+        return res;
+    }
+
+    /// @brief explicitly create an array from an initializer list
+    /// @sa https://json.nlohmann.me/api/basic_json/array/
+    JSON_HEDLEY_WARN_UNUSED_RESULT
+    static basic_json array(initializer_list_t init = {})
+    {
+        return basic_json(init, false, value_t::array);
+    }
+
+    /// @brief explicitly create an object from an initializer list
+    /// @sa https://json.nlohmann.me/api/basic_json/object/
+    JSON_HEDLEY_WARN_UNUSED_RESULT
+    static basic_json object(initializer_list_t init = {})
+    {
+        return basic_json(init, false, value_t::object);
+    }
+
+    /// @brief construct an array with count copies of given value
+    /// @sa https://json.nlohmann.me/api/basic_json/basic_json/
+    basic_json(size_type cnt, const basic_json& val):
+        m_data{cnt, val}
+    {
+        set_parents();
+        assert_invariant();
+    }
+
+    /// @brief construct a JSON container given an iterator range
+    /// @sa https://json.nlohmann.me/api/basic_json/basic_json/
+    template < class InputIT, typename std::enable_if <
+                   std::is_same<InputIT, typename basic_json_t::iterator>::value ||
+                   std::is_same<InputIT, typename basic_json_t::const_iterator>::value, int >::type = 0 >
+    basic_json(InputIT first, InputIT last)
+    {
+        JSON_ASSERT(first.m_object != nullptr);
+        JSON_ASSERT(last.m_object != nullptr);
+
+        // make sure iterator fits the current value
+        if (JSON_HEDLEY_UNLIKELY(first.m_object != last.m_object))
+        {
+            JSON_THROW(invalid_iterator::create(201, "iterators are not compatible", nullptr));
+        }
+
+        // copy type from first iterator
+        m_data.m_type = first.m_object->m_data.m_type;
+
+        // check if iterator range is complete for primitive values
+        switch (m_data.m_type)
+        {
+            case value_t::boolean:
+            case value_t::number_float:
+            case value_t::number_integer:
+            case value_t::number_unsigned:
+            case value_t::string:
+            {
+                if (JSON_HEDLEY_UNLIKELY(!first.m_it.primitive_iterator.is_begin()
+                                         || !last.m_it.primitive_iterator.is_end()))
+                {
+                    JSON_THROW(invalid_iterator::create(204, "iterators out of range", first.m_object));
+                }
+                break;
+            }
+
+            case value_t::null:
+            case value_t::object:
+            case value_t::array:
+            case value_t::binary:
+            case value_t::discarded:
+            default:
+                break;
+        }
+
+        switch (m_data.m_type)
+        {
+            case value_t::number_integer:
+            {
+                m_data.m_value.number_integer = first.m_object->m_data.m_value.number_integer;
+                break;
+            }
+
+            case value_t::number_unsigned:
+            {
+                m_data.m_value.number_unsigned = first.m_object->m_data.m_value.number_unsigned;
+                break;
+            }
+
+            case value_t::number_float:
+            {
+                m_data.m_value.number_float = first.m_object->m_data.m_value.number_float;
+                break;
+            }
+
+            case value_t::boolean:
+            {
+                m_data.m_value.boolean = first.m_object->m_data.m_value.boolean;
+                break;
+            }
+
+            case value_t::string:
+            {
+                m_data.m_value = *first.m_object->m_data.m_value.string;
+                break;
+            }
+
+            case value_t::object:
+            {
+                m_data.m_value.object = create<object_t>(first.m_it.object_iterator,
+                                        last.m_it.object_iterator);
+                break;
+            }
+
+            case value_t::array:
+            {
+                m_data.m_value.array = create<array_t>(first.m_it.array_iterator,
+                                                       last.m_it.array_iterator);
+                break;
+            }
+
+            case value_t::binary:
+            {
+                m_data.m_value = *first.m_object->m_data.m_value.binary;
+                break;
+            }
+
+            case value_t::null:
+            case value_t::discarded:
+            default:
+                JSON_THROW(invalid_iterator::create(206, detail::concat("cannot construct with iterators from ", first.m_object->type_name()), first.m_object));
+        }
+
+        set_parents();
+        assert_invariant();
+    }
+
+    ///////////////////////////////////////
+    // other constructors and destructor //
+    ///////////////////////////////////////
+
+    template<typename JsonRef,
+             detail::enable_if_t<detail::conjunction<detail::is_json_ref<JsonRef>,
+                                 std::is_same<typename JsonRef::value_type, basic_json>>::value, int> = 0 >
+    basic_json(const JsonRef& ref) : basic_json(ref.moved_or_copied()) {}
+
+    /// @brief copy constructor
+    /// @sa https://json.nlohmann.me/api/basic_json/basic_json/
+    basic_json(const basic_json& other)
+        : json_base_class_t(other)
+    {
+        m_data.m_type = other.m_data.m_type;
+        // check of passed value is valid
+        other.assert_invariant();
+
+        switch (m_data.m_type)
+        {
+            case value_t::object:
+            {
+                m_data.m_value = *other.m_data.m_value.object;
+                break;
+            }
+
+            case value_t::array:
+            {
+                m_data.m_value = *other.m_data.m_value.array;
+                break;
+            }
+
+            case value_t::string:
+            {
+                m_data.m_value = *other.m_data.m_value.string;
+                break;
+            }
+
+            case value_t::boolean:
+            {
+                m_data.m_value = other.m_data.m_value.boolean;
+                break;
+            }
+
+            case value_t::number_integer:
+            {
+                m_data.m_value = other.m_data.m_value.number_integer;
+                break;
+            }
+
+            case value_t::number_unsigned:
+            {
+                m_data.m_value = other.m_data.m_value.number_unsigned;
+                break;
+            }
+
+            case value_t::number_float:
+            {
+                m_data.m_value = other.m_data.m_value.number_float;
+                break;
+            }
+
+            case value_t::binary:
+            {
+                m_data.m_value = *other.m_data.m_value.binary;
+                break;
+            }
+
+            case value_t::null:
+            case value_t::discarded:
+            default:
+                break;
+        }
+
+        set_parents();
+        assert_invariant();
+    }
+
+    /// @brief move constructor
+    /// @sa https://json.nlohmann.me/api/basic_json/basic_json/
+    basic_json(basic_json&& other) noexcept
+        : json_base_class_t(std::forward<json_base_class_t>(other)),
+          m_data(std::move(other.m_data))
+    {
+        // check that passed value is valid
+        other.assert_invariant(false);
+
+        // invalidate payload
+        other.m_data.m_type = value_t::null;
+        other.m_data.m_value = {};
+
+        set_parents();
+        assert_invariant();
+    }
+
+    /// @brief copy assignment
+    /// @sa https://json.nlohmann.me/api/basic_json/operator=/
+    basic_json& operator=(basic_json other) noexcept (
+        std::is_nothrow_move_constructible<value_t>::value&&
+        std::is_nothrow_move_assignable<value_t>::value&&
+        std::is_nothrow_move_constructible<json_value>::value&&
+        std::is_nothrow_move_assignable<json_value>::value&&
+        std::is_nothrow_move_assignable<json_base_class_t>::value
+    )
+    {
+        // check that passed value is valid
+        other.assert_invariant();
+
+        using std::swap;
+        swap(m_data.m_type, other.m_data.m_type);
+        swap(m_data.m_value, other.m_data.m_value);
+        json_base_class_t::operator=(std::move(other));
+
+        set_parents();
+        assert_invariant();
+        return *this;
+    }
+
+    /// @brief destructor
+    /// @sa https://json.nlohmann.me/api/basic_json/~basic_json/
+    ~basic_json() noexcept
+    {
+        assert_invariant(false);
+    }
+
+    /// @}
+
+  public:
+    ///////////////////////
+    // object inspection //
+    ///////////////////////
+
+    /// @name object inspection
+    /// Functions to inspect the type of a JSON value.
+    /// @{
+
+    /// @brief serialization
+    /// @sa https://json.nlohmann.me/api/basic_json/dump/
+    string_t dump(const int indent = -1,
+                  const char indent_char = ' ',
+                  const bool ensure_ascii = false,
+                  const error_handler_t error_handler = error_handler_t::strict) const
+    {
+        string_t result;
+        serializer s(detail::output_adapter<char, string_t>(result), indent_char, error_handler);
+
+        if (indent >= 0)
+        {
+            s.dump(*this, true, ensure_ascii, static_cast<unsigned int>(indent));
+        }
+        else
+        {
+            s.dump(*this, false, ensure_ascii, 0);
+        }
+
+        return result;
+    }
+
+    /// @brief return the type of the JSON value (explicit)
+    /// @sa https://json.nlohmann.me/api/basic_json/type/
+    constexpr value_t type() const noexcept
+    {
+        return m_data.m_type;
+    }
+
+    /// @brief return whether type is primitive
+    /// @sa https://json.nlohmann.me/api/basic_json/is_primitive/
+    constexpr bool is_primitive() const noexcept
+    {
+        return is_null() || is_string() || is_boolean() || is_number() || is_binary();
+    }
+
+    /// @brief return whether type is structured
+    /// @sa https://json.nlohmann.me/api/basic_json/is_structured/
+    constexpr bool is_structured() const noexcept
+    {
+        return is_array() || is_object();
+    }
+
+    /// @brief return whether value is null
+    /// @sa https://json.nlohmann.me/api/basic_json/is_null/
+    constexpr bool is_null() const noexcept
+    {
+        return m_data.m_type == value_t::null;
+    }
+
+    /// @brief return whether value is a boolean
+    /// @sa https://json.nlohmann.me/api/basic_json/is_boolean/
+    constexpr bool is_boolean() const noexcept
+    {
+        return m_data.m_type == value_t::boolean;
+    }
+
+    /// @brief return whether value is a number
+    /// @sa https://json.nlohmann.me/api/basic_json/is_number/
+    constexpr bool is_number() const noexcept
+    {
+        return is_number_integer() || is_number_float();
+    }
+
+    /// @brief return whether value is an integer number
+    /// @sa https://json.nlohmann.me/api/basic_json/is_number_integer/
+    constexpr bool is_number_integer() const noexcept
+    {
+        return m_data.m_type == value_t::number_integer || m_data.m_type == value_t::number_unsigned;
+    }
+
+    /// @brief return whether value is an unsigned integer number
+    /// @sa https://json.nlohmann.me/api/basic_json/is_number_unsigned/
+    constexpr bool is_number_unsigned() const noexcept
+    {
+        return m_data.m_type == value_t::number_unsigned;
+    }
+
+    /// @brief return whether value is a floating-point number
