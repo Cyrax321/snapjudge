@@ -598,3 +598,603 @@ public:
     return multipart_reader_(std::move(header), std::move(receiver));
   }
 
+  bool operator()(ContentReceiver receiver) const {
+    return reader_(std::move(receiver));
+  }
+
+  Reader reader_;
+  MultipartReader multipart_reader_;
+};
+
+using Range = std::pair<ssize_t, ssize_t>;
+using Ranges = std::vector<Range>;
+
+struct Request {
+  std::string method;
+  std::string path;
+  Headers headers;
+  std::string body;
+
+  std::string remote_addr;
+  int remote_port = -1;
+  std::string local_addr;
+  int local_port = -1;
+
+  // for server
+  std::string version;
+  std::string target;
+  Params params;
+  MultipartFormDataMap files;
+  Ranges ranges;
+  Match matches;
+  std::unordered_map<std::string, std::string> path_params;
+
+  // for client
+  ResponseHandler response_handler;
+  ContentReceiverWithProgress content_receiver;
+  Progress progress;
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+  const SSL *ssl = nullptr;
+#endif
+
+  bool has_header(const std::string &key) const;
+  std::string get_header_value(const std::string &key, const char *def = "",
+                               size_t id = 0) const;
+  uint64_t get_header_value_u64(const std::string &key, uint64_t def = 0,
+                                size_t id = 0) const;
+  size_t get_header_value_count(const std::string &key) const;
+  void set_header(const std::string &key, const std::string &val);
+
+  bool has_param(const std::string &key) const;
+  std::string get_param_value(const std::string &key, size_t id = 0) const;
+  size_t get_param_value_count(const std::string &key) const;
+
+  bool is_multipart_form_data() const;
+
+  bool has_file(const std::string &key) const;
+  MultipartFormData get_file_value(const std::string &key) const;
+  std::vector<MultipartFormData> get_file_values(const std::string &key) const;
+
+  // private members...
+  size_t redirect_count_ = CPPHTTPLIB_REDIRECT_MAX_COUNT;
+  size_t content_length_ = 0;
+  ContentProvider content_provider_;
+  bool is_chunked_content_provider_ = false;
+  size_t authorization_count_ = 0;
+};
+
+struct Response {
+  std::string version;
+  int status = -1;
+  std::string reason;
+  Headers headers;
+  std::string body;
+  std::string location; // Redirect location
+
+  bool has_header(const std::string &key) const;
+  std::string get_header_value(const std::string &key, const char *def = "",
+                               size_t id = 0) const;
+  uint64_t get_header_value_u64(const std::string &key, uint64_t def = 0,
+                                size_t id = 0) const;
+  size_t get_header_value_count(const std::string &key) const;
+  void set_header(const std::string &key, const std::string &val);
+
+  void set_redirect(const std::string &url, int status = StatusCode::Found_302);
+  void set_content(const char *s, size_t n, const std::string &content_type);
+  void set_content(const std::string &s, const std::string &content_type);
+  void set_content(std::string &&s, const std::string &content_type);
+
+  void set_content_provider(
+      size_t length, const std::string &content_type, ContentProvider provider,
+      ContentProviderResourceReleaser resource_releaser = nullptr);
+
+  void set_content_provider(
+      const std::string &content_type, ContentProviderWithoutLength provider,
+      ContentProviderResourceReleaser resource_releaser = nullptr);
+
+  void set_chunked_content_provider(
+      const std::string &content_type, ContentProviderWithoutLength provider,
+      ContentProviderResourceReleaser resource_releaser = nullptr);
+
+  void set_file_content(const std::string &path,
+                        const std::string &content_type);
+  void set_file_content(const std::string &path);
+
+  Response() = default;
+  Response(const Response &) = default;
+  Response &operator=(const Response &) = default;
+  Response(Response &&) = default;
+  Response &operator=(Response &&) = default;
+  ~Response() {
+    if (content_provider_resource_releaser_) {
+      content_provider_resource_releaser_(content_provider_success_);
+    }
+  }
+
+  // private members...
+  size_t content_length_ = 0;
+  ContentProvider content_provider_;
+  ContentProviderResourceReleaser content_provider_resource_releaser_;
+  bool is_chunked_content_provider_ = false;
+  bool content_provider_success_ = false;
+  std::string file_content_path_;
+  std::string file_content_content_type_;
+};
+
+class Stream {
+public:
+  virtual ~Stream() = default;
+
+  virtual bool is_readable() const = 0;
+  virtual bool is_writable() const = 0;
+
+  virtual ssize_t read(char *ptr, size_t size) = 0;
+  virtual ssize_t write(const char *ptr, size_t size) = 0;
+  virtual void get_remote_ip_and_port(std::string &ip, int &port) const = 0;
+  virtual void get_local_ip_and_port(std::string &ip, int &port) const = 0;
+  virtual socket_t socket() const = 0;
+
+  ssize_t write(const char *ptr);
+  ssize_t write(const std::string &s);
+};
+
+class TaskQueue {
+public:
+  TaskQueue() = default;
+  virtual ~TaskQueue() = default;
+
+  virtual bool enqueue(std::function<void()> fn) = 0;
+  virtual void shutdown() = 0;
+
+  virtual void on_idle() {}
+};
+
+class ThreadPool final : public TaskQueue {
+public:
+  explicit ThreadPool(size_t n, size_t mqr = 0)
+      : shutdown_(false), max_queued_requests_(mqr) {
+    while (n) {
+      threads_.emplace_back(worker(*this));
+      n--;
+    }
+  }
+
+  ThreadPool(const ThreadPool &) = delete;
+  ~ThreadPool() override = default;
+
+  bool enqueue(std::function<void()> fn) override {
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      if (max_queued_requests_ > 0 && jobs_.size() >= max_queued_requests_) {
+        return false;
+      }
+      jobs_.push_back(std::move(fn));
+    }
+
+    cond_.notify_one();
+    return true;
+  }
+
+  void shutdown() override {
+    // Stop all worker threads...
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      shutdown_ = true;
+    }
+
+    cond_.notify_all();
+
+    // Join...
+    for (auto &t : threads_) {
+      t.join();
+    }
+  }
+
+private:
+  struct worker {
+    explicit worker(ThreadPool &pool) : pool_(pool) {}
+
+    void operator()() {
+      for (;;) {
+        std::function<void()> fn;
+        {
+          std::unique_lock<std::mutex> lock(pool_.mutex_);
+
+          pool_.cond_.wait(
+              lock, [&] { return !pool_.jobs_.empty() || pool_.shutdown_; });
+
+          if (pool_.shutdown_ && pool_.jobs_.empty()) { break; }
+
+          fn = pool_.jobs_.front();
+          pool_.jobs_.pop_front();
+        }
+
+        assert(true == static_cast<bool>(fn));
+        fn();
+      }
+
+#if defined(CPPHTTPLIB_OPENSSL_SUPPORT) && !defined(OPENSSL_IS_BORINGSSL) &&   \
+    !defined(LIBRESSL_VERSION_NUMBER)
+      OPENSSL_thread_stop();
+#endif
+    }
+
+    ThreadPool &pool_;
+  };
+  friend struct worker;
+
+  std::vector<std::thread> threads_;
+  std::list<std::function<void()>> jobs_;
+
+  bool shutdown_;
+  size_t max_queued_requests_ = 0;
+
+  std::condition_variable cond_;
+  std::mutex mutex_;
+};
+
+using Logger = std::function<void(const Request &, const Response &)>;
+
+using SocketOptions = std::function<void(socket_t sock)>;
+
+void default_socket_options(socket_t sock);
+
+const char *status_message(int status);
+
+std::string get_bearer_token_auth(const Request &req);
+
+namespace detail {
+
+class MatcherBase {
+public:
+  virtual ~MatcherBase() = default;
+
+  // Match request path and populate its matches and
+  virtual bool match(Request &request) const = 0;
+};
+
+/**
+ * Captures parameters in request path and stores them in Request::path_params
+ *
+ * Capture name is a substring of a pattern from : to /.
+ * The rest of the pattern is matched agains the request path directly
+ * Parameters are captured starting from the next character after
+ * the end of the last matched static pattern fragment until the next /.
+ *
+ * Example pattern:
+ * "/path/fragments/:capture/more/fragments/:second_capture"
+ * Static fragments:
+ * "/path/fragments/", "more/fragments/"
+ *
+ * Given the following request path:
+ * "/path/fragments/:1/more/fragments/:2"
+ * the resulting capture will be
+ * {{"capture", "1"}, {"second_capture", "2"}}
+ */
+class PathParamsMatcher final : public MatcherBase {
+public:
+  PathParamsMatcher(const std::string &pattern);
+
+  bool match(Request &request) const override;
+
+private:
+  // Treat segment separators as the end of path parameter capture
+  // Does not need to handle query parameters as they are parsed before path
+  // matching
+  static constexpr char separator = '/';
+
+  // Contains static path fragments to match against, excluding the '/' after
+  // path params
+  // Fragments are separated by path params
+  std::vector<std::string> static_fragments_;
+  // Stores the names of the path parameters to be used as keys in the
+  // Request::path_params map
+  std::vector<std::string> param_names_;
+};
+
+/**
+ * Performs std::regex_match on request path
+ * and stores the result in Request::matches
+ *
+ * Note that regex match is performed directly on the whole request.
+ * This means that wildcard patterns may match multiple path segments with /:
+ * "/begin/(.*)/end" will match both "/begin/middle/end" and "/begin/1/2/end".
+ */
+class RegexMatcher final : public MatcherBase {
+public:
+  RegexMatcher(const std::string &pattern) : regex_(pattern) {}
+
+  bool match(Request &request) const override;
+
+private:
+  std::regex regex_;
+};
+
+ssize_t write_headers(Stream &strm, const Headers &headers);
+
+} // namespace detail
+
+class Server {
+public:
+  using Handler = std::function<void(const Request &, Response &)>;
+
+  using ExceptionHandler =
+      std::function<void(const Request &, Response &, std::exception_ptr ep)>;
+
+  enum class HandlerResponse {
+    Handled,
+    Unhandled,
+  };
+  using HandlerWithResponse =
+      std::function<HandlerResponse(const Request &, Response &)>;
+
+  using HandlerWithContentReader = std::function<void(
+      const Request &, Response &, const ContentReader &content_reader)>;
+
+  using Expect100ContinueHandler =
+      std::function<int(const Request &, Response &)>;
+
+  Server();
+
+  virtual ~Server();
+
+  virtual bool is_valid() const;
+
+  Server &Get(const std::string &pattern, Handler handler);
+  Server &Post(const std::string &pattern, Handler handler);
+  Server &Post(const std::string &pattern, HandlerWithContentReader handler);
+  Server &Put(const std::string &pattern, Handler handler);
+  Server &Put(const std::string &pattern, HandlerWithContentReader handler);
+  Server &Patch(const std::string &pattern, Handler handler);
+  Server &Patch(const std::string &pattern, HandlerWithContentReader handler);
+  Server &Delete(const std::string &pattern, Handler handler);
+  Server &Delete(const std::string &pattern, HandlerWithContentReader handler);
+  Server &Options(const std::string &pattern, Handler handler);
+
+  bool set_base_dir(const std::string &dir,
+                    const std::string &mount_point = std::string());
+  bool set_mount_point(const std::string &mount_point, const std::string &dir,
+                       Headers headers = Headers());
+  bool remove_mount_point(const std::string &mount_point);
+  Server &set_file_extension_and_mimetype_mapping(const std::string &ext,
+                                                  const std::string &mime);
+  Server &set_default_file_mimetype(const std::string &mime);
+  Server &set_file_request_handler(Handler handler);
+
+  template <class ErrorHandlerFunc>
+  Server &set_error_handler(ErrorHandlerFunc &&handler) {
+    return set_error_handler_core(
+        std::forward<ErrorHandlerFunc>(handler),
+        std::is_convertible<ErrorHandlerFunc, HandlerWithResponse>{});
+  }
+
+  Server &set_exception_handler(ExceptionHandler handler);
+  Server &set_pre_routing_handler(HandlerWithResponse handler);
+  Server &set_post_routing_handler(Handler handler);
+
+  Server &set_expect_100_continue_handler(Expect100ContinueHandler handler);
+  Server &set_logger(Logger logger);
+
+  Server &set_address_family(int family);
+  Server &set_tcp_nodelay(bool on);
+  Server &set_ipv6_v6only(bool on);
+  Server &set_socket_options(SocketOptions socket_options);
+
+  Server &set_default_headers(Headers headers);
+  Server &
+  set_header_writer(std::function<ssize_t(Stream &, Headers &)> const &writer);
+
+  Server &set_keep_alive_max_count(size_t count);
+  Server &set_keep_alive_timeout(time_t sec);
+
+  Server &set_read_timeout(time_t sec, time_t usec = 0);
+  template <class Rep, class Period>
+  Server &set_read_timeout(const std::chrono::duration<Rep, Period> &duration);
+
+  Server &set_write_timeout(time_t sec, time_t usec = 0);
+  template <class Rep, class Period>
+  Server &set_write_timeout(const std::chrono::duration<Rep, Period> &duration);
+
+  Server &set_idle_interval(time_t sec, time_t usec = 0);
+  template <class Rep, class Period>
+  Server &set_idle_interval(const std::chrono::duration<Rep, Period> &duration);
+
+  Server &set_payload_max_length(size_t length);
+
+  bool bind_to_port(const std::string &host, int port, int socket_flags = 0);
+  int bind_to_any_port(const std::string &host, int socket_flags = 0);
+  bool listen_after_bind();
+
+  bool listen(const std::string &host, int port, int socket_flags = 0);
+
+  bool is_running() const;
+  void wait_until_ready() const;
+  void stop();
+  void decommission();
+
+  std::function<TaskQueue *(void)> new_task_queue;
+
+protected:
+  bool process_request(Stream &strm, const std::string &remote_addr,
+                       int remote_port, const std::string &local_addr,
+                       int local_port, bool close_connection,
+                       bool &connection_closed,
+                       const std::function<void(Request &)> &setup_request);
+
+  std::atomic<socket_t> svr_sock_{INVALID_SOCKET};
+  size_t keep_alive_max_count_ = CPPHTTPLIB_KEEPALIVE_MAX_COUNT;
+  time_t keep_alive_timeout_sec_ = CPPHTTPLIB_KEEPALIVE_TIMEOUT_SECOND;
+  time_t read_timeout_sec_ = CPPHTTPLIB_SERVER_READ_TIMEOUT_SECOND;
+  time_t read_timeout_usec_ = CPPHTTPLIB_SERVER_READ_TIMEOUT_USECOND;
+  time_t write_timeout_sec_ = CPPHTTPLIB_SERVER_WRITE_TIMEOUT_SECOND;
+  time_t write_timeout_usec_ = CPPHTTPLIB_SERVER_WRITE_TIMEOUT_USECOND;
+  time_t idle_interval_sec_ = CPPHTTPLIB_IDLE_INTERVAL_SECOND;
+  time_t idle_interval_usec_ = CPPHTTPLIB_IDLE_INTERVAL_USECOND;
+  size_t payload_max_length_ = CPPHTTPLIB_PAYLOAD_MAX_LENGTH;
+
+private:
+  using Handlers =
+      std::vector<std::pair<std::unique_ptr<detail::MatcherBase>, Handler>>;
+  using HandlersForContentReader =
+      std::vector<std::pair<std::unique_ptr<detail::MatcherBase>,
+                            HandlerWithContentReader>>;
+
+  static std::unique_ptr<detail::MatcherBase>
+  make_matcher(const std::string &pattern);
+
+  Server &set_error_handler_core(HandlerWithResponse handler, std::true_type);
+  Server &set_error_handler_core(Handler handler, std::false_type);
+
+  socket_t create_server_socket(const std::string &host, int port,
+                                int socket_flags,
+                                SocketOptions socket_options) const;
+  int bind_internal(const std::string &host, int port, int socket_flags);
+  bool listen_internal();
+
+  bool routing(Request &req, Response &res, Stream &strm);
+  bool handle_file_request(const Request &req, Response &res,
+                           bool head = false);
+  bool dispatch_request(Request &req, Response &res,
+                        const Handlers &handlers) const;
+  bool dispatch_request_for_content_reader(
+      Request &req, Response &res, ContentReader content_reader,
+      const HandlersForContentReader &handlers) const;
+
+  bool parse_request_line(const char *s, Request &req) const;
+  void apply_ranges(const Request &req, Response &res,
+                    std::string &content_type, std::string &boundary) const;
+  bool write_response(Stream &strm, bool close_connection, Request &req,
+                      Response &res);
+  bool write_response_with_content(Stream &strm, bool close_connection,
+                                   const Request &req, Response &res);
+  bool write_response_core(Stream &strm, bool close_connection,
+                           const Request &req, Response &res,
+                           bool need_apply_ranges);
+  bool write_content_with_provider(Stream &strm, const Request &req,
+                                   Response &res, const std::string &boundary,
+                                   const std::string &content_type);
+  bool read_content(Stream &strm, Request &req, Response &res);
+  bool
+  read_content_with_content_receiver(Stream &strm, Request &req, Response &res,
+                                     ContentReceiver receiver,
+                                     MultipartContentHeader multipart_header,
+                                     ContentReceiver multipart_receiver);
+  bool read_content_core(Stream &strm, Request &req, Response &res,
+                         ContentReceiver receiver,
+                         MultipartContentHeader multipart_header,
+                         ContentReceiver multipart_receiver) const;
+
+  virtual bool process_and_close_socket(socket_t sock);
+
+  std::atomic<bool> is_running_{false};
+  std::atomic<bool> is_decommisioned{false};
+
+  struct MountPointEntry {
+    std::string mount_point;
+    std::string base_dir;
+    Headers headers;
+  };
+  std::vector<MountPointEntry> base_dirs_;
+  std::map<std::string, std::string> file_extension_and_mimetype_map_;
+  std::string default_file_mimetype_ = "application/octet-stream";
+  Handler file_request_handler_;
+
+  Handlers get_handlers_;
+  Handlers post_handlers_;
+  HandlersForContentReader post_handlers_for_content_reader_;
+  Handlers put_handlers_;
+  HandlersForContentReader put_handlers_for_content_reader_;
+  Handlers patch_handlers_;
+  HandlersForContentReader patch_handlers_for_content_reader_;
+  Handlers delete_handlers_;
+  HandlersForContentReader delete_handlers_for_content_reader_;
+  Handlers options_handlers_;
+
+  HandlerWithResponse error_handler_;
+  ExceptionHandler exception_handler_;
+  HandlerWithResponse pre_routing_handler_;
+  Handler post_routing_handler_;
+  Expect100ContinueHandler expect_100_continue_handler_;
+
+  Logger logger_;
+
+  int address_family_ = AF_UNSPEC;
+  bool tcp_nodelay_ = CPPHTTPLIB_TCP_NODELAY;
+  bool ipv6_v6only_ = CPPHTTPLIB_IPV6_V6ONLY;
+  SocketOptions socket_options_ = default_socket_options;
+
+  Headers default_headers_;
+  std::function<ssize_t(Stream &, Headers &)> header_writer_ =
+      detail::write_headers;
+};
+
+enum class Error {
+  Success = 0,
+  Unknown,
+  Connection,
+  BindIPAddress,
+  Read,
+  Write,
+  ExceedRedirectCount,
+  Canceled,
+  SSLConnection,
+  SSLLoadingCerts,
+  SSLServerVerification,
+  SSLServerHostnameVerification,
+  UnsupportedMultipartBoundaryChars,
+  Compression,
+  ConnectionTimeout,
+  ProxyConnection,
+
+  // For internal use only
+  SSLPeerCouldBeClosed_,
+};
+
+std::string to_string(Error error);
+
+std::ostream &operator<<(std::ostream &os, const Error &obj);
+
+class Result {
+public:
+  Result() = default;
+  Result(std::unique_ptr<Response> &&res, Error err,
+         Headers &&request_headers = Headers{})
+      : res_(std::move(res)), err_(err),
+        request_headers_(std::move(request_headers)) {}
+  // Response
+  operator bool() const { return res_ != nullptr; }
+  bool operator==(std::nullptr_t) const { return res_ == nullptr; }
+  bool operator!=(std::nullptr_t) const { return res_ != nullptr; }
+  const Response &value() const { return *res_; }
+  Response &value() { return *res_; }
+  const Response &operator*() const { return *res_; }
+  Response &operator*() { return *res_; }
+  const Response *operator->() const { return res_.get(); }
+  Response *operator->() { return res_.get(); }
+
+  // Error
+  Error error() const { return err_; }
+
+  // Request Headers
+  bool has_request_header(const std::string &key) const;
+  std::string get_request_header_value(const std::string &key,
+                                       const char *def = "",
+                                       size_t id = 0) const;
+  uint64_t get_request_header_value_u64(const std::string &key,
+                                        uint64_t def = 0, size_t id = 0) const;
+  size_t get_request_header_value_count(const std::string &key) const;
+
+private:
+  std::unique_ptr<Response> res_;
+  Error err_ = Error::Unknown;
+  Headers request_headers_;
+};
+
+class ClientImpl {
+public:
+  explicit ClientImpl(const std::string &host);
+
+  explicit ClientImpl(const std::string &host, int port);
+
+  explicit ClientImpl(const std::string &host, int port,
+                      const std::string &client_cert_path,
