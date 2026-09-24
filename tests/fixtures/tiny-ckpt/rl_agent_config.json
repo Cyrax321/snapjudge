@@ -1,0 +1,16 @@
+{
+ "encoder": "tiny-synthetic",
+ "head_layers": 1,
+ "max_len": 128,
+ "head_max_len": 48,
+ "act_costs": {},
+ "cost_wrong_act": 3.0,
+ "amp_dtype": "fp32",
+ "model_name": "snapjudge-tiny",
+ "temperature": [
+  1.0,
+  1.0,
+  1.0
+ ],
+ "temperature_by_options": {}
+}
