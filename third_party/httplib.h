@@ -9598,3 +9598,594 @@ inline Client::Client(const std::string &scheme_host_port,
       R"((?:([a-z]+):\/\/)?(?:\[([a-fA-F\d:]+)\]|([^:/?#]+))(?::(\d+))?)");
 
   std::smatch m;
+  if (std::regex_match(scheme_host_port, m, re)) {
+    auto scheme = m[1].str();
+
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+    if (!scheme.empty() && (scheme != "http" && scheme != "https")) {
+#else
+    if (!scheme.empty() && scheme != "http") {
+#endif
+#ifndef CPPHTTPLIB_NO_EXCEPTIONS
+      std::string msg = "'" + scheme + "' scheme is not supported.";
+      throw std::invalid_argument(msg);
+#endif
+      return;
+    }
+
+    auto is_ssl = scheme == "https";
+
+    auto host = m[2].str();
+    if (host.empty()) { host = m[3].str(); }
+
+    auto port_str = m[4].str();
+    auto port = !port_str.empty() ? std::stoi(port_str) : (is_ssl ? 443 : 80);
+
+    if (is_ssl) {
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+      cli_ = detail::make_unique<SSLClient>(host, port, client_cert_path,
+                                            client_key_path);
+      is_ssl_ = is_ssl;
+#endif
+    } else {
+      cli_ = detail::make_unique<ClientImpl>(host, port, client_cert_path,
+                                             client_key_path);
+    }
+  } else {
+    // NOTE: Update TEST(UniversalClientImplTest, Ipv6LiteralAddress)
+    // if port param below changes.
+    cli_ = detail::make_unique<ClientImpl>(scheme_host_port, 80,
+                                           client_cert_path, client_key_path);
+  }
+} // namespace detail
+
+inline Client::Client(const std::string &host, int port)
+    : cli_(detail::make_unique<ClientImpl>(host, port)) {}
+
+inline Client::Client(const std::string &host, int port,
+                      const std::string &client_cert_path,
+                      const std::string &client_key_path)
+    : cli_(detail::make_unique<ClientImpl>(host, port, client_cert_path,
+                                           client_key_path)) {}
+
+inline Client::~Client() = default;
+
+inline bool Client::is_valid() const {
+  return cli_ != nullptr && cli_->is_valid();
+}
+
+inline Result Client::Get(const std::string &path) { return cli_->Get(path); }
+inline Result Client::Get(const std::string &path, const Headers &headers) {
+  return cli_->Get(path, headers);
+}
+inline Result Client::Get(const std::string &path, Progress progress) {
+  return cli_->Get(path, std::move(progress));
+}
+inline Result Client::Get(const std::string &path, const Headers &headers,
+                          Progress progress) {
+  return cli_->Get(path, headers, std::move(progress));
+}
+inline Result Client::Get(const std::string &path,
+                          ContentReceiver content_receiver) {
+  return cli_->Get(path, std::move(content_receiver));
+}
+inline Result Client::Get(const std::string &path, const Headers &headers,
+                          ContentReceiver content_receiver) {
+  return cli_->Get(path, headers, std::move(content_receiver));
+}
+inline Result Client::Get(const std::string &path,
+                          ContentReceiver content_receiver, Progress progress) {
+  return cli_->Get(path, std::move(content_receiver), std::move(progress));
+}
+inline Result Client::Get(const std::string &path, const Headers &headers,
+                          ContentReceiver content_receiver, Progress progress) {
+  return cli_->Get(path, headers, std::move(content_receiver),
+                   std::move(progress));
+}
+inline Result Client::Get(const std::string &path,
+                          ResponseHandler response_handler,
+                          ContentReceiver content_receiver) {
+  return cli_->Get(path, std::move(response_handler),
+                   std::move(content_receiver));
+}
+inline Result Client::Get(const std::string &path, const Headers &headers,
+                          ResponseHandler response_handler,
+                          ContentReceiver content_receiver) {
+  return cli_->Get(path, headers, std::move(response_handler),
+                   std::move(content_receiver));
+}
+inline Result Client::Get(const std::string &path,
+                          ResponseHandler response_handler,
+                          ContentReceiver content_receiver, Progress progress) {
+  return cli_->Get(path, std::move(response_handler),
+                   std::move(content_receiver), std::move(progress));
+}
+inline Result Client::Get(const std::string &path, const Headers &headers,
+                          ResponseHandler response_handler,
+                          ContentReceiver content_receiver, Progress progress) {
+  return cli_->Get(path, headers, std::move(response_handler),
+                   std::move(content_receiver), std::move(progress));
+}
+inline Result Client::Get(const std::string &path, const Params &params,
+                          const Headers &headers, Progress progress) {
+  return cli_->Get(path, params, headers, std::move(progress));
+}
+inline Result Client::Get(const std::string &path, const Params &params,
+                          const Headers &headers,
+                          ContentReceiver content_receiver, Progress progress) {
+  return cli_->Get(path, params, headers, std::move(content_receiver),
+                   std::move(progress));
+}
+inline Result Client::Get(const std::string &path, const Params &params,
+                          const Headers &headers,
+                          ResponseHandler response_handler,
+                          ContentReceiver content_receiver, Progress progress) {
+  return cli_->Get(path, params, headers, std::move(response_handler),
+                   std::move(content_receiver), std::move(progress));
+}
+
+inline Result Client::Head(const std::string &path) { return cli_->Head(path); }
+inline Result Client::Head(const std::string &path, const Headers &headers) {
+  return cli_->Head(path, headers);
+}
+
+inline Result Client::Post(const std::string &path) { return cli_->Post(path); }
+inline Result Client::Post(const std::string &path, const Headers &headers) {
+  return cli_->Post(path, headers);
+}
+inline Result Client::Post(const std::string &path, const char *body,
+                           size_t content_length,
+                           const std::string &content_type) {
+  return cli_->Post(path, body, content_length, content_type);
+}
+inline Result Client::Post(const std::string &path, const Headers &headers,
+                           const char *body, size_t content_length,
+                           const std::string &content_type) {
+  return cli_->Post(path, headers, body, content_length, content_type);
+}
+inline Result Client::Post(const std::string &path, const Headers &headers,
+                           const char *body, size_t content_length,
+                           const std::string &content_type, Progress progress) {
+  return cli_->Post(path, headers, body, content_length, content_type,
+                    progress);
+}
+inline Result Client::Post(const std::string &path, const std::string &body,
+                           const std::string &content_type) {
+  return cli_->Post(path, body, content_type);
+}
+inline Result Client::Post(const std::string &path, const std::string &body,
+                           const std::string &content_type, Progress progress) {
+  return cli_->Post(path, body, content_type, progress);
+}
+inline Result Client::Post(const std::string &path, const Headers &headers,
+                           const std::string &body,
+                           const std::string &content_type) {
+  return cli_->Post(path, headers, body, content_type);
+}
+inline Result Client::Post(const std::string &path, const Headers &headers,
+                           const std::string &body,
+                           const std::string &content_type, Progress progress) {
+  return cli_->Post(path, headers, body, content_type, progress);
+}
+inline Result Client::Post(const std::string &path, size_t content_length,
+                           ContentProvider content_provider,
+                           const std::string &content_type) {
+  return cli_->Post(path, content_length, std::move(content_provider),
+                    content_type);
+}
+inline Result Client::Post(const std::string &path,
+                           ContentProviderWithoutLength content_provider,
+                           const std::string &content_type) {
+  return cli_->Post(path, std::move(content_provider), content_type);
+}
+inline Result Client::Post(const std::string &path, const Headers &headers,
+                           size_t content_length,
+                           ContentProvider content_provider,
+                           const std::string &content_type) {
+  return cli_->Post(path, headers, content_length, std::move(content_provider),
+                    content_type);
+}
+inline Result Client::Post(const std::string &path, const Headers &headers,
+                           ContentProviderWithoutLength content_provider,
+                           const std::string &content_type) {
+  return cli_->Post(path, headers, std::move(content_provider), content_type);
+}
+inline Result Client::Post(const std::string &path, const Params &params) {
+  return cli_->Post(path, params);
+}
+inline Result Client::Post(const std::string &path, const Headers &headers,
+                           const Params &params) {
+  return cli_->Post(path, headers, params);
+}
+inline Result Client::Post(const std::string &path, const Headers &headers,
+                           const Params &params, Progress progress) {
+  return cli_->Post(path, headers, params, progress);
+}
+inline Result Client::Post(const std::string &path,
+                           const MultipartFormDataItems &items) {
+  return cli_->Post(path, items);
+}
+inline Result Client::Post(const std::string &path, const Headers &headers,
+                           const MultipartFormDataItems &items) {
+  return cli_->Post(path, headers, items);
+}
+inline Result Client::Post(const std::string &path, const Headers &headers,
+                           const MultipartFormDataItems &items,
+                           const std::string &boundary) {
+  return cli_->Post(path, headers, items, boundary);
+}
+inline Result
+Client::Post(const std::string &path, const Headers &headers,
+             const MultipartFormDataItems &items,
+             const MultipartFormDataProviderItems &provider_items) {
+  return cli_->Post(path, headers, items, provider_items);
+}
+inline Result Client::Put(const std::string &path) { return cli_->Put(path); }
+inline Result Client::Put(const std::string &path, const char *body,
+                          size_t content_length,
+                          const std::string &content_type) {
+  return cli_->Put(path, body, content_length, content_type);
+}
+inline Result Client::Put(const std::string &path, const Headers &headers,
+                          const char *body, size_t content_length,
+                          const std::string &content_type) {
+  return cli_->Put(path, headers, body, content_length, content_type);
+}
+inline Result Client::Put(const std::string &path, const Headers &headers,
+                          const char *body, size_t content_length,
+                          const std::string &content_type, Progress progress) {
+  return cli_->Put(path, headers, body, content_length, content_type, progress);
+}
+inline Result Client::Put(const std::string &path, const std::string &body,
+                          const std::string &content_type) {
+  return cli_->Put(path, body, content_type);
+}
+inline Result Client::Put(const std::string &path, const std::string &body,
+                          const std::string &content_type, Progress progress) {
+  return cli_->Put(path, body, content_type, progress);
+}
+inline Result Client::Put(const std::string &path, const Headers &headers,
+                          const std::string &body,
+                          const std::string &content_type) {
+  return cli_->Put(path, headers, body, content_type);
+}
+inline Result Client::Put(const std::string &path, const Headers &headers,
+                          const std::string &body,
+                          const std::string &content_type, Progress progress) {
+  return cli_->Put(path, headers, body, content_type, progress);
+}
+inline Result Client::Put(const std::string &path, size_t content_length,
+                          ContentProvider content_provider,
+                          const std::string &content_type) {
+  return cli_->Put(path, content_length, std::move(content_provider),
+                   content_type);
+}
+inline Result Client::Put(const std::string &path,
+                          ContentProviderWithoutLength content_provider,
+                          const std::string &content_type) {
+  return cli_->Put(path, std::move(content_provider), content_type);
+}
+inline Result Client::Put(const std::string &path, const Headers &headers,
+                          size_t content_length,
+                          ContentProvider content_provider,
+                          const std::string &content_type) {
+  return cli_->Put(path, headers, content_length, std::move(content_provider),
+                   content_type);
+}
+inline Result Client::Put(const std::string &path, const Headers &headers,
+                          ContentProviderWithoutLength content_provider,
+                          const std::string &content_type) {
+  return cli_->Put(path, headers, std::move(content_provider), content_type);
+}
+inline Result Client::Put(const std::string &path, const Params &params) {
+  return cli_->Put(path, params);
+}
+inline Result Client::Put(const std::string &path, const Headers &headers,
+                          const Params &params) {
+  return cli_->Put(path, headers, params);
+}
+inline Result Client::Put(const std::string &path, const Headers &headers,
+                          const Params &params, Progress progress) {
+  return cli_->Put(path, headers, params, progress);
+}
+inline Result Client::Put(const std::string &path,
+                          const MultipartFormDataItems &items) {
+  return cli_->Put(path, items);
+}
+inline Result Client::Put(const std::string &path, const Headers &headers,
+                          const MultipartFormDataItems &items) {
+  return cli_->Put(path, headers, items);
+}
+inline Result Client::Put(const std::string &path, const Headers &headers,
+                          const MultipartFormDataItems &items,
+                          const std::string &boundary) {
+  return cli_->Put(path, headers, items, boundary);
+}
+inline Result
+Client::Put(const std::string &path, const Headers &headers,
+            const MultipartFormDataItems &items,
+            const MultipartFormDataProviderItems &provider_items) {
+  return cli_->Put(path, headers, items, provider_items);
+}
+inline Result Client::Patch(const std::string &path) {
+  return cli_->Patch(path);
+}
+inline Result Client::Patch(const std::string &path, const char *body,
+                            size_t content_length,
+                            const std::string &content_type) {
+  return cli_->Patch(path, body, content_length, content_type);
+}
+inline Result Client::Patch(const std::string &path, const char *body,
+                            size_t content_length,
+                            const std::string &content_type,
+                            Progress progress) {
+  return cli_->Patch(path, body, content_length, content_type, progress);
+}
+inline Result Client::Patch(const std::string &path, const Headers &headers,
+                            const char *body, size_t content_length,
+                            const std::string &content_type) {
+  return cli_->Patch(path, headers, body, content_length, content_type);
+}
+inline Result Client::Patch(const std::string &path, const Headers &headers,
+                            const char *body, size_t content_length,
+                            const std::string &content_type,
+                            Progress progress) {
+  return cli_->Patch(path, headers, body, content_length, content_type,
+                     progress);
+}
+inline Result Client::Patch(const std::string &path, const std::string &body,
+                            const std::string &content_type) {
+  return cli_->Patch(path, body, content_type);
+}
+inline Result Client::Patch(const std::string &path, const std::string &body,
+                            const std::string &content_type,
+                            Progress progress) {
+  return cli_->Patch(path, body, content_type, progress);
+}
+inline Result Client::Patch(const std::string &path, const Headers &headers,
+                            const std::string &body,
+                            const std::string &content_type) {
+  return cli_->Patch(path, headers, body, content_type);
+}
+inline Result Client::Patch(const std::string &path, const Headers &headers,
+                            const std::string &body,
+                            const std::string &content_type,
+                            Progress progress) {
+  return cli_->Patch(path, headers, body, content_type, progress);
+}
+inline Result Client::Patch(const std::string &path, size_t content_length,
+                            ContentProvider content_provider,
+                            const std::string &content_type) {
+  return cli_->Patch(path, content_length, std::move(content_provider),
+                     content_type);
+}
+inline Result Client::Patch(const std::string &path,
+                            ContentProviderWithoutLength content_provider,
+                            const std::string &content_type) {
+  return cli_->Patch(path, std::move(content_provider), content_type);
+}
+inline Result Client::Patch(const std::string &path, const Headers &headers,
+                            size_t content_length,
+                            ContentProvider content_provider,
+                            const std::string &content_type) {
+  return cli_->Patch(path, headers, content_length, std::move(content_provider),
+                     content_type);
+}
+inline Result Client::Patch(const std::string &path, const Headers &headers,
+                            ContentProviderWithoutLength content_provider,
+                            const std::string &content_type) {
+  return cli_->Patch(path, headers, std::move(content_provider), content_type);
+}
+inline Result Client::Delete(const std::string &path) {
+  return cli_->Delete(path);
+}
+inline Result Client::Delete(const std::string &path, const Headers &headers) {
+  return cli_->Delete(path, headers);
+}
+inline Result Client::Delete(const std::string &path, const char *body,
+                             size_t content_length,
+                             const std::string &content_type) {
+  return cli_->Delete(path, body, content_length, content_type);
+}
+inline Result Client::Delete(const std::string &path, const char *body,
+                             size_t content_length,
+                             const std::string &content_type,
+                             Progress progress) {
+  return cli_->Delete(path, body, content_length, content_type, progress);
+}
+inline Result Client::Delete(const std::string &path, const Headers &headers,
+                             const char *body, size_t content_length,
+                             const std::string &content_type) {
+  return cli_->Delete(path, headers, body, content_length, content_type);
+}
+inline Result Client::Delete(const std::string &path, const Headers &headers,
+                             const char *body, size_t content_length,
+                             const std::string &content_type,
+                             Progress progress) {
+  return cli_->Delete(path, headers, body, content_length, content_type,
+                      progress);
+}
+inline Result Client::Delete(const std::string &path, const std::string &body,
+                             const std::string &content_type) {
+  return cli_->Delete(path, body, content_type);
+}
+inline Result Client::Delete(const std::string &path, const std::string &body,
+                             const std::string &content_type,
+                             Progress progress) {
+  return cli_->Delete(path, body, content_type, progress);
+}
+inline Result Client::Delete(const std::string &path, const Headers &headers,
+                             const std::string &body,
+                             const std::string &content_type) {
+  return cli_->Delete(path, headers, body, content_type);
+}
+inline Result Client::Delete(const std::string &path, const Headers &headers,
+                             const std::string &body,
+                             const std::string &content_type,
+                             Progress progress) {
+  return cli_->Delete(path, headers, body, content_type, progress);
+}
+inline Result Client::Options(const std::string &path) {
+  return cli_->Options(path);
+}
+inline Result Client::Options(const std::string &path, const Headers &headers) {
+  return cli_->Options(path, headers);
+}
+
+inline bool Client::send(Request &req, Response &res, Error &error) {
+  return cli_->send(req, res, error);
+}
+
+inline Result Client::send(const Request &req) { return cli_->send(req); }
+
+inline void Client::stop() { cli_->stop(); }
+
+inline std::string Client::host() const { return cli_->host(); }
+
+inline int Client::port() const { return cli_->port(); }
+
+inline size_t Client::is_socket_open() const { return cli_->is_socket_open(); }
+
+inline socket_t Client::socket() const { return cli_->socket(); }
+
+inline void
+Client::set_hostname_addr_map(std::map<std::string, std::string> addr_map) {
+  cli_->set_hostname_addr_map(std::move(addr_map));
+}
+
+inline void Client::set_default_headers(Headers headers) {
+  cli_->set_default_headers(std::move(headers));
+}
+
+inline void Client::set_header_writer(
+    std::function<ssize_t(Stream &, Headers &)> const &writer) {
+  cli_->set_header_writer(writer);
+}
+
+inline void Client::set_address_family(int family) {
+  cli_->set_address_family(family);
+}
+
+inline void Client::set_tcp_nodelay(bool on) { cli_->set_tcp_nodelay(on); }
+
+inline void Client::set_socket_options(SocketOptions socket_options) {
+  cli_->set_socket_options(std::move(socket_options));
+}
+
+inline void Client::set_connection_timeout(time_t sec, time_t usec) {
+  cli_->set_connection_timeout(sec, usec);
+}
+
+inline void Client::set_read_timeout(time_t sec, time_t usec) {
+  cli_->set_read_timeout(sec, usec);
+}
+
+inline void Client::set_write_timeout(time_t sec, time_t usec) {
+  cli_->set_write_timeout(sec, usec);
+}
+
+inline void Client::set_basic_auth(const std::string &username,
+                                   const std::string &password) {
+  cli_->set_basic_auth(username, password);
+}
+inline void Client::set_bearer_token_auth(const std::string &token) {
+  cli_->set_bearer_token_auth(token);
+}
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+inline void Client::set_digest_auth(const std::string &username,
+                                    const std::string &password) {
+  cli_->set_digest_auth(username, password);
+}
+#endif
+
+inline void Client::set_keep_alive(bool on) { cli_->set_keep_alive(on); }
+inline void Client::set_follow_location(bool on) {
+  cli_->set_follow_location(on);
+}
+
+inline void Client::set_url_encode(bool on) { cli_->set_url_encode(on); }
+
+inline void Client::set_compress(bool on) { cli_->set_compress(on); }
+
+inline void Client::set_decompress(bool on) { cli_->set_decompress(on); }
+
+inline void Client::set_interface(const std::string &intf) {
+  cli_->set_interface(intf);
+}
+
+inline void Client::set_proxy(const std::string &host, int port) {
+  cli_->set_proxy(host, port);
+}
+inline void Client::set_proxy_basic_auth(const std::string &username,
+                                         const std::string &password) {
+  cli_->set_proxy_basic_auth(username, password);
+}
+inline void Client::set_proxy_bearer_token_auth(const std::string &token) {
+  cli_->set_proxy_bearer_token_auth(token);
+}
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+inline void Client::set_proxy_digest_auth(const std::string &username,
+                                          const std::string &password) {
+  cli_->set_proxy_digest_auth(username, password);
+}
+#endif
+
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+inline void Client::enable_server_certificate_verification(bool enabled) {
+  cli_->enable_server_certificate_verification(enabled);
+}
+
+inline void Client::enable_server_hostname_verification(bool enabled) {
+  cli_->enable_server_hostname_verification(enabled);
+}
+
+inline void Client::set_server_certificate_verifier(
+    std::function<bool(SSL *ssl)> verifier) {
+  cli_->set_server_certificate_verifier(verifier);
+}
+#endif
+
+inline void Client::set_logger(Logger logger) {
+  cli_->set_logger(std::move(logger));
+}
+
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+inline void Client::set_ca_cert_path(const std::string &ca_cert_file_path,
+                                     const std::string &ca_cert_dir_path) {
+  cli_->set_ca_cert_path(ca_cert_file_path, ca_cert_dir_path);
+}
+
+inline void Client::set_ca_cert_store(X509_STORE *ca_cert_store) {
+  if (is_ssl_) {
+    static_cast<SSLClient &>(*cli_).set_ca_cert_store(ca_cert_store);
+  } else {
+    cli_->set_ca_cert_store(ca_cert_store);
+  }
+}
+
+inline void Client::load_ca_cert_store(const char *ca_cert, std::size_t size) {
+  set_ca_cert_store(cli_->create_ca_cert_store(ca_cert, size));
+}
+
+inline long Client::get_openssl_verify_result() const {
+  if (is_ssl_) {
+    return static_cast<SSLClient &>(*cli_).get_openssl_verify_result();
+  }
+  return -1; // NOTE: -1 doesn't match any of X509_V_ERR_???
+}
+
+inline SSL_CTX *Client::ssl_context() const {
+  if (is_ssl_) { return static_cast<SSLClient &>(*cli_).ssl_context(); }
+  return nullptr;
+}
+#endif
+
+// ----------------------------------------------------------------------------
+
+} // namespace httplib
+
+#if defined(_WIN32) && defined(CPPHTTPLIB_USE_POLL)
+#undef poll
+#endif
+
+#endif // CPPHTTPLIB_HTTPLIB_H
