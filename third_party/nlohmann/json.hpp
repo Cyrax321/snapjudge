@@ -13568,3 +13568,593 @@ class iter_impl // NOLINT(cppcoreguidelines-special-member-functions,hicpp-speci
             case value_t::boolean:
             case value_t::number_integer:
             case value_t::number_unsigned:
+            case value_t::number_float:
+            case value_t::binary:
+            case value_t::discarded:
+            default:
+            {
+                if (JSON_HEDLEY_LIKELY(m_it.primitive_iterator.get_value() == -n))
+                {
+                    return *m_object;
+                }
+
+                JSON_THROW(invalid_iterator::create(214, "cannot get value", m_object));
+            }
+        }
+    }
+
+    /*!
+    @brief return the key of an object iterator
+    @pre The iterator is initialized; i.e. `m_object != nullptr`.
+    */
+    const typename object_t::key_type& key() const
+    {
+        JSON_ASSERT(m_object != nullptr);
+
+        if (JSON_HEDLEY_LIKELY(m_object->is_object()))
+        {
+            return m_it.object_iterator->first;
+        }
+
+        JSON_THROW(invalid_iterator::create(207, "cannot use key() for non-object iterators", m_object));
+    }
+
+    /*!
+    @brief return the value of an iterator
+    @pre The iterator is initialized; i.e. `m_object != nullptr`.
+    */
+    reference value() const
+    {
+        return operator*();
+    }
+
+  JSON_PRIVATE_UNLESS_TESTED:
+    /// associated JSON instance
+    pointer m_object = nullptr;
+    /// the actual iterator of the associated instance
+    internal_iterator<typename std::remove_const<BasicJsonType>::type> m_it {};
+};
+
+}  // namespace detail
+NLOHMANN_JSON_NAMESPACE_END
+
+// #include <nlohmann/detail/iterators/iteration_proxy.hpp>
+
+// #include <nlohmann/detail/iterators/json_reverse_iterator.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
+
+
+#include <cstddef> // ptrdiff_t
+#include <iterator> // reverse_iterator
+#include <utility> // declval
+
+// #include <nlohmann/detail/abi_macros.hpp>
+
+
+NLOHMANN_JSON_NAMESPACE_BEGIN
+namespace detail
+{
+
+//////////////////////
+// reverse_iterator //
+//////////////////////
+
+/*!
+@brief a template for a reverse iterator class
+
+@tparam Base the base iterator type to reverse. Valid types are @ref
+iterator (to create @ref reverse_iterator) and @ref const_iterator (to
+create @ref const_reverse_iterator).
+
+@requirement The class satisfies the following concept requirements:
+-
+[BidirectionalIterator](https://en.cppreference.com/w/cpp/named_req/BidirectionalIterator):
+  The iterator that can be moved can be moved in both directions (i.e.
+  incremented and decremented).
+- [OutputIterator](https://en.cppreference.com/w/cpp/named_req/OutputIterator):
+  It is possible to write to the pointed-to element (only if @a Base is
+  @ref iterator).
+
+@since version 1.0.0
+*/
+template<typename Base>
+class json_reverse_iterator : public std::reverse_iterator<Base>
+{
+  public:
+    using difference_type = std::ptrdiff_t;
+    /// shortcut to the reverse iterator adapter
+    using base_iterator = std::reverse_iterator<Base>;
+    /// the reference type for the pointed-to element
+    using reference = typename Base::reference;
+
+    /// create reverse iterator from iterator
+    explicit json_reverse_iterator(const typename base_iterator::iterator_type& it) noexcept
+        : base_iterator(it) {}
+
+    /// create reverse iterator from base class
+    explicit json_reverse_iterator(const base_iterator& it) noexcept : base_iterator(it) {}
+
+    /// post-increment (it++)
+    json_reverse_iterator operator++(int)& // NOLINT(cert-dcl21-cpp)
+    {
+        return static_cast<json_reverse_iterator>(base_iterator::operator++(1));
+    }
+
+    /// pre-increment (++it)
+    json_reverse_iterator& operator++()
+    {
+        return static_cast<json_reverse_iterator&>(base_iterator::operator++());
+    }
+
+    /// post-decrement (it--)
+    json_reverse_iterator operator--(int)& // NOLINT(cert-dcl21-cpp)
+    {
+        return static_cast<json_reverse_iterator>(base_iterator::operator--(1));
+    }
+
+    /// pre-decrement (--it)
+    json_reverse_iterator& operator--()
+    {
+        return static_cast<json_reverse_iterator&>(base_iterator::operator--());
+    }
+
+    /// add to iterator
+    json_reverse_iterator& operator+=(difference_type i)
+    {
+        return static_cast<json_reverse_iterator&>(base_iterator::operator+=(i));
+    }
+
+    /// add to iterator
+    json_reverse_iterator operator+(difference_type i) const
+    {
+        return static_cast<json_reverse_iterator>(base_iterator::operator+(i));
+    }
+
+    /// subtract from iterator
+    json_reverse_iterator operator-(difference_type i) const
+    {
+        return static_cast<json_reverse_iterator>(base_iterator::operator-(i));
+    }
+
+    /// return difference
+    difference_type operator-(const json_reverse_iterator& other) const
+    {
+        return base_iterator(*this) - base_iterator(other);
+    }
+
+    /// access to successor
+    reference operator[](difference_type n) const
+    {
+        return *(this->operator+(n));
+    }
+
+    /// return the key of an object iterator
+    auto key() const -> decltype(std::declval<Base>().key())
+    {
+        auto it = --this->base();
+        return it.key();
+    }
+
+    /// return the value of an iterator
+    reference value() const
+    {
+        auto it = --this->base();
+        return it.operator * ();
+    }
+};
+
+}  // namespace detail
+NLOHMANN_JSON_NAMESPACE_END
+
+// #include <nlohmann/detail/iterators/primitive_iterator.hpp>
+
+// #include <nlohmann/detail/json_custom_base_class.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
+
+
+#include <type_traits> // conditional, is_same
+
+// #include <nlohmann/detail/abi_macros.hpp>
+
+
+NLOHMANN_JSON_NAMESPACE_BEGIN
+namespace detail
+{
+
+/*!
+@brief Default base class of the @ref basic_json class.
+
+So that the correct implementations of the copy / move ctors / assign operators
+of @ref basic_json do not require complex case distinctions
+(no base class / custom base class used as customization point),
+@ref basic_json always has a base class.
+By default, this class is used because it is empty and thus has no effect
+on the behavior of @ref basic_json.
+*/
+struct json_default_base {};
+
+template<class T>
+using json_base_class = typename std::conditional <
+                        std::is_same<T, void>::value,
+                        json_default_base,
+                        T
+                        >::type;
+
+}  // namespace detail
+NLOHMANN_JSON_NAMESPACE_END
+
+// #include <nlohmann/detail/json_pointer.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
+
+
+#include <algorithm> // all_of
+#include <cctype> // isdigit
+#include <cerrno> // errno, ERANGE
+#include <cstdlib> // strtoull
+#ifndef JSON_NO_IO
+    #include <iosfwd> // ostream
+#endif  // JSON_NO_IO
+#include <limits> // max
+#include <numeric> // accumulate
+#include <string> // string
+#include <utility> // move
+#include <vector> // vector
+
+// #include <nlohmann/detail/exceptions.hpp>
+
+// #include <nlohmann/detail/macro_scope.hpp>
+
+// #include <nlohmann/detail/string_concat.hpp>
+
+// #include <nlohmann/detail/string_escape.hpp>
+
+// #include <nlohmann/detail/value_t.hpp>
+
+
+NLOHMANN_JSON_NAMESPACE_BEGIN
+
+/// @brief JSON Pointer defines a string syntax for identifying a specific value within a JSON document
+/// @sa https://json.nlohmann.me/api/json_pointer/
+template<typename RefStringType>
+class json_pointer
+{
+    // allow basic_json to access private members
+    NLOHMANN_BASIC_JSON_TPL_DECLARATION
+    friend class basic_json;
+
+    template<typename>
+    friend class json_pointer;
+
+    template<typename T>
+    struct string_t_helper
+    {
+        using type = T;
+    };
+
+    NLOHMANN_BASIC_JSON_TPL_DECLARATION
+    struct string_t_helper<NLOHMANN_BASIC_JSON_TPL>
+    {
+        using type = StringType;
+    };
+
+  public:
+    // for backwards compatibility accept BasicJsonType
+    using string_t = typename string_t_helper<RefStringType>::type;
+
+    /// @brief create JSON pointer
+    /// @sa https://json.nlohmann.me/api/json_pointer/json_pointer/
+    explicit json_pointer(const string_t& s = "")
+        : reference_tokens(split(s))
+    {}
+
+    /// @brief return a string representation of the JSON pointer
+    /// @sa https://json.nlohmann.me/api/json_pointer/to_string/
+    string_t to_string() const
+    {
+        return std::accumulate(reference_tokens.begin(), reference_tokens.end(),
+                               string_t{},
+                               [](const string_t& a, const string_t& b)
+        {
+            return detail::concat(a, '/', detail::escape(b));
+        });
+    }
+
+    /// @brief return a string representation of the JSON pointer
+    /// @sa https://json.nlohmann.me/api/json_pointer/operator_string/
+    JSON_HEDLEY_DEPRECATED_FOR(3.11.0, to_string())
+    operator string_t() const
+    {
+        return to_string();
+    }
+
+#ifndef JSON_NO_IO
+    /// @brief write string representation of the JSON pointer to stream
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_ltlt/
+    friend std::ostream& operator<<(std::ostream& o, const json_pointer& ptr)
+    {
+        o << ptr.to_string();
+        return o;
+    }
+#endif
+
+    /// @brief append another JSON pointer at the end of this JSON pointer
+    /// @sa https://json.nlohmann.me/api/json_pointer/operator_slasheq/
+    json_pointer& operator/=(const json_pointer& ptr)
+    {
+        reference_tokens.insert(reference_tokens.end(),
+                                ptr.reference_tokens.begin(),
+                                ptr.reference_tokens.end());
+        return *this;
+    }
+
+    /// @brief append an unescaped reference token at the end of this JSON pointer
+    /// @sa https://json.nlohmann.me/api/json_pointer/operator_slasheq/
+    json_pointer& operator/=(string_t token)
+    {
+        push_back(std::move(token));
+        return *this;
+    }
+
+    /// @brief append an array index at the end of this JSON pointer
+    /// @sa https://json.nlohmann.me/api/json_pointer/operator_slasheq/
+    json_pointer& operator/=(std::size_t array_idx)
+    {
+        return *this /= std::to_string(array_idx);
+    }
+
+    /// @brief create a new JSON pointer by appending the right JSON pointer at the end of the left JSON pointer
+    /// @sa https://json.nlohmann.me/api/json_pointer/operator_slash/
+    friend json_pointer operator/(const json_pointer& lhs,
+                                  const json_pointer& rhs)
+    {
+        return json_pointer(lhs) /= rhs;
+    }
+
+    /// @brief create a new JSON pointer by appending the unescaped token at the end of the JSON pointer
+    /// @sa https://json.nlohmann.me/api/json_pointer/operator_slash/
+    friend json_pointer operator/(const json_pointer& lhs, string_t token) // NOLINT(performance-unnecessary-value-param)
+    {
+        return json_pointer(lhs) /= std::move(token);
+    }
+
+    /// @brief create a new JSON pointer by appending the array-index-token at the end of the JSON pointer
+    /// @sa https://json.nlohmann.me/api/json_pointer/operator_slash/
+    friend json_pointer operator/(const json_pointer& lhs, std::size_t array_idx)
+    {
+        return json_pointer(lhs) /= array_idx;
+    }
+
+    /// @brief returns the parent of this JSON pointer
+    /// @sa https://json.nlohmann.me/api/json_pointer/parent_pointer/
+    json_pointer parent_pointer() const
+    {
+        if (empty())
+        {
+            return *this;
+        }
+
+        json_pointer res = *this;
+        res.pop_back();
+        return res;
+    }
+
+    /// @brief remove last reference token
+    /// @sa https://json.nlohmann.me/api/json_pointer/pop_back/
+    void pop_back()
+    {
+        if (JSON_HEDLEY_UNLIKELY(empty()))
+        {
+            JSON_THROW(detail::out_of_range::create(405, "JSON pointer has no parent", nullptr));
+        }
+
+        reference_tokens.pop_back();
+    }
+
+    /// @brief return last reference token
+    /// @sa https://json.nlohmann.me/api/json_pointer/back/
+    const string_t& back() const
+    {
+        if (JSON_HEDLEY_UNLIKELY(empty()))
+        {
+            JSON_THROW(detail::out_of_range::create(405, "JSON pointer has no parent", nullptr));
+        }
+
+        return reference_tokens.back();
+    }
+
+    /// @brief append an unescaped token at the end of the reference pointer
+    /// @sa https://json.nlohmann.me/api/json_pointer/push_back/
+    void push_back(const string_t& token)
+    {
+        reference_tokens.push_back(token);
+    }
+
+    /// @brief append an unescaped token at the end of the reference pointer
+    /// @sa https://json.nlohmann.me/api/json_pointer/push_back/
+    void push_back(string_t&& token)
+    {
+        reference_tokens.push_back(std::move(token));
+    }
+
+    /// @brief return whether pointer points to the root document
+    /// @sa https://json.nlohmann.me/api/json_pointer/empty/
+    bool empty() const noexcept
+    {
+        return reference_tokens.empty();
+    }
+
+  private:
+    /*!
+    @param[in] s  reference token to be converted into an array index
+
+    @return integer representation of @a s
+
+    @throw parse_error.106  if an array index begins with '0'
+    @throw parse_error.109  if an array index begins not with a digit
+    @throw out_of_range.404 if string @a s could not be converted to an integer
+    @throw out_of_range.410 if an array index exceeds size_type
+    */
+    template<typename BasicJsonType>
+    static typename BasicJsonType::size_type array_index(const string_t& s)
+    {
+        using size_type = typename BasicJsonType::size_type;
+
+        // error condition (cf. RFC 6901, Sect. 4)
+        if (JSON_HEDLEY_UNLIKELY(s.size() > 1 && s[0] == '0'))
+        {
+            JSON_THROW(detail::parse_error::create(106, 0, detail::concat("array index '", s, "' must not begin with '0'"), nullptr));
+        }
+
+        // error condition (cf. RFC 6901, Sect. 4)
+        if (JSON_HEDLEY_UNLIKELY(s.size() > 1 && !(s[0] >= '1' && s[0] <= '9')))
+        {
+            JSON_THROW(detail::parse_error::create(109, 0, detail::concat("array index '", s, "' is not a number"), nullptr));
+        }
+
+        const char* p = s.c_str();
+        char* p_end = nullptr;
+        errno = 0; // strtoull doesn't reset errno
+        const unsigned long long res = std::strtoull(p, &p_end, 10); // NOLINT(runtime/int)
+        if (p == p_end // invalid input or empty string
+                || errno == ERANGE // out of range
+                || JSON_HEDLEY_UNLIKELY(static_cast<std::size_t>(p_end - p) != s.size())) // incomplete read
+        {
+            JSON_THROW(detail::out_of_range::create(404, detail::concat("unresolved reference token '", s, "'"), nullptr));
+        }
+
+        // only triggered on special platforms (like 32bit), see also
+        // https://github.com/nlohmann/json/pull/2203
+        if (res >= static_cast<unsigned long long>((std::numeric_limits<size_type>::max)()))  // NOLINT(runtime/int)
+        {
+            JSON_THROW(detail::out_of_range::create(410, detail::concat("array index ", s, " exceeds size_type"), nullptr));   // LCOV_EXCL_LINE
+        }
+
+        return static_cast<size_type>(res);
+    }
+
+  JSON_PRIVATE_UNLESS_TESTED:
+    json_pointer top() const
+    {
+        if (JSON_HEDLEY_UNLIKELY(empty()))
+        {
+            JSON_THROW(detail::out_of_range::create(405, "JSON pointer has no parent", nullptr));
+        }
+
+        json_pointer result = *this;
+        result.reference_tokens = {reference_tokens[0]};
+        return result;
+    }
+
+  private:
+    /*!
+    @brief create and return a reference to the pointed to value
+
+    @complexity Linear in the number of reference tokens.
+
+    @throw parse_error.109 if array index is not a number
+    @throw type_error.313 if value cannot be unflattened
+    */
+    template<typename BasicJsonType>
+    BasicJsonType& get_and_create(BasicJsonType& j) const
+    {
+        auto* result = &j;
+
+        // in case no reference tokens exist, return a reference to the JSON value
+        // j which will be overwritten by a primitive value
+        for (const auto& reference_token : reference_tokens)
+        {
+            switch (result->type())
+            {
+                case detail::value_t::null:
+                {
+                    if (reference_token == "0")
+                    {
+                        // start a new array if reference token is 0
+                        result = &result->operator[](0);
+                    }
+                    else
+                    {
+                        // start a new object otherwise
+                        result = &result->operator[](reference_token);
+                    }
+                    break;
+                }
+
+                case detail::value_t::object:
+                {
+                    // create an entry in the object
+                    result = &result->operator[](reference_token);
+                    break;
+                }
+
+                case detail::value_t::array:
+                {
+                    // create an entry in the array
+                    result = &result->operator[](array_index<BasicJsonType>(reference_token));
+                    break;
+                }
+
+                /*
+                The following code is only reached if there exists a reference
+                token _and_ the current value is primitive. In this case, we have
+                an error situation, because primitive values may only occur as
+                single value; that is, with an empty list of reference tokens.
+                */
+                case detail::value_t::string:
+                case detail::value_t::boolean:
+                case detail::value_t::number_integer:
+                case detail::value_t::number_unsigned:
+                case detail::value_t::number_float:
+                case detail::value_t::binary:
+                case detail::value_t::discarded:
+                default:
+                    JSON_THROW(detail::type_error::create(313, "invalid value to unflatten", &j));
+            }
+        }
+
+        return *result;
+    }
+
+    /*!
+    @brief return a reference to the pointed to value
+
+    @note This version does not throw if a value is not present, but tries to
+          create nested values instead. For instance, calling this function
+          with pointer `"/this/that"` on a null value is equivalent to calling
+          `operator[]("this").operator[]("that")` on that value, effectively
+          changing the null value to an object.
+
+    @param[in] ptr  a JSON value
+
+    @return reference to the JSON value pointed to by the JSON pointer
+
+    @complexity Linear in the length of the JSON pointer.
+
+    @throw parse_error.106   if an array index begins with '0'
+    @throw parse_error.109   if an array index was not a number
+    @throw out_of_range.404  if the JSON pointer can not be resolved
+    */
+    template<typename BasicJsonType>
+    BasicJsonType& get_unchecked(BasicJsonType* ptr) const
+    {
