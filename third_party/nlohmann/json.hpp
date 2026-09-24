@@ -17698,3 +17698,593 @@ inline void grisu2_digit_gen(char* buffer, int& length, int& decimal_exponent,
         }
     }
 
+    // V = buffer * 10^-m, with M- <= V <= M+.
+
+    decimal_exponent -= m;
+
+    // 1 ulp in the decimal representation is now 10^-m.
+    // Since delta and dist are now scaled by 10^m, we need to do the
+    // same with ulp in order to keep the units in sync.
+    //
+    //      10^m * 10^-m = 1 = 2^-e * 2^e = ten_m * 2^e
+    //
+    const std::uint64_t ten_m = one.f;
+    grisu2_round(buffer, length, dist, delta, p2, ten_m);
+
+    // By construction this algorithm generates the shortest possible decimal
+    // number (Loitsch, Theorem 6.2) which rounds back to w.
+    // For an input number of precision p, at least
+    //
+    //      N = 1 + ceil(p * log_10(2))
+    //
+    // decimal digits are sufficient to identify all binary floating-point
+    // numbers (Matula, "In-and-Out conversions").
+    // This implies that the algorithm does not produce more than N decimal
+    // digits.
+    //
+    //      N = 17 for p = 53 (IEEE double precision)
+    //      N = 9  for p = 24 (IEEE single precision)
+}
+
+/*!
+v = buf * 10^decimal_exponent
+len is the length of the buffer (number of decimal digits)
+The buffer must be large enough, i.e. >= max_digits10.
+*/
+JSON_HEDLEY_NON_NULL(1)
+inline void grisu2(char* buf, int& len, int& decimal_exponent,
+                   diyfp m_minus, diyfp v, diyfp m_plus)
+{
+    JSON_ASSERT(m_plus.e == m_minus.e);
+    JSON_ASSERT(m_plus.e == v.e);
+
+    //  --------(-----------------------+-----------------------)--------    (A)
+    //          m-                      v                       m+
+    //
+    //  --------------------(-----------+-----------------------)--------    (B)
+    //                      m-          v                       m+
+    //
+    // First scale v (and m- and m+) such that the exponent is in the range
+    // [alpha, gamma].
+
+    const cached_power cached = get_cached_power_for_binary_exponent(m_plus.e);
+
+    const diyfp c_minus_k(cached.f, cached.e); // = c ~= 10^-k
+
+    // The exponent of the products is = v.e + c_minus_k.e + q and is in the range [alpha,gamma]
+    const diyfp w       = diyfp::mul(v,       c_minus_k);
+    const diyfp w_minus = diyfp::mul(m_minus, c_minus_k);
+    const diyfp w_plus  = diyfp::mul(m_plus,  c_minus_k);
+
+    //  ----(---+---)---------------(---+---)---------------(---+---)----
+    //          w-                      w                       w+
+    //          = c*m-                  = c*v                   = c*m+
+    //
+    // diyfp::mul rounds its result and c_minus_k is approximated too. w, w- and
+    // w+ are now off by a small amount.
+    // In fact:
+    //
+    //      w - v * 10^k < 1 ulp
+    //
+    // To account for this inaccuracy, add resp. subtract 1 ulp.
+    //
+    //  --------+---[---------------(---+---)---------------]---+--------
+    //          w-  M-                  w                   M+  w+
+    //
+    // Now any number in [M-, M+] (bounds included) will round to w when input,
+    // regardless of how the input rounding algorithm breaks ties.
+    //
+    // And digit_gen generates the shortest possible such number in [M-, M+].
+    // Note that this does not mean that Grisu2 always generates the shortest
+    // possible number in the interval (m-, m+).
+    const diyfp M_minus(w_minus.f + 1, w_minus.e);
+    const diyfp M_plus (w_plus.f  - 1, w_plus.e );
+
+    decimal_exponent = -cached.k; // = -(-k) = k
+
+    grisu2_digit_gen(buf, len, decimal_exponent, M_minus, w, M_plus);
+}
+
+/*!
+v = buf * 10^decimal_exponent
+len is the length of the buffer (number of decimal digits)
+The buffer must be large enough, i.e. >= max_digits10.
+*/
+template<typename FloatType>
+JSON_HEDLEY_NON_NULL(1)
+void grisu2(char* buf, int& len, int& decimal_exponent, FloatType value)
+{
+    static_assert(diyfp::kPrecision >= std::numeric_limits<FloatType>::digits + 3,
+                  "internal error: not enough precision");
+
+    JSON_ASSERT(std::isfinite(value));
+    JSON_ASSERT(value > 0);
+
+    // If the neighbors (and boundaries) of 'value' are always computed for double-precision
+    // numbers, all float's can be recovered using strtod (and strtof). However, the resulting
+    // decimal representations are not exactly "short".
+    //
+    // The documentation for 'std::to_chars' (https://en.cppreference.com/w/cpp/utility/to_chars)
+    // says "value is converted to a string as if by std::sprintf in the default ("C") locale"
+    // and since sprintf promotes floats to doubles, I think this is exactly what 'std::to_chars'
+    // does.
+    // On the other hand, the documentation for 'std::to_chars' requires that "parsing the
+    // representation using the corresponding std::from_chars function recovers value exactly". That
+    // indicates that single precision floating-point numbers should be recovered using
+    // 'std::strtof'.
+    //
+    // NB: If the neighbors are computed for single-precision numbers, there is a single float
+    //     (7.0385307e-26f) which can't be recovered using strtod. The resulting double precision
+    //     value is off by 1 ulp.
+#if 0 // NOLINT(readability-avoid-unconditional-preprocessor-if)
+    const boundaries w = compute_boundaries(static_cast<double>(value));
+#else
+    const boundaries w = compute_boundaries(value);
+#endif
+
+    grisu2(buf, len, decimal_exponent, w.minus, w.w, w.plus);
+}
+
+/*!
+@brief appends a decimal representation of e to buf
+@return a pointer to the element following the exponent.
+@pre -1000 < e < 1000
+*/
+JSON_HEDLEY_NON_NULL(1)
+JSON_HEDLEY_RETURNS_NON_NULL
+inline char* append_exponent(char* buf, int e)
+{
+    JSON_ASSERT(e > -1000);
+    JSON_ASSERT(e <  1000);
+
+    if (e < 0)
+    {
+        e = -e;
+        *buf++ = '-';
+    }
+    else
+    {
+        *buf++ = '+';
+    }
+
+    auto k = static_cast<std::uint32_t>(e);
+    if (k < 10)
+    {
+        // Always print at least two digits in the exponent.
+        // This is for compatibility with printf("%g").
+        *buf++ = '0';
+        *buf++ = static_cast<char>('0' + k);
+    }
+    else if (k < 100)
+    {
+        *buf++ = static_cast<char>('0' + k / 10);
+        k %= 10;
+        *buf++ = static_cast<char>('0' + k);
+    }
+    else
+    {
+        *buf++ = static_cast<char>('0' + k / 100);
+        k %= 100;
+        *buf++ = static_cast<char>('0' + k / 10);
+        k %= 10;
+        *buf++ = static_cast<char>('0' + k);
+    }
+
+    return buf;
+}
+
+/*!
+@brief prettify v = buf * 10^decimal_exponent
+
+If v is in the range [10^min_exp, 10^max_exp) it will be printed in fixed-point
+notation. Otherwise it will be printed in exponential notation.
+
+@pre min_exp < 0
+@pre max_exp > 0
+*/
+JSON_HEDLEY_NON_NULL(1)
+JSON_HEDLEY_RETURNS_NON_NULL
+inline char* format_buffer(char* buf, int len, int decimal_exponent,
+                           int min_exp, int max_exp)
+{
+    JSON_ASSERT(min_exp < 0);
+    JSON_ASSERT(max_exp > 0);
+
+    const int k = len;
+    const int n = len + decimal_exponent;
+
+    // v = buf * 10^(n-k)
+    // k is the length of the buffer (number of decimal digits)
+    // n is the position of the decimal point relative to the start of the buffer.
+
+    if (k <= n && n <= max_exp)
+    {
+        // digits[000]
+        // len <= max_exp + 2
+
+        std::memset(buf + k, '0', static_cast<size_t>(n) - static_cast<size_t>(k));
+        // Make it look like a floating-point number (#362, #378)
+        buf[n + 0] = '.';
+        buf[n + 1] = '0';
+        return buf + (static_cast<size_t>(n) + 2);
+    }
+
+    if (0 < n && n <= max_exp)
+    {
+        // dig.its
+        // len <= max_digits10 + 1
+
+        JSON_ASSERT(k > n);
+
+        std::memmove(buf + (static_cast<size_t>(n) + 1), buf + n, static_cast<size_t>(k) - static_cast<size_t>(n));
+        buf[n] = '.';
+        return buf + (static_cast<size_t>(k) + 1U);
+    }
+
+    if (min_exp < n && n <= 0)
+    {
+        // 0.[000]digits
+        // len <= 2 + (-min_exp - 1) + max_digits10
+
+        std::memmove(buf + (2 + static_cast<size_t>(-n)), buf, static_cast<size_t>(k));
+        buf[0] = '0';
+        buf[1] = '.';
+        std::memset(buf + 2, '0', static_cast<size_t>(-n));
+        return buf + (2U + static_cast<size_t>(-n) + static_cast<size_t>(k));
+    }
+
+    if (k == 1)
+    {
+        // dE+123
+        // len <= 1 + 5
+
+        buf += 1;
+    }
+    else
+    {
+        // d.igitsE+123
+        // len <= max_digits10 + 1 + 5
+
+        std::memmove(buf + 2, buf + 1, static_cast<size_t>(k) - 1);
+        buf[1] = '.';
+        buf += 1 + static_cast<size_t>(k);
+    }
+
+    *buf++ = 'e';
+    return append_exponent(buf, n - 1);
+}
+
+}  // namespace dtoa_impl
+
+/*!
+@brief generates a decimal representation of the floating-point number value in [first, last).
+
+The format of the resulting decimal representation is similar to printf's %g
+format. Returns an iterator pointing past-the-end of the decimal representation.
+
+@note The input number must be finite, i.e. NaN's and Inf's are not supported.
+@note The buffer must be large enough.
+@note The result is NOT null-terminated.
+*/
+template<typename FloatType>
+JSON_HEDLEY_NON_NULL(1, 2)
+JSON_HEDLEY_RETURNS_NON_NULL
+char* to_chars(char* first, const char* last, FloatType value)
+{
+    static_cast<void>(last); // maybe unused - fix warning
+    JSON_ASSERT(std::isfinite(value));
+
+    // Use signbit(value) instead of (value < 0) since signbit works for -0.
+    if (std::signbit(value))
+    {
+        value = -value;
+        *first++ = '-';
+    }
+
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wfloat-equal"
+#endif
+    if (value == 0) // +-0
+    {
+        *first++ = '0';
+        // Make it look like a floating-point number (#362, #378)
+        *first++ = '.';
+        *first++ = '0';
+        return first;
+    }
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#endif
+
+    JSON_ASSERT(last - first >= std::numeric_limits<FloatType>::max_digits10);
+
+    // Compute v = buffer * 10^decimal_exponent.
+    // The decimal digits are stored in the buffer, which needs to be interpreted
+    // as an unsigned decimal integer.
+    // len is the length of the buffer, i.e. the number of decimal digits.
+    int len = 0;
+    int decimal_exponent = 0;
+    dtoa_impl::grisu2(first, len, decimal_exponent, value);
+
+    JSON_ASSERT(len <= std::numeric_limits<FloatType>::max_digits10);
+
+    // Format the buffer like printf("%.*g", prec, value)
+    constexpr int kMinExp = -4;
+    // Use digits10 here to increase compatibility with version 2.
+    constexpr int kMaxExp = std::numeric_limits<FloatType>::digits10;
+
+    JSON_ASSERT(last - first >= kMaxExp + 2);
+    JSON_ASSERT(last - first >= 2 + (-kMinExp - 1) + std::numeric_limits<FloatType>::max_digits10);
+    JSON_ASSERT(last - first >= std::numeric_limits<FloatType>::max_digits10 + 6);
+
+    return dtoa_impl::format_buffer(first, len, decimal_exponent, kMinExp, kMaxExp);
+}
+
+}  // namespace detail
+NLOHMANN_JSON_NAMESPACE_END
+
+// #include <nlohmann/detail/exceptions.hpp>
+
+// #include <nlohmann/detail/macro_scope.hpp>
+
+// #include <nlohmann/detail/meta/cpp_future.hpp>
+
+// #include <nlohmann/detail/output/binary_writer.hpp>
+
+// #include <nlohmann/detail/output/output_adapters.hpp>
+
+// #include <nlohmann/detail/string_concat.hpp>
+
+// #include <nlohmann/detail/value_t.hpp>
+
+
+NLOHMANN_JSON_NAMESPACE_BEGIN
+namespace detail
+{
+
+///////////////////
+// serialization //
+///////////////////
+
+/// how to treat decoding errors
+enum class error_handler_t
+{
+    strict,  ///< throw a type_error exception in case of invalid UTF-8
+    replace, ///< replace invalid UTF-8 sequences with U+FFFD
+    ignore   ///< ignore invalid UTF-8 sequences
+};
+
+template<typename BasicJsonType>
+class serializer
+{
+    using string_t = typename BasicJsonType::string_t;
+    using number_float_t = typename BasicJsonType::number_float_t;
+    using number_integer_t = typename BasicJsonType::number_integer_t;
+    using number_unsigned_t = typename BasicJsonType::number_unsigned_t;
+    using binary_char_t = typename BasicJsonType::binary_t::value_type;
+    static constexpr std::uint8_t UTF8_ACCEPT = 0;
+    static constexpr std::uint8_t UTF8_REJECT = 1;
+
+  public:
+    /*!
+    @param[in] s  output stream to serialize to
+    @param[in] ichar  indentation character to use
+    @param[in] error_handler_  how to react on decoding errors
+    */
+    serializer(output_adapter_t<char> s, const char ichar,
+               error_handler_t error_handler_ = error_handler_t::strict)
+        : o(std::move(s))
+        , loc(std::localeconv())
+        , thousands_sep(loc->thousands_sep == nullptr ? '\0' : std::char_traits<char>::to_char_type(* (loc->thousands_sep)))
+        , decimal_point(loc->decimal_point == nullptr ? '\0' : std::char_traits<char>::to_char_type(* (loc->decimal_point)))
+        , indent_char(ichar)
+        , indent_string(512, indent_char)
+        , error_handler(error_handler_)
+    {}
+
+    // delete because of pointer members
+    serializer(const serializer&) = delete;
+    serializer& operator=(const serializer&) = delete;
+    serializer(serializer&&) = delete;
+    serializer& operator=(serializer&&) = delete;
+    ~serializer() = default;
+
+    /*!
+    @brief internal implementation of the serialization function
+
+    This function is called by the public member function dump and organizes
+    the serialization internally. The indentation level is propagated as
+    additional parameter. In case of arrays and objects, the function is
+    called recursively.
+
+    - strings and object keys are escaped using `escape_string()`
+    - integer numbers are converted implicitly via `operator<<`
+    - floating-point numbers are converted to a string using `"%g"` format
+    - binary values are serialized as objects containing the subtype and the
+      byte array
+
+    @param[in] val               value to serialize
+    @param[in] pretty_print      whether the output shall be pretty-printed
+    @param[in] ensure_ascii If @a ensure_ascii is true, all non-ASCII characters
+    in the output are escaped with `\uXXXX` sequences, and the result consists
+    of ASCII characters only.
+    @param[in] indent_step       the indent level
+    @param[in] current_indent    the current indent level (only used internally)
+    */
+    void dump(const BasicJsonType& val,
+              const bool pretty_print,
+              const bool ensure_ascii,
+              const unsigned int indent_step,
+              const unsigned int current_indent = 0)
+    {
+        switch (val.m_data.m_type)
+        {
+            case value_t::object:
+            {
+                if (val.m_data.m_value.object->empty())
+                {
+                    o->write_characters("{}", 2);
+                    return;
+                }
+
+                if (pretty_print)
+                {
+                    o->write_characters("{\n", 2);
+
+                    // variable to hold indentation for recursive calls
+                    const auto new_indent = current_indent + indent_step;
+                    if (JSON_HEDLEY_UNLIKELY(indent_string.size() < new_indent))
+                    {
+                        indent_string.resize(indent_string.size() * 2, ' ');
+                    }
+
+                    // first n-1 elements
+                    auto i = val.m_data.m_value.object->cbegin();
+                    for (std::size_t cnt = 0; cnt < val.m_data.m_value.object->size() - 1; ++cnt, ++i)
+                    {
+                        o->write_characters(indent_string.c_str(), new_indent);
+                        o->write_character('\"');
+                        dump_escaped(i->first, ensure_ascii);
+                        o->write_characters("\": ", 3);
+                        dump(i->second, true, ensure_ascii, indent_step, new_indent);
+                        o->write_characters(",\n", 2);
+                    }
+
+                    // last element
+                    JSON_ASSERT(i != val.m_data.m_value.object->cend());
+                    JSON_ASSERT(std::next(i) == val.m_data.m_value.object->cend());
+                    o->write_characters(indent_string.c_str(), new_indent);
+                    o->write_character('\"');
+                    dump_escaped(i->first, ensure_ascii);
+                    o->write_characters("\": ", 3);
+                    dump(i->second, true, ensure_ascii, indent_step, new_indent);
+
+                    o->write_character('\n');
+                    o->write_characters(indent_string.c_str(), current_indent);
+                    o->write_character('}');
+                }
+                else
+                {
+                    o->write_character('{');
+
+                    // first n-1 elements
+                    auto i = val.m_data.m_value.object->cbegin();
+                    for (std::size_t cnt = 0; cnt < val.m_data.m_value.object->size() - 1; ++cnt, ++i)
+                    {
+                        o->write_character('\"');
+                        dump_escaped(i->first, ensure_ascii);
+                        o->write_characters("\":", 2);
+                        dump(i->second, false, ensure_ascii, indent_step, current_indent);
+                        o->write_character(',');
+                    }
+
+                    // last element
+                    JSON_ASSERT(i != val.m_data.m_value.object->cend());
+                    JSON_ASSERT(std::next(i) == val.m_data.m_value.object->cend());
+                    o->write_character('\"');
+                    dump_escaped(i->first, ensure_ascii);
+                    o->write_characters("\":", 2);
+                    dump(i->second, false, ensure_ascii, indent_step, current_indent);
+
+                    o->write_character('}');
+                }
+
+                return;
+            }
+
+            case value_t::array:
+            {
+                if (val.m_data.m_value.array->empty())
+                {
+                    o->write_characters("[]", 2);
+                    return;
+                }
+
+                if (pretty_print)
+                {
+                    o->write_characters("[\n", 2);
+
+                    // variable to hold indentation for recursive calls
+                    const auto new_indent = current_indent + indent_step;
+                    if (JSON_HEDLEY_UNLIKELY(indent_string.size() < new_indent))
+                    {
+                        indent_string.resize(indent_string.size() * 2, ' ');
+                    }
+
+                    // first n-1 elements
+                    for (auto i = val.m_data.m_value.array->cbegin();
+                            i != val.m_data.m_value.array->cend() - 1; ++i)
+                    {
+                        o->write_characters(indent_string.c_str(), new_indent);
+                        dump(*i, true, ensure_ascii, indent_step, new_indent);
+                        o->write_characters(",\n", 2);
+                    }
+
+                    // last element
+                    JSON_ASSERT(!val.m_data.m_value.array->empty());
+                    o->write_characters(indent_string.c_str(), new_indent);
+                    dump(val.m_data.m_value.array->back(), true, ensure_ascii, indent_step, new_indent);
+
+                    o->write_character('\n');
+                    o->write_characters(indent_string.c_str(), current_indent);
+                    o->write_character(']');
+                }
+                else
+                {
+                    o->write_character('[');
+
+                    // first n-1 elements
+                    for (auto i = val.m_data.m_value.array->cbegin();
+                            i != val.m_data.m_value.array->cend() - 1; ++i)
+                    {
+                        dump(*i, false, ensure_ascii, indent_step, current_indent);
+                        o->write_character(',');
+                    }
+
+                    // last element
+                    JSON_ASSERT(!val.m_data.m_value.array->empty());
+                    dump(val.m_data.m_value.array->back(), false, ensure_ascii, indent_step, current_indent);
+
+                    o->write_character(']');
+                }
+
+                return;
+            }
+
+            case value_t::string:
+            {
+                o->write_character('\"');
+                dump_escaped(*val.m_data.m_value.string, ensure_ascii);
+                o->write_character('\"');
+                return;
+            }
+
+            case value_t::binary:
+            {
+                if (pretty_print)
+                {
+                    o->write_characters("{\n", 2);
+
+                    // variable to hold indentation for recursive calls
+                    const auto new_indent = current_indent + indent_step;
+                    if (JSON_HEDLEY_UNLIKELY(indent_string.size() < new_indent))
+                    {
+                        indent_string.resize(indent_string.size() * 2, ' ');
+                    }
+
+                    o->write_characters(indent_string.c_str(), new_indent);
+
+                    o->write_characters("\"bytes\": [", 10);
+
+                    if (!val.m_data.m_value.binary->empty())
+                    {
+                        for (auto i = val.m_data.m_value.binary->cbegin();
+                                i != val.m_data.m_value.binary->cend() - 1; ++i)
+                        {
+                            dump_integer(*i);
+                            o->write_characters(", ", 2);
+                        }
+                        dump_integer(val.m_data.m_value.binary->back());
+                    }
+
