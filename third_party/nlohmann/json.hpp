@@ -10028,3 +10028,593 @@ class binary_reader
 
             case 0xFB: // Double-Precision Float (eight-byte IEEE 754)
             {
+                double number{};
+                return get_number(input_format_t::cbor, number) && sax->number_float(static_cast<number_float_t>(number), "");
+            }
+
+            default: // anything else (0xFF is handled inside the other types)
+            {
+                auto last_token = get_token_string();
+                return sax->parse_error(chars_read, last_token, parse_error::create(112, chars_read,
+                                        exception_message(input_format_t::cbor, concat("invalid byte: 0x", last_token), "value"), nullptr));
+            }
+        }
+    }
+
+    /*!
+    @brief reads a CBOR string
+
+    This function first reads starting bytes to determine the expected
+    string length and then copies this number of bytes into a string.
+    Additionally, CBOR's strings with indefinite lengths are supported.
+
+    @param[out] result  created string
+
+    @return whether string creation completed
+    */
+    bool get_cbor_string(string_t& result)
+    {
+        if (JSON_HEDLEY_UNLIKELY(!unexpect_eof(input_format_t::cbor, "string")))
+        {
+            return false;
+        }
+
+        switch (current)
+        {
+            // UTF-8 string (0x00..0x17 bytes follow)
+            case 0x60:
+            case 0x61:
+            case 0x62:
+            case 0x63:
+            case 0x64:
+            case 0x65:
+            case 0x66:
+            case 0x67:
+            case 0x68:
+            case 0x69:
+            case 0x6A:
+            case 0x6B:
+            case 0x6C:
+            case 0x6D:
+            case 0x6E:
+            case 0x6F:
+            case 0x70:
+            case 0x71:
+            case 0x72:
+            case 0x73:
+            case 0x74:
+            case 0x75:
+            case 0x76:
+            case 0x77:
+            {
+                return get_string(input_format_t::cbor, static_cast<unsigned int>(current) & 0x1Fu, result);
+            }
+
+            case 0x78: // UTF-8 string (one-byte uint8_t for n follows)
+            {
+                std::uint8_t len{};
+                return get_number(input_format_t::cbor, len) && get_string(input_format_t::cbor, len, result);
+            }
+
+            case 0x79: // UTF-8 string (two-byte uint16_t for n follow)
+            {
+                std::uint16_t len{};
+                return get_number(input_format_t::cbor, len) && get_string(input_format_t::cbor, len, result);
+            }
+
+            case 0x7A: // UTF-8 string (four-byte uint32_t for n follow)
+            {
+                std::uint32_t len{};
+                return get_number(input_format_t::cbor, len) && get_string(input_format_t::cbor, len, result);
+            }
+
+            case 0x7B: // UTF-8 string (eight-byte uint64_t for n follow)
+            {
+                std::uint64_t len{};
+                return get_number(input_format_t::cbor, len) && get_string(input_format_t::cbor, len, result);
+            }
+
+            case 0x7F: // UTF-8 string (indefinite length)
+            {
+                while (get() != 0xFF)
+                {
+                    string_t chunk;
+                    if (!get_cbor_string(chunk))
+                    {
+                        return false;
+                    }
+                    result.append(chunk);
+                }
+                return true;
+            }
+
+            default:
+            {
+                auto last_token = get_token_string();
+                return sax->parse_error(chars_read, last_token, parse_error::create(113, chars_read,
+                                        exception_message(input_format_t::cbor, concat("expected length specification (0x60-0x7B) or indefinite string type (0x7F); last byte: 0x", last_token), "string"), nullptr));
+            }
+        }
+    }
+
+    /*!
+    @brief reads a CBOR byte array
+
+    This function first reads starting bytes to determine the expected
+    byte array length and then copies this number of bytes into the byte array.
+    Additionally, CBOR's byte arrays with indefinite lengths are supported.
+
+    @param[out] result  created byte array
+
+    @return whether byte array creation completed
+    */
+    bool get_cbor_binary(binary_t& result)
+    {
+        if (JSON_HEDLEY_UNLIKELY(!unexpect_eof(input_format_t::cbor, "binary")))
+        {
+            return false;
+        }
+
+        switch (current)
+        {
+            // Binary data (0x00..0x17 bytes follow)
+            case 0x40:
+            case 0x41:
+            case 0x42:
+            case 0x43:
+            case 0x44:
+            case 0x45:
+            case 0x46:
+            case 0x47:
+            case 0x48:
+            case 0x49:
+            case 0x4A:
+            case 0x4B:
+            case 0x4C:
+            case 0x4D:
+            case 0x4E:
+            case 0x4F:
+            case 0x50:
+            case 0x51:
+            case 0x52:
+            case 0x53:
+            case 0x54:
+            case 0x55:
+            case 0x56:
+            case 0x57:
+            {
+                return get_binary(input_format_t::cbor, static_cast<unsigned int>(current) & 0x1Fu, result);
+            }
+
+            case 0x58: // Binary data (one-byte uint8_t for n follows)
+            {
+                std::uint8_t len{};
+                return get_number(input_format_t::cbor, len) &&
+                       get_binary(input_format_t::cbor, len, result);
+            }
+
+            case 0x59: // Binary data (two-byte uint16_t for n follow)
+            {
+                std::uint16_t len{};
+                return get_number(input_format_t::cbor, len) &&
+                       get_binary(input_format_t::cbor, len, result);
+            }
+
+            case 0x5A: // Binary data (four-byte uint32_t for n follow)
+            {
+                std::uint32_t len{};
+                return get_number(input_format_t::cbor, len) &&
+                       get_binary(input_format_t::cbor, len, result);
+            }
+
+            case 0x5B: // Binary data (eight-byte uint64_t for n follow)
+            {
+                std::uint64_t len{};
+                return get_number(input_format_t::cbor, len) &&
+                       get_binary(input_format_t::cbor, len, result);
+            }
+
+            case 0x5F: // Binary data (indefinite length)
+            {
+                while (get() != 0xFF)
+                {
+                    binary_t chunk;
+                    if (!get_cbor_binary(chunk))
+                    {
+                        return false;
+                    }
+                    result.insert(result.end(), chunk.begin(), chunk.end());
+                }
+                return true;
+            }
+
+            default:
+            {
+                auto last_token = get_token_string();
+                return sax->parse_error(chars_read, last_token, parse_error::create(113, chars_read,
+                                        exception_message(input_format_t::cbor, concat("expected length specification (0x40-0x5B) or indefinite binary array type (0x5F); last byte: 0x", last_token), "binary"), nullptr));
+            }
+        }
+    }
+
+    /*!
+    @param[in] len  the length of the array or static_cast<std::size_t>(-1) for an
+                    array of indefinite size
+    @param[in] tag_handler how CBOR tags should be treated
+    @return whether array creation completed
+    */
+    bool get_cbor_array(const std::size_t len,
+                        const cbor_tag_handler_t tag_handler)
+    {
+        if (JSON_HEDLEY_UNLIKELY(!sax->start_array(len)))
+        {
+            return false;
+        }
+
+        if (len != static_cast<std::size_t>(-1))
+        {
+            for (std::size_t i = 0; i < len; ++i)
+            {
+                if (JSON_HEDLEY_UNLIKELY(!parse_cbor_internal(true, tag_handler)))
+                {
+                    return false;
+                }
+            }
+        }
+        else
+        {
+            while (get() != 0xFF)
+            {
+                if (JSON_HEDLEY_UNLIKELY(!parse_cbor_internal(false, tag_handler)))
+                {
+                    return false;
+                }
+            }
+        }
+
+        return sax->end_array();
+    }
+
+    /*!
+    @param[in] len  the length of the object or static_cast<std::size_t>(-1) for an
+                    object of indefinite size
+    @param[in] tag_handler how CBOR tags should be treated
+    @return whether object creation completed
+    */
+    bool get_cbor_object(const std::size_t len,
+                         const cbor_tag_handler_t tag_handler)
+    {
+        if (JSON_HEDLEY_UNLIKELY(!sax->start_object(len)))
+        {
+            return false;
+        }
+
+        if (len != 0)
+        {
+            string_t key;
+            if (len != static_cast<std::size_t>(-1))
+            {
+                for (std::size_t i = 0; i < len; ++i)
+                {
+                    get();
+                    if (JSON_HEDLEY_UNLIKELY(!get_cbor_string(key) || !sax->key(key)))
+                    {
+                        return false;
+                    }
+
+                    if (JSON_HEDLEY_UNLIKELY(!parse_cbor_internal(true, tag_handler)))
+                    {
+                        return false;
+                    }
+                    key.clear();
+                }
+            }
+            else
+            {
+                while (get() != 0xFF)
+                {
+                    if (JSON_HEDLEY_UNLIKELY(!get_cbor_string(key) || !sax->key(key)))
+                    {
+                        return false;
+                    }
+
+                    if (JSON_HEDLEY_UNLIKELY(!parse_cbor_internal(true, tag_handler)))
+                    {
+                        return false;
+                    }
+                    key.clear();
+                }
+            }
+        }
+
+        return sax->end_object();
+    }
+
+    /////////////
+    // MsgPack //
+    /////////////
+
+    /*!
+    @return whether a valid MessagePack value was passed to the SAX parser
+    */
+    bool parse_msgpack_internal()
+    {
+        switch (get())
+        {
+            // EOF
+            case char_traits<char_type>::eof():
+                return unexpect_eof(input_format_t::msgpack, "value");
+
+            // positive fixint
+            case 0x00:
+            case 0x01:
+            case 0x02:
+            case 0x03:
+            case 0x04:
+            case 0x05:
+            case 0x06:
+            case 0x07:
+            case 0x08:
+            case 0x09:
+            case 0x0A:
+            case 0x0B:
+            case 0x0C:
+            case 0x0D:
+            case 0x0E:
+            case 0x0F:
+            case 0x10:
+            case 0x11:
+            case 0x12:
+            case 0x13:
+            case 0x14:
+            case 0x15:
+            case 0x16:
+            case 0x17:
+            case 0x18:
+            case 0x19:
+            case 0x1A:
+            case 0x1B:
+            case 0x1C:
+            case 0x1D:
+            case 0x1E:
+            case 0x1F:
+            case 0x20:
+            case 0x21:
+            case 0x22:
+            case 0x23:
+            case 0x24:
+            case 0x25:
+            case 0x26:
+            case 0x27:
+            case 0x28:
+            case 0x29:
+            case 0x2A:
+            case 0x2B:
+            case 0x2C:
+            case 0x2D:
+            case 0x2E:
+            case 0x2F:
+            case 0x30:
+            case 0x31:
+            case 0x32:
+            case 0x33:
+            case 0x34:
+            case 0x35:
+            case 0x36:
+            case 0x37:
+            case 0x38:
+            case 0x39:
+            case 0x3A:
+            case 0x3B:
+            case 0x3C:
+            case 0x3D:
+            case 0x3E:
+            case 0x3F:
+            case 0x40:
+            case 0x41:
+            case 0x42:
+            case 0x43:
+            case 0x44:
+            case 0x45:
+            case 0x46:
+            case 0x47:
+            case 0x48:
+            case 0x49:
+            case 0x4A:
+            case 0x4B:
+            case 0x4C:
+            case 0x4D:
+            case 0x4E:
+            case 0x4F:
+            case 0x50:
+            case 0x51:
+            case 0x52:
+            case 0x53:
+            case 0x54:
+            case 0x55:
+            case 0x56:
+            case 0x57:
+            case 0x58:
+            case 0x59:
+            case 0x5A:
+            case 0x5B:
+            case 0x5C:
+            case 0x5D:
+            case 0x5E:
+            case 0x5F:
+            case 0x60:
+            case 0x61:
+            case 0x62:
+            case 0x63:
+            case 0x64:
+            case 0x65:
+            case 0x66:
+            case 0x67:
+            case 0x68:
+            case 0x69:
+            case 0x6A:
+            case 0x6B:
+            case 0x6C:
+            case 0x6D:
+            case 0x6E:
+            case 0x6F:
+            case 0x70:
+            case 0x71:
+            case 0x72:
+            case 0x73:
+            case 0x74:
+            case 0x75:
+            case 0x76:
+            case 0x77:
+            case 0x78:
+            case 0x79:
+            case 0x7A:
+            case 0x7B:
+            case 0x7C:
+            case 0x7D:
+            case 0x7E:
+            case 0x7F:
+                return sax->number_unsigned(static_cast<number_unsigned_t>(current));
+
+            // fixmap
+            case 0x80:
+            case 0x81:
+            case 0x82:
+            case 0x83:
+            case 0x84:
+            case 0x85:
+            case 0x86:
+            case 0x87:
+            case 0x88:
+            case 0x89:
+            case 0x8A:
+            case 0x8B:
+            case 0x8C:
+            case 0x8D:
+            case 0x8E:
+            case 0x8F:
+                return get_msgpack_object(conditional_static_cast<std::size_t>(static_cast<unsigned int>(current) & 0x0Fu));
+
+            // fixarray
+            case 0x90:
+            case 0x91:
+            case 0x92:
+            case 0x93:
+            case 0x94:
+            case 0x95:
+            case 0x96:
+            case 0x97:
+            case 0x98:
+            case 0x99:
+            case 0x9A:
+            case 0x9B:
+            case 0x9C:
+            case 0x9D:
+            case 0x9E:
+            case 0x9F:
+                return get_msgpack_array(conditional_static_cast<std::size_t>(static_cast<unsigned int>(current) & 0x0Fu));
+
+            // fixstr
+            case 0xA0:
+            case 0xA1:
+            case 0xA2:
+            case 0xA3:
+            case 0xA4:
+            case 0xA5:
+            case 0xA6:
+            case 0xA7:
+            case 0xA8:
+            case 0xA9:
+            case 0xAA:
+            case 0xAB:
+            case 0xAC:
+            case 0xAD:
+            case 0xAE:
+            case 0xAF:
+            case 0xB0:
+            case 0xB1:
+            case 0xB2:
+            case 0xB3:
+            case 0xB4:
+            case 0xB5:
+            case 0xB6:
+            case 0xB7:
+            case 0xB8:
+            case 0xB9:
+            case 0xBA:
+            case 0xBB:
+            case 0xBC:
+            case 0xBD:
+            case 0xBE:
+            case 0xBF:
+            case 0xD9: // str 8
+            case 0xDA: // str 16
+            case 0xDB: // str 32
+            {
+                string_t s;
+                return get_msgpack_string(s) && sax->string(s);
+            }
+
+            case 0xC0: // nil
+                return sax->null();
+
+            case 0xC2: // false
+                return sax->boolean(false);
+
+            case 0xC3: // true
+                return sax->boolean(true);
+
+            case 0xC4: // bin 8
+            case 0xC5: // bin 16
+            case 0xC6: // bin 32
+            case 0xC7: // ext 8
+            case 0xC8: // ext 16
+            case 0xC9: // ext 32
+            case 0xD4: // fixext 1
+            case 0xD5: // fixext 2
+            case 0xD6: // fixext 4
+            case 0xD7: // fixext 8
+            case 0xD8: // fixext 16
+            {
+                binary_t b;
+                return get_msgpack_binary(b) && sax->binary(b);
+            }
+
+            case 0xCA: // float 32
+            {
+                float number{};
+                return get_number(input_format_t::msgpack, number) && sax->number_float(static_cast<number_float_t>(number), "");
+            }
+
+            case 0xCB: // float 64
+            {
+                double number{};
+                return get_number(input_format_t::msgpack, number) && sax->number_float(static_cast<number_float_t>(number), "");
+            }
+
+            case 0xCC: // uint 8
+            {
+                std::uint8_t number{};
+                return get_number(input_format_t::msgpack, number) && sax->number_unsigned(number);
+            }
+
+            case 0xCD: // uint 16
+            {
+                std::uint16_t number{};
+                return get_number(input_format_t::msgpack, number) && sax->number_unsigned(number);
+            }
+
+            case 0xCE: // uint 32
+            {
+                std::uint32_t number{};
+                return get_number(input_format_t::msgpack, number) && sax->number_unsigned(number);
+            }
+
+            case 0xCF: // uint 64
+            {
+                std::uint64_t number{};
+                return get_number(input_format_t::msgpack, number) && sax->number_unsigned(number);
+            }
+
+            case 0xD0: // int 8
+            {
