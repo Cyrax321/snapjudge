@@ -5998,3 +5998,603 @@ inline PathParamsMatcher::PathParamsMatcher(const std::string &pattern) {
     param_names_.push_back(std::move(param_name));
 
     last_param_end = sep_pos + 1;
+  }
+
+  if (last_param_end < pattern.length()) {
+    static_fragments_.push_back(pattern.substr(last_param_end));
+  }
+}
+
+inline bool PathParamsMatcher::match(Request &request) const {
+  request.matches = std::smatch();
+  request.path_params.clear();
+  request.path_params.reserve(param_names_.size());
+
+  // One past the position at which the path matched the pattern last time
+  std::size_t starting_pos = 0;
+  for (size_t i = 0; i < static_fragments_.size(); ++i) {
+    const auto &fragment = static_fragments_[i];
+
+    if (starting_pos + fragment.length() > request.path.length()) {
+      return false;
+    }
+
+    // Avoid unnecessary allocation by using strncmp instead of substr +
+    // comparison
+    if (std::strncmp(request.path.c_str() + starting_pos, fragment.c_str(),
+                     fragment.length()) != 0) {
+      return false;
+    }
+
+    starting_pos += fragment.length();
+
+    // Should only happen when we have a static fragment after a param
+    // Example: '/users/:id/subscriptions'
+    // The 'subscriptions' fragment here does not have a corresponding param
+    if (i >= param_names_.size()) { continue; }
+
+    auto sep_pos = request.path.find(separator, starting_pos);
+    if (sep_pos == std::string::npos) { sep_pos = request.path.length(); }
+
+    const auto &param_name = param_names_[i];
+
+    request.path_params.emplace(
+        param_name, request.path.substr(starting_pos, sep_pos - starting_pos));
+
+    // Mark everything up to '/' as matched
+    starting_pos = sep_pos + 1;
+  }
+  // Returns false if the path is longer than the pattern
+  return starting_pos >= request.path.length();
+}
+
+inline bool RegexMatcher::match(Request &request) const {
+  request.path_params.clear();
+  return std::regex_match(request.path, request.matches, regex_);
+}
+
+} // namespace detail
+
+// HTTP server implementation
+inline Server::Server()
+    : new_task_queue(
+          [] { return new ThreadPool(CPPHTTPLIB_THREAD_POOL_COUNT); }) {
+#ifndef _WIN32
+  signal(SIGPIPE, SIG_IGN);
+#endif
+}
+
+inline Server::~Server() = default;
+
+inline std::unique_ptr<detail::MatcherBase>
+Server::make_matcher(const std::string &pattern) {
+  if (pattern.find("/:") != std::string::npos) {
+    return detail::make_unique<detail::PathParamsMatcher>(pattern);
+  } else {
+    return detail::make_unique<detail::RegexMatcher>(pattern);
+  }
+}
+
+inline Server &Server::Get(const std::string &pattern, Handler handler) {
+  get_handlers_.emplace_back(make_matcher(pattern), std::move(handler));
+  return *this;
+}
+
+inline Server &Server::Post(const std::string &pattern, Handler handler) {
+  post_handlers_.emplace_back(make_matcher(pattern), std::move(handler));
+  return *this;
+}
+
+inline Server &Server::Post(const std::string &pattern,
+                            HandlerWithContentReader handler) {
+  post_handlers_for_content_reader_.emplace_back(make_matcher(pattern),
+                                                 std::move(handler));
+  return *this;
+}
+
+inline Server &Server::Put(const std::string &pattern, Handler handler) {
+  put_handlers_.emplace_back(make_matcher(pattern), std::move(handler));
+  return *this;
+}
+
+inline Server &Server::Put(const std::string &pattern,
+                           HandlerWithContentReader handler) {
+  put_handlers_for_content_reader_.emplace_back(make_matcher(pattern),
+                                                std::move(handler));
+  return *this;
+}
+
+inline Server &Server::Patch(const std::string &pattern, Handler handler) {
+  patch_handlers_.emplace_back(make_matcher(pattern), std::move(handler));
+  return *this;
+}
+
+inline Server &Server::Patch(const std::string &pattern,
+                             HandlerWithContentReader handler) {
+  patch_handlers_for_content_reader_.emplace_back(make_matcher(pattern),
+                                                  std::move(handler));
+  return *this;
+}
+
+inline Server &Server::Delete(const std::string &pattern, Handler handler) {
+  delete_handlers_.emplace_back(make_matcher(pattern), std::move(handler));
+  return *this;
+}
+
+inline Server &Server::Delete(const std::string &pattern,
+                              HandlerWithContentReader handler) {
+  delete_handlers_for_content_reader_.emplace_back(make_matcher(pattern),
+                                                   std::move(handler));
+  return *this;
+}
+
+inline Server &Server::Options(const std::string &pattern, Handler handler) {
+  options_handlers_.emplace_back(make_matcher(pattern), std::move(handler));
+  return *this;
+}
+
+inline bool Server::set_base_dir(const std::string &dir,
+                                 const std::string &mount_point) {
+  return set_mount_point(mount_point, dir);
+}
+
+inline bool Server::set_mount_point(const std::string &mount_point,
+                                    const std::string &dir, Headers headers) {
+  detail::FileStat stat(dir);
+  if (stat.is_dir()) {
+    std::string mnt = !mount_point.empty() ? mount_point : "/";
+    if (!mnt.empty() && mnt[0] == '/') {
+      base_dirs_.push_back({mnt, dir, std::move(headers)});
+      return true;
+    }
+  }
+  return false;
+}
+
+inline bool Server::remove_mount_point(const std::string &mount_point) {
+  for (auto it = base_dirs_.begin(); it != base_dirs_.end(); ++it) {
+    if (it->mount_point == mount_point) {
+      base_dirs_.erase(it);
+      return true;
+    }
+  }
+  return false;
+}
+
+inline Server &
+Server::set_file_extension_and_mimetype_mapping(const std::string &ext,
+                                                const std::string &mime) {
+  file_extension_and_mimetype_map_[ext] = mime;
+  return *this;
+}
+
+inline Server &Server::set_default_file_mimetype(const std::string &mime) {
+  default_file_mimetype_ = mime;
+  return *this;
+}
+
+inline Server &Server::set_file_request_handler(Handler handler) {
+  file_request_handler_ = std::move(handler);
+  return *this;
+}
+
+inline Server &Server::set_error_handler_core(HandlerWithResponse handler,
+                                              std::true_type) {
+  error_handler_ = std::move(handler);
+  return *this;
+}
+
+inline Server &Server::set_error_handler_core(Handler handler,
+                                              std::false_type) {
+  error_handler_ = [handler](const Request &req, Response &res) {
+    handler(req, res);
+    return HandlerResponse::Handled;
+  };
+  return *this;
+}
+
+inline Server &Server::set_exception_handler(ExceptionHandler handler) {
+  exception_handler_ = std::move(handler);
+  return *this;
+}
+
+inline Server &Server::set_pre_routing_handler(HandlerWithResponse handler) {
+  pre_routing_handler_ = std::move(handler);
+  return *this;
+}
+
+inline Server &Server::set_post_routing_handler(Handler handler) {
+  post_routing_handler_ = std::move(handler);
+  return *this;
+}
+
+inline Server &Server::set_logger(Logger logger) {
+  logger_ = std::move(logger);
+  return *this;
+}
+
+inline Server &
+Server::set_expect_100_continue_handler(Expect100ContinueHandler handler) {
+  expect_100_continue_handler_ = std::move(handler);
+  return *this;
+}
+
+inline Server &Server::set_address_family(int family) {
+  address_family_ = family;
+  return *this;
+}
+
+inline Server &Server::set_tcp_nodelay(bool on) {
+  tcp_nodelay_ = on;
+  return *this;
+}
+
+inline Server &Server::set_ipv6_v6only(bool on) {
+  ipv6_v6only_ = on;
+  return *this;
+}
+
+inline Server &Server::set_socket_options(SocketOptions socket_options) {
+  socket_options_ = std::move(socket_options);
+  return *this;
+}
+
+inline Server &Server::set_default_headers(Headers headers) {
+  default_headers_ = std::move(headers);
+  return *this;
+}
+
+inline Server &Server::set_header_writer(
+    std::function<ssize_t(Stream &, Headers &)> const &writer) {
+  header_writer_ = writer;
+  return *this;
+}
+
+inline Server &Server::set_keep_alive_max_count(size_t count) {
+  keep_alive_max_count_ = count;
+  return *this;
+}
+
+inline Server &Server::set_keep_alive_timeout(time_t sec) {
+  keep_alive_timeout_sec_ = sec;
+  return *this;
+}
+
+inline Server &Server::set_read_timeout(time_t sec, time_t usec) {
+  read_timeout_sec_ = sec;
+  read_timeout_usec_ = usec;
+  return *this;
+}
+
+inline Server &Server::set_write_timeout(time_t sec, time_t usec) {
+  write_timeout_sec_ = sec;
+  write_timeout_usec_ = usec;
+  return *this;
+}
+
+inline Server &Server::set_idle_interval(time_t sec, time_t usec) {
+  idle_interval_sec_ = sec;
+  idle_interval_usec_ = usec;
+  return *this;
+}
+
+inline Server &Server::set_payload_max_length(size_t length) {
+  payload_max_length_ = length;
+  return *this;
+}
+
+inline bool Server::bind_to_port(const std::string &host, int port,
+                                 int socket_flags) {
+  auto ret = bind_internal(host, port, socket_flags);
+  if (ret == -1) { is_decommisioned = true; }
+  return ret >= 0;
+}
+inline int Server::bind_to_any_port(const std::string &host, int socket_flags) {
+  auto ret = bind_internal(host, 0, socket_flags);
+  if (ret == -1) { is_decommisioned = true; }
+  return ret;
+}
+
+inline bool Server::listen_after_bind() { return listen_internal(); }
+
+inline bool Server::listen(const std::string &host, int port,
+                           int socket_flags) {
+  return bind_to_port(host, port, socket_flags) && listen_internal();
+}
+
+inline bool Server::is_running() const { return is_running_; }
+
+inline void Server::wait_until_ready() const {
+  while (!is_running_ && !is_decommisioned) {
+    std::this_thread::sleep_for(std::chrono::milliseconds{1});
+  }
+}
+
+inline void Server::stop() {
+  if (is_running_) {
+    assert(svr_sock_ != INVALID_SOCKET);
+    std::atomic<socket_t> sock(svr_sock_.exchange(INVALID_SOCKET));
+    detail::shutdown_socket(sock);
+    detail::close_socket(sock);
+  }
+  is_decommisioned = false;
+}
+
+inline void Server::decommission() { is_decommisioned = true; }
+
+inline bool Server::parse_request_line(const char *s, Request &req) const {
+  auto len = strlen(s);
+  if (len < 2 || s[len - 2] != '\r' || s[len - 1] != '\n') { return false; }
+  len -= 2;
+
+  {
+    size_t count = 0;
+
+    detail::split(s, s + len, ' ', [&](const char *b, const char *e) {
+      switch (count) {
+      case 0: req.method = std::string(b, e); break;
+      case 1: req.target = std::string(b, e); break;
+      case 2: req.version = std::string(b, e); break;
+      default: break;
+      }
+      count++;
+    });
+
+    if (count != 3) { return false; }
+  }
+
+  static const std::set<std::string> methods{
+      "GET",     "HEAD",    "POST",  "PUT",   "DELETE",
+      "CONNECT", "OPTIONS", "TRACE", "PATCH", "PRI"};
+
+  if (methods.find(req.method) == methods.end()) { return false; }
+
+  if (req.version != "HTTP/1.1" && req.version != "HTTP/1.0") { return false; }
+
+  {
+    // Skip URL fragment
+    for (size_t i = 0; i < req.target.size(); i++) {
+      if (req.target[i] == '#') {
+        req.target.erase(i);
+        break;
+      }
+    }
+
+    detail::divide(req.target, '?',
+                   [&](const char *lhs_data, std::size_t lhs_size,
+                       const char *rhs_data, std::size_t rhs_size) {
+                     req.path = detail::decode_url(
+                         std::string(lhs_data, lhs_size), false);
+                     detail::parse_query_text(rhs_data, rhs_size, req.params);
+                   });
+  }
+
+  return true;
+}
+
+inline bool Server::write_response(Stream &strm, bool close_connection,
+                                   Request &req, Response &res) {
+  // NOTE: `req.ranges` should be empty, otherwise it will be applied
+  // incorrectly to the error content.
+  req.ranges.clear();
+  return write_response_core(strm, close_connection, req, res, false);
+}
+
+inline bool Server::write_response_with_content(Stream &strm,
+                                                bool close_connection,
+                                                const Request &req,
+                                                Response &res) {
+  return write_response_core(strm, close_connection, req, res, true);
+}
+
+inline bool Server::write_response_core(Stream &strm, bool close_connection,
+                                        const Request &req, Response &res,
+                                        bool need_apply_ranges) {
+  assert(res.status != -1);
+
+  if (400 <= res.status && error_handler_ &&
+      error_handler_(req, res) == HandlerResponse::Handled) {
+    need_apply_ranges = true;
+  }
+
+  std::string content_type;
+  std::string boundary;
+  if (need_apply_ranges) { apply_ranges(req, res, content_type, boundary); }
+
+  // Prepare additional headers
+  if (close_connection || req.get_header_value("Connection") == "close") {
+    res.set_header("Connection", "close");
+  } else {
+    std::string s = "timeout=";
+    s += std::to_string(keep_alive_timeout_sec_);
+    s += ", max=";
+    s += std::to_string(keep_alive_max_count_);
+    res.set_header("Keep-Alive", s);
+  }
+
+  if ((!res.body.empty() || res.content_length_ > 0 || res.content_provider_) &&
+      !res.has_header("Content-Type")) {
+    res.set_header("Content-Type", "text/plain");
+  }
+
+  if (res.body.empty() && !res.content_length_ && !res.content_provider_ &&
+      !res.has_header("Content-Length")) {
+    res.set_header("Content-Length", "0");
+  }
+
+  if (req.method == "HEAD" && !res.has_header("Accept-Ranges")) {
+    res.set_header("Accept-Ranges", "bytes");
+  }
+
+  if (post_routing_handler_) { post_routing_handler_(req, res); }
+
+  // Response line and headers
+  {
+    detail::BufferStream bstrm;
+    if (!detail::write_response_line(bstrm, res.status)) { return false; }
+    if (!header_writer_(bstrm, res.headers)) { return false; }
+
+    // Flush buffer
+    auto &data = bstrm.get_buffer();
+    detail::write_data(strm, data.data(), data.size());
+  }
+
+  // Body
+  auto ret = true;
+  if (req.method != "HEAD") {
+    if (!res.body.empty()) {
+      if (!detail::write_data(strm, res.body.data(), res.body.size())) {
+        ret = false;
+      }
+    } else if (res.content_provider_) {
+      if (write_content_with_provider(strm, req, res, boundary, content_type)) {
+        res.content_provider_success_ = true;
+      } else {
+        ret = false;
+      }
+    }
+  }
+
+  // Log
+  if (logger_) { logger_(req, res); }
+
+  return ret;
+}
+
+inline bool
+Server::write_content_with_provider(Stream &strm, const Request &req,
+                                    Response &res, const std::string &boundary,
+                                    const std::string &content_type) {
+  auto is_shutting_down = [this]() {
+    return this->svr_sock_ == INVALID_SOCKET;
+  };
+
+  if (res.content_length_ > 0) {
+    if (req.ranges.empty()) {
+      return detail::write_content(strm, res.content_provider_, 0,
+                                   res.content_length_, is_shutting_down);
+    } else if (req.ranges.size() == 1) {
+      auto offset_and_length = detail::get_range_offset_and_length(
+          req.ranges[0], res.content_length_);
+
+      return detail::write_content(strm, res.content_provider_,
+                                   offset_and_length.first,
+                                   offset_and_length.second, is_shutting_down);
+    } else {
+      return detail::write_multipart_ranges_data(
+          strm, req, res, boundary, content_type, res.content_length_,
+          is_shutting_down);
+    }
+  } else {
+    if (res.is_chunked_content_provider_) {
+      auto type = detail::encoding_type(req, res);
+
+      std::unique_ptr<detail::compressor> compressor;
+      if (type == detail::EncodingType::Gzip) {
+#ifdef CPPHTTPLIB_ZLIB_SUPPORT
+        compressor = detail::make_unique<detail::gzip_compressor>();
+#endif
+      } else if (type == detail::EncodingType::Brotli) {
+#ifdef CPPHTTPLIB_BROTLI_SUPPORT
+        compressor = detail::make_unique<detail::brotli_compressor>();
+#endif
+      } else {
+        compressor = detail::make_unique<detail::nocompressor>();
+      }
+      assert(compressor != nullptr);
+
+      return detail::write_content_chunked(strm, res.content_provider_,
+                                           is_shutting_down, *compressor);
+    } else {
+      return detail::write_content_without_length(strm, res.content_provider_,
+                                                  is_shutting_down);
+    }
+  }
+}
+
+inline bool Server::read_content(Stream &strm, Request &req, Response &res) {
+  MultipartFormDataMap::iterator cur;
+  auto file_count = 0;
+  if (read_content_core(
+          strm, req, res,
+          // Regular
+          [&](const char *buf, size_t n) {
+            if (req.body.size() + n > req.body.max_size()) { return false; }
+            req.body.append(buf, n);
+            return true;
+          },
+          // Multipart
+          [&](const MultipartFormData &file) {
+            if (file_count++ == CPPHTTPLIB_MULTIPART_FORM_DATA_FILE_MAX_COUNT) {
+              return false;
+            }
+            cur = req.files.emplace(file.name, file);
+            return true;
+          },
+          [&](const char *buf, size_t n) {
+            auto &content = cur->second.content;
+            if (content.size() + n > content.max_size()) { return false; }
+            content.append(buf, n);
+            return true;
+          })) {
+    const auto &content_type = req.get_header_value("Content-Type");
+    if (!content_type.find("application/x-www-form-urlencoded")) {
+      if (req.body.size() > CPPHTTPLIB_FORM_URL_ENCODED_PAYLOAD_MAX_LENGTH) {
+        res.status = StatusCode::PayloadTooLarge_413; // NOTE: should be 414?
+        return false;
+      }
+      detail::parse_query_text(req.body, req.params);
+    }
+    return true;
+  }
+  return false;
+}
+
+inline bool Server::read_content_with_content_receiver(
+    Stream &strm, Request &req, Response &res, ContentReceiver receiver,
+    MultipartContentHeader multipart_header,
+    ContentReceiver multipart_receiver) {
+  return read_content_core(strm, req, res, std::move(receiver),
+                           std::move(multipart_header),
+                           std::move(multipart_receiver));
+}
+
+inline bool
+Server::read_content_core(Stream &strm, Request &req, Response &res,
+                          ContentReceiver receiver,
+                          MultipartContentHeader multipart_header,
+                          ContentReceiver multipart_receiver) const {
+  detail::MultipartFormDataParser multipart_form_data_parser;
+  ContentReceiverWithProgress out;
+
+  if (req.is_multipart_form_data()) {
+    const auto &content_type = req.get_header_value("Content-Type");
+    std::string boundary;
+    if (!detail::parse_multipart_boundary(content_type, boundary)) {
+      res.status = StatusCode::BadRequest_400;
+      return false;
+    }
+
+    multipart_form_data_parser.set_boundary(std::move(boundary));
+    out = [&](const char *buf, size_t n, uint64_t /*off*/, uint64_t /*len*/) {
+      /* For debug
+      size_t pos = 0;
+      while (pos < n) {
+        auto read_size = (std::min)<size_t>(1, n - pos);
+        auto ret = multipart_form_data_parser.parse(
+            buf + pos, read_size, multipart_receiver, multipart_header);
+        if (!ret) { return false; }
+        pos += read_size;
+      }
+      return true;
+      */
+      return multipart_form_data_parser.parse(buf, n, multipart_receiver,
+                                              multipart_header);
+    };
+  } else {
+    out = [receiver](const char *buf, size_t n, uint64_t /*off*/,
+                     uint64_t /*len*/) { return receiver(buf, n); };
+  }
+
+  if (req.method == "DELETE" && !req.has_header("Content-Length")) {
+    return true;
