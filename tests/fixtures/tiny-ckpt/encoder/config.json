@@ -1,0 +1,27 @@
+{
+ "hidden_size": 16,
+ "num_hidden_layers": 2,
+ "num_attention_heads": 2,
+ "intermediate_size": 8,
+ "max_position_embeddings": 128,
+ "vocab_size": 512,
+ "norm_eps": 1e-05,
+ "norm_bias": false,
+ "attention_bias": false,
+ "mlp_bias": false,
+ "local_attention": 8,
+ "layer_types": [
+  "full_attention",
+  "sliding_attention"
+ ],
+ "rope_parameters": {
+  "full_attention": {
+   "rope_theta": 10000.0,
+   "rope_type": "default"
+  },
+  "sliding_attention": {
+   "rope_theta": 10000.0,
+   "rope_type": "default"
+  }
+ }
+}
