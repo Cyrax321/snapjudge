@@ -14748,3 +14748,593 @@ inline bool operator==(const json_pointer<RefStringTypeLhs>& lhs,
     return lhs == json_pointer<RefStringTypeLhs>(rhs);
 }
 
+template<typename RefStringTypeRhs,
+         typename StringType = typename json_pointer<RefStringTypeRhs>::string_t>
+JSON_HEDLEY_DEPRECATED_FOR(3.11.2, operator==(json_pointer, json_pointer))
+inline bool operator==(const StringType& lhs,
+                       const json_pointer<RefStringTypeRhs>& rhs)
+{
+    return json_pointer<RefStringTypeRhs>(lhs) == rhs;
+}
+
+template<typename RefStringTypeLhs, typename RefStringTypeRhs>
+inline bool operator!=(const json_pointer<RefStringTypeLhs>& lhs,
+                       const json_pointer<RefStringTypeRhs>& rhs) noexcept
+{
+    return !(lhs == rhs);
+}
+
+template<typename RefStringTypeLhs,
+         typename StringType = typename json_pointer<RefStringTypeLhs>::string_t>
+JSON_HEDLEY_DEPRECATED_FOR(3.11.2, operator!=(json_pointer, json_pointer))
+inline bool operator!=(const json_pointer<RefStringTypeLhs>& lhs,
+                       const StringType& rhs)
+{
+    return !(lhs == rhs);
+}
+
+template<typename RefStringTypeRhs,
+         typename StringType = typename json_pointer<RefStringTypeRhs>::string_t>
+JSON_HEDLEY_DEPRECATED_FOR(3.11.2, operator!=(json_pointer, json_pointer))
+inline bool operator!=(const StringType& lhs,
+                       const json_pointer<RefStringTypeRhs>& rhs)
+{
+    return !(lhs == rhs);
+}
+
+template<typename RefStringTypeLhs, typename RefStringTypeRhs>
+inline bool operator<(const json_pointer<RefStringTypeLhs>& lhs,
+                      const json_pointer<RefStringTypeRhs>& rhs) noexcept
+{
+    return lhs.reference_tokens < rhs.reference_tokens;
+}
+#endif
+
+NLOHMANN_JSON_NAMESPACE_END
+
+// #include <nlohmann/detail/json_ref.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
+
+
+#include <initializer_list>
+#include <utility>
+
+// #include <nlohmann/detail/abi_macros.hpp>
+
+// #include <nlohmann/detail/meta/type_traits.hpp>
+
+
+NLOHMANN_JSON_NAMESPACE_BEGIN
+namespace detail
+{
+
+template<typename BasicJsonType>
+class json_ref
+{
+  public:
+    using value_type = BasicJsonType;
+
+    json_ref(value_type&& value)
+        : owned_value(std::move(value))
+    {}
+
+    json_ref(const value_type& value)
+        : value_ref(&value)
+    {}
+
+    json_ref(std::initializer_list<json_ref> init)
+        : owned_value(init)
+    {}
+
+    template <
+        class... Args,
+        enable_if_t<std::is_constructible<value_type, Args...>::value, int> = 0 >
+    json_ref(Args && ... args)
+        : owned_value(std::forward<Args>(args)...)
+    {}
+
+    // class should be movable only
+    json_ref(json_ref&&) noexcept = default;
+    json_ref(const json_ref&) = delete;
+    json_ref& operator=(const json_ref&) = delete;
+    json_ref& operator=(json_ref&&) = delete;
+    ~json_ref() = default;
+
+    value_type moved_or_copied() const
+    {
+        if (value_ref == nullptr)
+        {
+            return std::move(owned_value);
+        }
+        return *value_ref;
+    }
+
+    value_type const& operator*() const
+    {
+        return value_ref ? *value_ref : owned_value;
+    }
+
+    value_type const* operator->() const
+    {
+        return &** this;
+    }
+
+  private:
+    mutable value_type owned_value = nullptr;
+    value_type const* value_ref = nullptr;
+};
+
+}  // namespace detail
+NLOHMANN_JSON_NAMESPACE_END
+
+// #include <nlohmann/detail/macro_scope.hpp>
+
+// #include <nlohmann/detail/string_concat.hpp>
+
+// #include <nlohmann/detail/string_escape.hpp>
+
+// #include <nlohmann/detail/meta/cpp_future.hpp>
+
+// #include <nlohmann/detail/meta/type_traits.hpp>
+
+// #include <nlohmann/detail/output/binary_writer.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
+
+
+#include <algorithm> // reverse
+#include <array> // array
+#include <map> // map
+#include <cmath> // isnan, isinf
+#include <cstdint> // uint8_t, uint16_t, uint32_t, uint64_t
+#include <cstring> // memcpy
+#include <limits> // numeric_limits
+#include <string> // string
+#include <utility> // move
+#include <vector> // vector
+
+// #include <nlohmann/detail/input/binary_reader.hpp>
+
+// #include <nlohmann/detail/macro_scope.hpp>
+
+// #include <nlohmann/detail/output/output_adapters.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
+
+
+#include <algorithm> // copy
+#include <cstddef> // size_t
+#include <iterator> // back_inserter
+#include <memory> // shared_ptr, make_shared
+#include <string> // basic_string
+#include <vector> // vector
+
+#ifndef JSON_NO_IO
+    #include <ios>      // streamsize
+    #include <ostream>  // basic_ostream
+#endif  // JSON_NO_IO
+
+// #include <nlohmann/detail/macro_scope.hpp>
+
+
+NLOHMANN_JSON_NAMESPACE_BEGIN
+namespace detail
+{
+
+/// abstract output adapter interface
+template<typename CharType> struct output_adapter_protocol
+{
+    virtual void write_character(CharType c) = 0;
+    virtual void write_characters(const CharType* s, std::size_t length) = 0;
+    virtual ~output_adapter_protocol() = default;
+
+    output_adapter_protocol() = default;
+    output_adapter_protocol(const output_adapter_protocol&) = default;
+    output_adapter_protocol(output_adapter_protocol&&) noexcept = default;
+    output_adapter_protocol& operator=(const output_adapter_protocol&) = default;
+    output_adapter_protocol& operator=(output_adapter_protocol&&) noexcept = default;
+};
+
+/// a type to simplify interfaces
+template<typename CharType>
+using output_adapter_t = std::shared_ptr<output_adapter_protocol<CharType>>;
+
+/// output adapter for byte vectors
+template<typename CharType, typename AllocatorType = std::allocator<CharType>>
+class output_vector_adapter : public output_adapter_protocol<CharType>
+{
+  public:
+    explicit output_vector_adapter(std::vector<CharType, AllocatorType>& vec) noexcept
+        : v(vec)
+    {}
+
+    void write_character(CharType c) override
+    {
+        v.push_back(c);
+    }
+
+    JSON_HEDLEY_NON_NULL(2)
+    void write_characters(const CharType* s, std::size_t length) override
+    {
+        v.insert(v.end(), s, s + length);
+    }
+
+  private:
+    std::vector<CharType, AllocatorType>& v;
+};
+
+#ifndef JSON_NO_IO
+/// output adapter for output streams
+template<typename CharType>
+class output_stream_adapter : public output_adapter_protocol<CharType>
+{
+  public:
+    explicit output_stream_adapter(std::basic_ostream<CharType>& s) noexcept
+        : stream(s)
+    {}
+
+    void write_character(CharType c) override
+    {
+        stream.put(c);
+    }
+
+    JSON_HEDLEY_NON_NULL(2)
+    void write_characters(const CharType* s, std::size_t length) override
+    {
+        stream.write(s, static_cast<std::streamsize>(length));
+    }
+
+  private:
+    std::basic_ostream<CharType>& stream;
+};
+#endif  // JSON_NO_IO
+
+/// output adapter for basic_string
+template<typename CharType, typename StringType = std::basic_string<CharType>>
+class output_string_adapter : public output_adapter_protocol<CharType>
+{
+  public:
+    explicit output_string_adapter(StringType& s) noexcept
+        : str(s)
+    {}
+
+    void write_character(CharType c) override
+    {
+        str.push_back(c);
+    }
+
+    JSON_HEDLEY_NON_NULL(2)
+    void write_characters(const CharType* s, std::size_t length) override
+    {
+        str.append(s, length);
+    }
+
+  private:
+    StringType& str;
+};
+
+template<typename CharType, typename StringType = std::basic_string<CharType>>
+class output_adapter
+{
+  public:
+    template<typename AllocatorType = std::allocator<CharType>>
+    output_adapter(std::vector<CharType, AllocatorType>& vec)
+        : oa(std::make_shared<output_vector_adapter<CharType, AllocatorType>>(vec)) {}
+
+#ifndef JSON_NO_IO
+    output_adapter(std::basic_ostream<CharType>& s)
+        : oa(std::make_shared<output_stream_adapter<CharType>>(s)) {}
+#endif  // JSON_NO_IO
+
+    output_adapter(StringType& s)
+        : oa(std::make_shared<output_string_adapter<CharType, StringType>>(s)) {}
+
+    operator output_adapter_t<CharType>()
+    {
+        return oa;
+    }
+
+  private:
+    output_adapter_t<CharType> oa = nullptr;
+};
+
+}  // namespace detail
+NLOHMANN_JSON_NAMESPACE_END
+
+// #include <nlohmann/detail/string_concat.hpp>
+
+
+NLOHMANN_JSON_NAMESPACE_BEGIN
+namespace detail
+{
+
+///////////////////
+// binary writer //
+///////////////////
+
+/*!
+@brief serialization to CBOR and MessagePack values
+*/
+template<typename BasicJsonType, typename CharType>
+class binary_writer
+{
+    using string_t = typename BasicJsonType::string_t;
+    using binary_t = typename BasicJsonType::binary_t;
+    using number_float_t = typename BasicJsonType::number_float_t;
+
+  public:
+    /*!
+    @brief create a binary writer
+
+    @param[in] adapter  output adapter to write to
+    */
+    explicit binary_writer(output_adapter_t<CharType> adapter) : oa(std::move(adapter))
+    {
+        JSON_ASSERT(oa);
+    }
+
+    /*!
+    @param[in] j  JSON value to serialize
+    @pre       j.type() == value_t::object
+    */
+    void write_bson(const BasicJsonType& j)
+    {
+        switch (j.type())
+        {
+            case value_t::object:
+            {
+                write_bson_object(*j.m_data.m_value.object);
+                break;
+            }
+
+            case value_t::null:
+            case value_t::array:
+            case value_t::string:
+            case value_t::boolean:
+            case value_t::number_integer:
+            case value_t::number_unsigned:
+            case value_t::number_float:
+            case value_t::binary:
+            case value_t::discarded:
+            default:
+            {
+                JSON_THROW(type_error::create(317, concat("to serialize to BSON, top-level type must be object, but is ", j.type_name()), &j));
+            }
+        }
+    }
+
+    /*!
+    @param[in] j  JSON value to serialize
+    */
+    void write_cbor(const BasicJsonType& j)
+    {
+        switch (j.type())
+        {
+            case value_t::null:
+            {
+                oa->write_character(to_char_type(0xF6));
+                break;
+            }
+
+            case value_t::boolean:
+            {
+                oa->write_character(j.m_data.m_value.boolean
+                                    ? to_char_type(0xF5)
+                                    : to_char_type(0xF4));
+                break;
+            }
+
+            case value_t::number_integer:
+            {
+                if (j.m_data.m_value.number_integer >= 0)
+                {
+                    // CBOR does not differentiate between positive signed
+                    // integers and unsigned integers. Therefore, we used the
+                    // code from the value_t::number_unsigned case here.
+                    if (j.m_data.m_value.number_integer <= 0x17)
+                    {
+                        write_number(static_cast<std::uint8_t>(j.m_data.m_value.number_integer));
+                    }
+                    else if (j.m_data.m_value.number_integer <= (std::numeric_limits<std::uint8_t>::max)())
+                    {
+                        oa->write_character(to_char_type(0x18));
+                        write_number(static_cast<std::uint8_t>(j.m_data.m_value.number_integer));
+                    }
+                    else if (j.m_data.m_value.number_integer <= (std::numeric_limits<std::uint16_t>::max)())
+                    {
+                        oa->write_character(to_char_type(0x19));
+                        write_number(static_cast<std::uint16_t>(j.m_data.m_value.number_integer));
+                    }
+                    else if (j.m_data.m_value.number_integer <= (std::numeric_limits<std::uint32_t>::max)())
+                    {
+                        oa->write_character(to_char_type(0x1A));
+                        write_number(static_cast<std::uint32_t>(j.m_data.m_value.number_integer));
+                    }
+                    else
+                    {
+                        oa->write_character(to_char_type(0x1B));
+                        write_number(static_cast<std::uint64_t>(j.m_data.m_value.number_integer));
+                    }
+                }
+                else
+                {
+                    // The conversions below encode the sign in the first
+                    // byte, and the value is converted to a positive number.
+                    const auto positive_number = -1 - j.m_data.m_value.number_integer;
+                    if (j.m_data.m_value.number_integer >= -24)
+                    {
+                        write_number(static_cast<std::uint8_t>(0x20 + positive_number));
+                    }
+                    else if (positive_number <= (std::numeric_limits<std::uint8_t>::max)())
+                    {
+                        oa->write_character(to_char_type(0x38));
+                        write_number(static_cast<std::uint8_t>(positive_number));
+                    }
+                    else if (positive_number <= (std::numeric_limits<std::uint16_t>::max)())
+                    {
+                        oa->write_character(to_char_type(0x39));
+                        write_number(static_cast<std::uint16_t>(positive_number));
+                    }
+                    else if (positive_number <= (std::numeric_limits<std::uint32_t>::max)())
+                    {
+                        oa->write_character(to_char_type(0x3A));
+                        write_number(static_cast<std::uint32_t>(positive_number));
+                    }
+                    else
+                    {
+                        oa->write_character(to_char_type(0x3B));
+                        write_number(static_cast<std::uint64_t>(positive_number));
+                    }
+                }
+                break;
+            }
+
+            case value_t::number_unsigned:
+            {
+                if (j.m_data.m_value.number_unsigned <= 0x17)
+                {
+                    write_number(static_cast<std::uint8_t>(j.m_data.m_value.number_unsigned));
+                }
+                else if (j.m_data.m_value.number_unsigned <= (std::numeric_limits<std::uint8_t>::max)())
+                {
+                    oa->write_character(to_char_type(0x18));
+                    write_number(static_cast<std::uint8_t>(j.m_data.m_value.number_unsigned));
+                }
+                else if (j.m_data.m_value.number_unsigned <= (std::numeric_limits<std::uint16_t>::max)())
+                {
+                    oa->write_character(to_char_type(0x19));
+                    write_number(static_cast<std::uint16_t>(j.m_data.m_value.number_unsigned));
+                }
+                else if (j.m_data.m_value.number_unsigned <= (std::numeric_limits<std::uint32_t>::max)())
+                {
+                    oa->write_character(to_char_type(0x1A));
+                    write_number(static_cast<std::uint32_t>(j.m_data.m_value.number_unsigned));
+                }
+                else
+                {
+                    oa->write_character(to_char_type(0x1B));
+                    write_number(static_cast<std::uint64_t>(j.m_data.m_value.number_unsigned));
+                }
+                break;
+            }
+
+            case value_t::number_float:
+            {
+                if (std::isnan(j.m_data.m_value.number_float))
+                {
+                    // NaN is 0xf97e00 in CBOR
+                    oa->write_character(to_char_type(0xF9));
+                    oa->write_character(to_char_type(0x7E));
+                    oa->write_character(to_char_type(0x00));
+                }
+                else if (std::isinf(j.m_data.m_value.number_float))
+                {
+                    // Infinity is 0xf97c00, -Infinity is 0xf9fc00
+                    oa->write_character(to_char_type(0xf9));
+                    oa->write_character(j.m_data.m_value.number_float > 0 ? to_char_type(0x7C) : to_char_type(0xFC));
+                    oa->write_character(to_char_type(0x00));
+                }
+                else
+                {
+                    write_compact_float(j.m_data.m_value.number_float, detail::input_format_t::cbor);
+                }
+                break;
+            }
+
+            case value_t::string:
+            {
+                // step 1: write control byte and the string length
+                const auto N = j.m_data.m_value.string->size();
+                if (N <= 0x17)
+                {
+                    write_number(static_cast<std::uint8_t>(0x60 + N));
+                }
+                else if (N <= (std::numeric_limits<std::uint8_t>::max)())
+                {
+                    oa->write_character(to_char_type(0x78));
+                    write_number(static_cast<std::uint8_t>(N));
+                }
+                else if (N <= (std::numeric_limits<std::uint16_t>::max)())
+                {
+                    oa->write_character(to_char_type(0x79));
+                    write_number(static_cast<std::uint16_t>(N));
+                }
+                else if (N <= (std::numeric_limits<std::uint32_t>::max)())
+                {
+                    oa->write_character(to_char_type(0x7A));
+                    write_number(static_cast<std::uint32_t>(N));
+                }
+                // LCOV_EXCL_START
+                else if (N <= (std::numeric_limits<std::uint64_t>::max)())
+                {
+                    oa->write_character(to_char_type(0x7B));
+                    write_number(static_cast<std::uint64_t>(N));
+                }
+                // LCOV_EXCL_STOP
+
+                // step 2: write the string
+                oa->write_characters(
+                    reinterpret_cast<const CharType*>(j.m_data.m_value.string->c_str()),
+                    j.m_data.m_value.string->size());
+                break;
+            }
+
+            case value_t::array:
+            {
+                // step 1: write control byte and the array size
+                const auto N = j.m_data.m_value.array->size();
+                if (N <= 0x17)
+                {
+                    write_number(static_cast<std::uint8_t>(0x80 + N));
+                }
+                else if (N <= (std::numeric_limits<std::uint8_t>::max)())
+                {
+                    oa->write_character(to_char_type(0x98));
+                    write_number(static_cast<std::uint8_t>(N));
+                }
+                else if (N <= (std::numeric_limits<std::uint16_t>::max)())
+                {
+                    oa->write_character(to_char_type(0x99));
+                    write_number(static_cast<std::uint16_t>(N));
+                }
+                else if (N <= (std::numeric_limits<std::uint32_t>::max)())
+                {
+                    oa->write_character(to_char_type(0x9A));
+                    write_number(static_cast<std::uint32_t>(N));
+                }
+                // LCOV_EXCL_START
+                else if (N <= (std::numeric_limits<std::uint64_t>::max)())
+                {
+                    oa->write_character(to_char_type(0x9B));
+                    write_number(static_cast<std::uint64_t>(N));
+                }
+                // LCOV_EXCL_STOP
+
+                // step 2: write each element
+                for (const auto& el : *j.m_data.m_value.array)
+                {
+                    write_cbor(el);
+                }
+                break;
+            }
+
+            case value_t::binary:
