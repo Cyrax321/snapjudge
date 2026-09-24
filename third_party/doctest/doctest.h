@@ -1777,3 +1777,596 @@ DOCTEST_CLANG_SUPPRESS_WARNING_POP
 
     template <typename L>
     DOCTEST_NOINLINE bool unary_assert(assertType::Enum at, const char* file, int line,
+                                       const char* expr, const DOCTEST_REF_WRAP(L) val) {
+        bool failed = !val;
+
+        if(at & assertType::is_false) //!OCLINT bitwise operator in conditional
+            failed = !failed;
+
+        // ###################################################################################
+        // IF THE DEBUGGER BREAKS HERE - GO 1 LEVEL UP IN THE CALLSTACK FOR THE FAILING ASSERT
+        // THIS IS THE EFFECT OF HAVING 'DOCTEST_CONFIG_SUPER_FAST_ASSERTS' DEFINED
+        // ###################################################################################
+        DOCTEST_ASSERT_OUT_OF_TESTS((DOCTEST_STRINGIFY(val)));
+        DOCTEST_ASSERT_IN_TESTS((DOCTEST_STRINGIFY(val)));
+        return !failed;
+    }
+
+    struct DOCTEST_INTERFACE IExceptionTranslator
+    {
+        DOCTEST_DECLARE_INTERFACE(IExceptionTranslator)
+        virtual bool translate(String&) const = 0;
+    };
+
+    template <typename T>
+    class ExceptionTranslator : public IExceptionTranslator //!OCLINT destructor of virtual class
+    {
+    public:
+        explicit ExceptionTranslator(String (*translateFunction)(T))
+                : m_translateFunction(translateFunction) {}
+
+        bool translate(String& res) const override {
+#ifndef DOCTEST_CONFIG_NO_EXCEPTIONS
+            try {
+                throw; // lgtm [cpp/rethrow-no-exception]
+                // cppcheck-suppress catchExceptionByValue
+            } catch(const T& ex) {
+                res = m_translateFunction(ex); //!OCLINT parameter reassignment
+                return true;
+            } catch(...) {}         //!OCLINT -  empty catch statement
+#endif                              // DOCTEST_CONFIG_NO_EXCEPTIONS
+            static_cast<void>(res); // to silence -Wunused-parameter
+            return false;
+        }
+
+    private:
+        String (*m_translateFunction)(T);
+    };
+
+    DOCTEST_INTERFACE void registerExceptionTranslatorImpl(const IExceptionTranslator* et);
+
+    // ContextScope base class used to allow implementing methods of ContextScope
+    // that don't depend on the template parameter in doctest.cpp.
+    struct DOCTEST_INTERFACE ContextScopeBase : public IContextScope {
+        ContextScopeBase(const ContextScopeBase&) = delete;
+
+        ContextScopeBase& operator=(const ContextScopeBase&) = delete;
+        ContextScopeBase& operator=(ContextScopeBase&&) = delete;
+
+        ~ContextScopeBase() override = default;
+
+    protected:
+        ContextScopeBase();
+        ContextScopeBase(ContextScopeBase&& other) noexcept;
+
+        void destroy();
+        bool need_to_destroy{true};
+    };
+
+    template <typename L> class ContextScope : public ContextScopeBase
+    {
+        L lambda_;
+
+    public:
+        explicit ContextScope(const L &lambda) : lambda_(lambda) {}
+        explicit ContextScope(L&& lambda) : lambda_(static_cast<L&&>(lambda)) { }
+
+        ContextScope(const ContextScope&) = delete;
+        ContextScope(ContextScope&&) noexcept = default;
+
+        ContextScope& operator=(const ContextScope&) = delete;
+        ContextScope& operator=(ContextScope&&) = delete;
+
+        void stringify(std::ostream* s) const override { lambda_(s); }
+
+        ~ContextScope() override {
+            if (need_to_destroy) {
+                destroy();
+            }
+        }
+    };
+
+    struct DOCTEST_INTERFACE MessageBuilder : public MessageData
+    {
+        std::ostream* m_stream;
+        bool          logged = false;
+
+        MessageBuilder(const char* file, int line, assertType::Enum severity);
+
+        MessageBuilder(const MessageBuilder&) = delete;
+        MessageBuilder(MessageBuilder&&) = delete;
+
+        MessageBuilder& operator=(const MessageBuilder&) = delete;
+        MessageBuilder& operator=(MessageBuilder&&) = delete;
+
+        ~MessageBuilder();
+
+        // the preferred way of chaining parameters for stringification
+DOCTEST_MSVC_SUPPRESS_WARNING_WITH_PUSH(4866)
+        template <typename T>
+        MessageBuilder& operator,(const T& in) {
+            *m_stream << (DOCTEST_STRINGIFY(in));
+            return *this;
+        }
+DOCTEST_MSVC_SUPPRESS_WARNING_POP
+
+        // kept here just for backwards-compatibility - the comma operator should be preferred now
+        template <typename T>
+        MessageBuilder& operator<<(const T& in) { return this->operator,(in); }
+
+        // the `,` operator has the lowest operator precedence - if `<<` is used by the user then
+        // the `,` operator will be called last which is not what we want and thus the `*` operator
+        // is used first (has higher operator precedence compared to `<<`) so that we guarantee that
+        // an operator of the MessageBuilder class is called first before the rest of the parameters
+        template <typename T>
+        MessageBuilder& operator*(const T& in) { return this->operator,(in); }
+
+        bool log();
+        void react();
+    };
+
+    template <typename L>
+    ContextScope<L> MakeContextScope(const L &lambda) {
+        return ContextScope<L>(lambda);
+    }
+} // namespace detail
+
+#define DOCTEST_DEFINE_DECORATOR(name, type, def)                                                  \
+    struct name                                                                                    \
+    {                                                                                              \
+        type data;                                                                                 \
+        name(type in = def)                                                                        \
+                : data(in) {}                                                                      \
+        void fill(detail::TestCase& state) const { state.DOCTEST_CAT(m_, name) = data; }           \
+        void fill(detail::TestSuite& state) const { state.DOCTEST_CAT(m_, name) = data; }          \
+    }
+
+DOCTEST_DEFINE_DECORATOR(test_suite, const char*, "");
+DOCTEST_DEFINE_DECORATOR(description, const char*, "");
+DOCTEST_DEFINE_DECORATOR(skip, bool, true);
+DOCTEST_DEFINE_DECORATOR(no_breaks, bool, true);
+DOCTEST_DEFINE_DECORATOR(no_output, bool, true);
+DOCTEST_DEFINE_DECORATOR(timeout, double, 0);
+DOCTEST_DEFINE_DECORATOR(may_fail, bool, true);
+DOCTEST_DEFINE_DECORATOR(should_fail, bool, true);
+DOCTEST_DEFINE_DECORATOR(expected_failures, int, 0);
+
+template <typename T>
+int registerExceptionTranslator(String (*translateFunction)(T)) {
+    DOCTEST_CLANG_SUPPRESS_WARNING_WITH_PUSH("-Wexit-time-destructors")
+    static detail::ExceptionTranslator<T> exceptionTranslator(translateFunction);
+    DOCTEST_CLANG_SUPPRESS_WARNING_POP
+    detail::registerExceptionTranslatorImpl(&exceptionTranslator);
+    return 0;
+}
+
+} // namespace doctest
+
+// in a separate namespace outside of doctest because the DOCTEST_TEST_SUITE macro
+// introduces an anonymous namespace in which getCurrentTestSuite gets overridden
+namespace doctest_detail_test_suite_ns {
+DOCTEST_INTERFACE doctest::detail::TestSuite& getCurrentTestSuite();
+} // namespace doctest_detail_test_suite_ns
+
+namespace doctest {
+#else  // DOCTEST_CONFIG_DISABLE
+template <typename T>
+int registerExceptionTranslator(String (*)(T)) {
+    return 0;
+}
+#endif // DOCTEST_CONFIG_DISABLE
+
+namespace detail {
+    using assert_handler = void (*)(const AssertData&);
+    struct ContextState;
+} // namespace detail
+
+class DOCTEST_INTERFACE Context
+{
+    detail::ContextState* p;
+
+    void parseArgs(int argc, const char* const* argv, bool withDefaults = false);
+
+public:
+    explicit Context(int argc = 0, const char* const* argv = nullptr);
+
+    Context(const Context&) = delete;
+    Context(Context&&) = delete;
+
+    Context& operator=(const Context&) = delete;
+    Context& operator=(Context&&) = delete;
+
+    ~Context(); // NOLINT(performance-trivially-destructible)
+
+    void applyCommandLine(int argc, const char* const* argv);
+
+    void addFilter(const char* filter, const char* value);
+    void clearFilters();
+    void setOption(const char* option, bool value);
+    void setOption(const char* option, int value);
+    void setOption(const char* option, const char* value);
+
+    bool shouldExit();
+
+    void setAsDefaultForAssertsOutOfTestCases();
+
+    void setAssertHandler(detail::assert_handler ah);
+
+    void setCout(std::ostream* out);
+
+    int run();
+};
+
+namespace TestCaseFailureReason {
+    enum Enum
+    {
+        None                     = 0,
+        AssertFailure            = 1,   // an assertion has failed in the test case
+        Exception                = 2,   // test case threw an exception
+        Crash                    = 4,   // a crash...
+        TooManyFailedAsserts     = 8,   // the abort-after option
+        Timeout                  = 16,  // see the timeout decorator
+        ShouldHaveFailedButDidnt = 32,  // see the should_fail decorator
+        ShouldHaveFailedAndDid   = 64,  // see the should_fail decorator
+        DidntFailExactlyNumTimes = 128, // see the expected_failures decorator
+        FailedExactlyNumTimes    = 256, // see the expected_failures decorator
+        CouldHaveFailedAndDid    = 512  // see the may_fail decorator
+    };
+} // namespace TestCaseFailureReason
+
+struct DOCTEST_INTERFACE CurrentTestCaseStats
+{
+    int    numAssertsCurrentTest;
+    int    numAssertsFailedCurrentTest;
+    double seconds;
+    int    failure_flags; // use TestCaseFailureReason::Enum
+    bool   testCaseSuccess;
+};
+
+struct DOCTEST_INTERFACE TestCaseException
+{
+    String error_string;
+    bool   is_crash;
+};
+
+struct DOCTEST_INTERFACE TestRunStats
+{
+    unsigned numTestCases;
+    unsigned numTestCasesPassingFilters;
+    unsigned numTestSuitesPassingFilters;
+    unsigned numTestCasesFailed;
+    int      numAsserts;
+    int      numAssertsFailed;
+};
+
+struct QueryData
+{
+    const TestRunStats*  run_stats = nullptr;
+    const TestCaseData** data      = nullptr;
+    unsigned             num_data  = 0;
+};
+
+struct DOCTEST_INTERFACE IReporter
+{
+    // The constructor has to accept "const ContextOptions&" as a single argument
+    // which has most of the options for the run + a pointer to the stdout stream
+    // Reporter(const ContextOptions& in)
+
+    // called when a query should be reported (listing test cases, printing the version, etc.)
+    virtual void report_query(const QueryData&) = 0;
+
+    // called when the whole test run starts
+    virtual void test_run_start() = 0;
+    // called when the whole test run ends (caching a pointer to the input doesn't make sense here)
+    virtual void test_run_end(const TestRunStats&) = 0;
+
+    // called when a test case is started (safe to cache a pointer to the input)
+    virtual void test_case_start(const TestCaseData&) = 0;
+    // called when a test case is reentered because of unfinished subcases (safe to cache a pointer to the input)
+    virtual void test_case_reenter(const TestCaseData&) = 0;
+    // called when a test case has ended
+    virtual void test_case_end(const CurrentTestCaseStats&) = 0;
+
+    // called when an exception is thrown from the test case (or it crashes)
+    virtual void test_case_exception(const TestCaseException&) = 0;
+
+    // called whenever a subcase is entered (don't cache pointers to the input)
+    virtual void subcase_start(const SubcaseSignature&) = 0;
+    // called whenever a subcase is exited (don't cache pointers to the input)
+    virtual void subcase_end() = 0;
+
+    // called for each assert (don't cache pointers to the input)
+    virtual void log_assert(const AssertData&) = 0;
+    // called for each message (don't cache pointers to the input)
+    virtual void log_message(const MessageData&) = 0;
+
+    // called when a test case is skipped either because it doesn't pass the filters, has a skip decorator
+    // or isn't in the execution range (between first and last) (safe to cache a pointer to the input)
+    virtual void test_case_skipped(const TestCaseData&) = 0;
+
+    DOCTEST_DECLARE_INTERFACE(IReporter)
+
+    // can obtain all currently active contexts and stringify them if one wishes to do so
+    static int                         get_num_active_contexts();
+    static const IContextScope* const* get_active_contexts();
+
+    // can iterate through contexts which have been stringified automatically in their destructors when an exception has been thrown
+    static int           get_num_stringified_contexts();
+    static const String* get_stringified_contexts();
+};
+
+namespace detail {
+    using reporterCreatorFunc =  IReporter* (*)(const ContextOptions&);
+
+    DOCTEST_INTERFACE void registerReporterImpl(const char* name, int prio, reporterCreatorFunc c, bool isReporter);
+
+    template <typename Reporter>
+    IReporter* reporterCreator(const ContextOptions& o) {
+        return new Reporter(o);
+    }
+} // namespace detail
+
+template <typename Reporter>
+int registerReporter(const char* name, int priority, bool isReporter) {
+    detail::registerReporterImpl(name, priority, detail::reporterCreator<Reporter>, isReporter);
+    return 0;
+}
+} // namespace doctest
+
+#ifdef DOCTEST_CONFIG_ASSERTS_RETURN_VALUES
+#define DOCTEST_FUNC_EMPTY [] { return false; }()
+#else
+#define DOCTEST_FUNC_EMPTY (void)0
+#endif
+
+// if registering is not disabled
+#ifndef DOCTEST_CONFIG_DISABLE
+
+#ifdef DOCTEST_CONFIG_ASSERTS_RETURN_VALUES
+#define DOCTEST_FUNC_SCOPE_BEGIN [&]
+#define DOCTEST_FUNC_SCOPE_END ()
+#define DOCTEST_FUNC_SCOPE_RET(v) return v
+#else
+#define DOCTEST_FUNC_SCOPE_BEGIN do
+#define DOCTEST_FUNC_SCOPE_END while(false)
+#define DOCTEST_FUNC_SCOPE_RET(v) (void)0
+#endif
+
+// common code in asserts - for convenience
+#define DOCTEST_ASSERT_LOG_REACT_RETURN(b)                                                         \
+    if(b.log()) DOCTEST_BREAK_INTO_DEBUGGER();                                                     \
+    b.react();                                                                                     \
+    DOCTEST_FUNC_SCOPE_RET(!b.m_failed)
+
+#ifdef DOCTEST_CONFIG_NO_TRY_CATCH_IN_ASSERTS
+#define DOCTEST_WRAP_IN_TRY(x) x;
+#else // DOCTEST_CONFIG_NO_TRY_CATCH_IN_ASSERTS
+#define DOCTEST_WRAP_IN_TRY(x)                                                                     \
+    try {                                                                                          \
+        x;                                                                                         \
+    } catch(...) { DOCTEST_RB.translateException(); }
+#endif // DOCTEST_CONFIG_NO_TRY_CATCH_IN_ASSERTS
+
+#ifdef DOCTEST_CONFIG_VOID_CAST_EXPRESSIONS
+#define DOCTEST_CAST_TO_VOID(...)                                                                  \
+    DOCTEST_GCC_SUPPRESS_WARNING_WITH_PUSH("-Wuseless-cast")                                       \
+    static_cast<void>(__VA_ARGS__);                                                                \
+    DOCTEST_GCC_SUPPRESS_WARNING_POP
+#else // DOCTEST_CONFIG_VOID_CAST_EXPRESSIONS
+#define DOCTEST_CAST_TO_VOID(...) __VA_ARGS__;
+#endif // DOCTEST_CONFIG_VOID_CAST_EXPRESSIONS
+
+// registers the test by initializing a dummy var with a function
+#define DOCTEST_REGISTER_FUNCTION(global_prefix, f, decorators)                                    \
+    global_prefix DOCTEST_GLOBAL_NO_WARNINGS(DOCTEST_ANONYMOUS(DOCTEST_ANON_VAR_), /* NOLINT */    \
+            doctest::detail::regTest(                                                              \
+                    doctest::detail::TestCase(                                                     \
+                            f, __FILE__, __LINE__,                                                 \
+                            doctest_detail_test_suite_ns::getCurrentTestSuite()) *                 \
+                    decorators))
+
+#define DOCTEST_IMPLEMENT_FIXTURE(der, base, func, decorators)                                     \
+    namespace { /* NOLINT */                                                                       \
+        struct der : public base                                                                   \
+        {                                                                                          \
+            void f();                                                                              \
+        };                                                                                         \
+        static DOCTEST_INLINE_NOINLINE void func() {                                               \
+            der v;                                                                                 \
+            v.f();                                                                                 \
+        }                                                                                          \
+        DOCTEST_REGISTER_FUNCTION(DOCTEST_EMPTY, func, decorators)                                 \
+    }                                                                                              \
+    DOCTEST_INLINE_NOINLINE void der::f() // NOLINT(misc-definitions-in-headers)
+
+#define DOCTEST_CREATE_AND_REGISTER_FUNCTION(f, decorators)                                        \
+    static void f();                                                                               \
+    DOCTEST_REGISTER_FUNCTION(DOCTEST_EMPTY, f, decorators)                                        \
+    static void f()
+
+#define DOCTEST_CREATE_AND_REGISTER_FUNCTION_IN_CLASS(f, proxy, decorators)                        \
+    static doctest::detail::funcType proxy() { return f; }                                         \
+    DOCTEST_REGISTER_FUNCTION(inline, proxy(), decorators)                                         \
+    static void f()
+
+// for registering tests
+#define DOCTEST_TEST_CASE(decorators)                                                              \
+    DOCTEST_CREATE_AND_REGISTER_FUNCTION(DOCTEST_ANONYMOUS(DOCTEST_ANON_FUNC_), decorators)
+
+// for registering tests in classes - requires C++17 for inline variables!
+#if DOCTEST_CPLUSPLUS >= 201703L
+#define DOCTEST_TEST_CASE_CLASS(decorators)                                                        \
+    DOCTEST_CREATE_AND_REGISTER_FUNCTION_IN_CLASS(DOCTEST_ANONYMOUS(DOCTEST_ANON_FUNC_),           \
+                                                  DOCTEST_ANONYMOUS(DOCTEST_ANON_PROXY_),          \
+                                                  decorators)
+#else // DOCTEST_TEST_CASE_CLASS
+#define DOCTEST_TEST_CASE_CLASS(...)                                                               \
+    TEST_CASES_CAN_BE_REGISTERED_IN_CLASSES_ONLY_IN_CPP17_MODE_OR_WITH_VS_2017_OR_NEWER
+#endif // DOCTEST_TEST_CASE_CLASS
+
+// for registering tests with a fixture
+#define DOCTEST_TEST_CASE_FIXTURE(c, decorators)                                                   \
+    DOCTEST_IMPLEMENT_FIXTURE(DOCTEST_ANONYMOUS(DOCTEST_ANON_CLASS_), c,                           \
+                              DOCTEST_ANONYMOUS(DOCTEST_ANON_FUNC_), decorators)
+
+// for converting types to strings without the <typeinfo> header and demangling
+#define DOCTEST_TYPE_TO_STRING_AS(str, ...)                                                        \
+    namespace doctest {                                                                            \
+        template <>                                                                                \
+        inline String toString<__VA_ARGS__>() {                                                    \
+            return str;                                                                            \
+        }                                                                                          \
+    }                                                                                              \
+    static_assert(true, "")
+
+#define DOCTEST_TYPE_TO_STRING(...) DOCTEST_TYPE_TO_STRING_AS(#__VA_ARGS__, __VA_ARGS__)
+
+#define DOCTEST_TEST_CASE_TEMPLATE_DEFINE_IMPL(dec, T, iter, func)                                 \
+    template <typename T>                                                                          \
+    static void func();                                                                            \
+    namespace { /* NOLINT */                                                                       \
+        template <typename Tuple>                                                                  \
+        struct iter;                                                                               \
+        template <typename Type, typename... Rest>                                                 \
+        struct iter<std::tuple<Type, Rest...>>                                                     \
+        {                                                                                          \
+            iter(const char* file, unsigned line, int index) {                                     \
+                doctest::detail::regTest(doctest::detail::TestCase(func<Type>, file, line,         \
+                                            doctest_detail_test_suite_ns::getCurrentTestSuite(),   \
+                                            doctest::toString<Type>(),                             \
+                                            int(line) * 1000 + index)                              \
+                                         * dec);                                                   \
+                iter<std::tuple<Rest...>>(file, line, index + 1);                                  \
+            }                                                                                      \
+        };                                                                                         \
+        template <>                                                                                \
+        struct iter<std::tuple<>>                                                                  \
+        {                                                                                          \
+            iter(const char*, unsigned, int) {}                                                    \
+        };                                                                                         \
+    }                                                                                              \
+    template <typename T>                                                                          \
+    static void func()
+
+#define DOCTEST_TEST_CASE_TEMPLATE_DEFINE(dec, T, id)                                              \
+    DOCTEST_TEST_CASE_TEMPLATE_DEFINE_IMPL(dec, T, DOCTEST_CAT(id, ITERATOR),                      \
+                                           DOCTEST_ANONYMOUS(DOCTEST_ANON_TMP_))
+
+#define DOCTEST_TEST_CASE_TEMPLATE_INSTANTIATE_IMPL(id, anon, ...)                                 \
+    DOCTEST_GLOBAL_NO_WARNINGS(DOCTEST_CAT(anon, DUMMY), /* NOLINT(cert-err58-cpp, fuchsia-statically-constructed-objects) */ \
+        doctest::detail::instantiationHelper(                                                      \
+            DOCTEST_CAT(id, ITERATOR)<__VA_ARGS__>(__FILE__, __LINE__, 0)))
+
+#define DOCTEST_TEST_CASE_TEMPLATE_INVOKE(id, ...)                                                 \
+    DOCTEST_TEST_CASE_TEMPLATE_INSTANTIATE_IMPL(id, DOCTEST_ANONYMOUS(DOCTEST_ANON_TMP_), std::tuple<__VA_ARGS__>) \
+    static_assert(true, "")
+
+#define DOCTEST_TEST_CASE_TEMPLATE_APPLY(id, ...)                                                  \
+    DOCTEST_TEST_CASE_TEMPLATE_INSTANTIATE_IMPL(id, DOCTEST_ANONYMOUS(DOCTEST_ANON_TMP_), __VA_ARGS__) \
+    static_assert(true, "")
+
+#define DOCTEST_TEST_CASE_TEMPLATE_IMPL(dec, T, anon, ...)                                         \
+    DOCTEST_TEST_CASE_TEMPLATE_DEFINE_IMPL(dec, T, DOCTEST_CAT(anon, ITERATOR), anon);             \
+    DOCTEST_TEST_CASE_TEMPLATE_INSTANTIATE_IMPL(anon, anon, std::tuple<__VA_ARGS__>)               \
+    template <typename T>                                                                          \
+    static void anon()
+
+#define DOCTEST_TEST_CASE_TEMPLATE(dec, T, ...)                                                    \
+    DOCTEST_TEST_CASE_TEMPLATE_IMPL(dec, T, DOCTEST_ANONYMOUS(DOCTEST_ANON_TMP_), __VA_ARGS__)
+
+// for subcases
+#define DOCTEST_SUBCASE(name)                                                                      \
+    if(const doctest::detail::Subcase & DOCTEST_ANONYMOUS(DOCTEST_ANON_SUBCASE_) DOCTEST_UNUSED =  \
+               doctest::detail::Subcase(name, __FILE__, __LINE__))
+
+// for grouping tests in test suites by using code blocks
+#define DOCTEST_TEST_SUITE_IMPL(decorators, ns_name)                                               \
+    namespace ns_name { namespace doctest_detail_test_suite_ns {                                   \
+            static DOCTEST_NOINLINE doctest::detail::TestSuite& getCurrentTestSuite() noexcept {   \
+                DOCTEST_MSVC_SUPPRESS_WARNING_WITH_PUSH(4640)                                      \
+                DOCTEST_CLANG_SUPPRESS_WARNING_WITH_PUSH("-Wexit-time-destructors")                \
+                DOCTEST_GCC_SUPPRESS_WARNING_WITH_PUSH("-Wmissing-field-initializers")             \
+                static doctest::detail::TestSuite data{};                                          \
+                static bool                       inited = false;                                  \
+                DOCTEST_MSVC_SUPPRESS_WARNING_POP                                                  \
+                DOCTEST_CLANG_SUPPRESS_WARNING_POP                                                 \
+                DOCTEST_GCC_SUPPRESS_WARNING_POP                                                   \
+                if(!inited) {                                                                      \
+                    data* decorators;                                                              \
+                    inited = true;                                                                 \
+                }                                                                                  \
+                return data;                                                                       \
+            }                                                                                      \
+        }                                                                                          \
+    }                                                                                              \
+    namespace ns_name
+
+#define DOCTEST_TEST_SUITE(decorators)                                                             \
+    DOCTEST_TEST_SUITE_IMPL(decorators, DOCTEST_ANONYMOUS(DOCTEST_ANON_SUITE_))
+
+// for starting a testsuite block
+#define DOCTEST_TEST_SUITE_BEGIN(decorators)                                                       \
+    DOCTEST_GLOBAL_NO_WARNINGS(DOCTEST_ANONYMOUS(DOCTEST_ANON_VAR_), /* NOLINT(cert-err58-cpp) */  \
+            doctest::detail::setTestSuite(doctest::detail::TestSuite() * decorators))              \
+    static_assert(true, "")
+
+// for ending a testsuite block
+#define DOCTEST_TEST_SUITE_END                                                                     \
+    DOCTEST_GLOBAL_NO_WARNINGS(DOCTEST_ANONYMOUS(DOCTEST_ANON_VAR_), /* NOLINT(cert-err58-cpp) */  \
+            doctest::detail::setTestSuite(doctest::detail::TestSuite() * ""))                      \
+    using DOCTEST_ANONYMOUS(DOCTEST_ANON_FOR_SEMICOLON_) = int
+
+// for registering exception translators
+#define DOCTEST_REGISTER_EXCEPTION_TRANSLATOR_IMPL(translatorName, signature)                      \
+    inline doctest::String translatorName(signature);                                              \
+    DOCTEST_GLOBAL_NO_WARNINGS(DOCTEST_ANONYMOUS(DOCTEST_ANON_TRANSLATOR_), /* NOLINT(cert-err58-cpp) */ \
+            doctest::registerExceptionTranslator(translatorName))                                  \
+    doctest::String translatorName(signature)
+
+#define DOCTEST_REGISTER_EXCEPTION_TRANSLATOR(signature)                                           \
+    DOCTEST_REGISTER_EXCEPTION_TRANSLATOR_IMPL(DOCTEST_ANONYMOUS(DOCTEST_ANON_TRANSLATOR_),        \
+                                               signature)
+
+// for registering reporters
+#define DOCTEST_REGISTER_REPORTER(name, priority, reporter)                                        \
+    DOCTEST_GLOBAL_NO_WARNINGS(DOCTEST_ANONYMOUS(DOCTEST_ANON_REPORTER_), /* NOLINT(cert-err58-cpp) */ \
+            doctest::registerReporter<reporter>(name, priority, true))                             \
+    static_assert(true, "")
+
+// for registering listeners
+#define DOCTEST_REGISTER_LISTENER(name, priority, reporter)                                        \
+    DOCTEST_GLOBAL_NO_WARNINGS(DOCTEST_ANONYMOUS(DOCTEST_ANON_REPORTER_), /* NOLINT(cert-err58-cpp) */ \
+            doctest::registerReporter<reporter>(name, priority, false))                            \
+    static_assert(true, "")
+
+// clang-format off
+// for logging - disabling formatting because it's important to have these on 2 separate lines - see PR #557
+#define DOCTEST_INFO(...)                                                                          \
+    DOCTEST_INFO_IMPL(DOCTEST_ANONYMOUS(DOCTEST_CAPTURE_),                                         \
+                      DOCTEST_ANONYMOUS(DOCTEST_CAPTURE_OTHER_),                                   \
+                      __VA_ARGS__)
+// clang-format on
+
+#define DOCTEST_INFO_IMPL(mb_name, s_name, ...)                                       \
+    auto DOCTEST_ANONYMOUS(DOCTEST_CAPTURE_) = doctest::detail::MakeContextScope(                  \
+        [&](std::ostream* s_name) {                                                                \
+        doctest::detail::MessageBuilder mb_name(__FILE__, __LINE__, doctest::assertType::is_warn); \
+        mb_name.m_stream = s_name;                                                                 \
+        mb_name * __VA_ARGS__;                                                                     \
+    })
+
+#define DOCTEST_CAPTURE(x) DOCTEST_INFO(#x " := ", x)
+
+#define DOCTEST_ADD_AT_IMPL(type, file, line, mb, ...)                                             \
+    DOCTEST_FUNC_SCOPE_BEGIN {                                                                     \
+        doctest::detail::MessageBuilder mb(file, line, doctest::assertType::type);                 \
+        mb * __VA_ARGS__;                                                                          \
+        if(mb.log())                                                                               \
+            DOCTEST_BREAK_INTO_DEBUGGER();                                                         \
+        mb.react();                                                                                \
+    } DOCTEST_FUNC_SCOPE_END
+
+// clang-format off
+#define DOCTEST_ADD_MESSAGE_AT(file, line, ...) DOCTEST_ADD_AT_IMPL(is_warn, file, line, DOCTEST_ANONYMOUS(DOCTEST_MESSAGE_), __VA_ARGS__)
+#define DOCTEST_ADD_FAIL_CHECK_AT(file, line, ...) DOCTEST_ADD_AT_IMPL(is_check, file, line, DOCTEST_ANONYMOUS(DOCTEST_MESSAGE_), __VA_ARGS__)
+#define DOCTEST_ADD_FAIL_AT(file, line, ...) DOCTEST_ADD_AT_IMPL(is_require, file, line, DOCTEST_ANONYMOUS(DOCTEST_MESSAGE_), __VA_ARGS__)
