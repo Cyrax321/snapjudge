@@ -591,3 +591,596 @@ public:
 
 private:
     static DOCTEST_CONSTEXPR size_type len  = 24;      //!OCLINT avoid private static members
+    static DOCTEST_CONSTEXPR size_type last = len - 1; //!OCLINT avoid private static members
+
+    struct view // len should be more than sizeof(view) - because of the final byte for flags
+    {
+        char*    ptr;
+        size_type size;
+        size_type capacity;
+    };
+
+    union
+    {
+        char buf[len]; // NOLINT(*-avoid-c-arrays)
+        view data;
+    };
+
+    char* allocate(size_type sz);
+
+    bool isOnStack() const noexcept { return (buf[last] & 128) == 0; }
+    void setOnHeap() noexcept;
+    void setLast(size_type in = last) noexcept;
+    void setSize(size_type sz) noexcept;
+
+    void copy(const String& other);
+
+public:
+    static DOCTEST_CONSTEXPR size_type npos = static_cast<size_type>(-1);
+
+    String() noexcept;
+    ~String();
+
+    // cppcheck-suppress noExplicitConstructor
+    String(const char* in);
+    String(const char* in, size_type in_size);
+
+    String(std::istream& in, size_type in_size);
+
+    String(const String& other);
+    String& operator=(const String& other);
+
+    String& operator+=(const String& other);
+
+    String(String&& other) noexcept;
+    String& operator=(String&& other) noexcept;
+
+    char  operator[](size_type i) const;
+    char& operator[](size_type i);
+
+    // the only functions I'm willing to leave in the interface - available for inlining
+    const char* c_str() const { return const_cast<String*>(this)->c_str(); } // NOLINT
+    char*       c_str() {
+        if (isOnStack()) {
+            return reinterpret_cast<char*>(buf);
+        }
+        return data.ptr;
+    }
+
+    size_type size() const;
+    size_type capacity() const;
+
+    String substr(size_type pos, size_type cnt = npos) &&;
+    String substr(size_type pos, size_type cnt = npos) const &;
+
+    size_type find(char ch, size_type pos = 0) const;
+    size_type rfind(char ch, size_type pos = npos) const;
+
+    int compare(const char* other, bool no_case = false) const;
+    int compare(const String& other, bool no_case = false) const;
+
+friend DOCTEST_INTERFACE std::ostream& operator<<(std::ostream& s, const String& in);
+};
+
+DOCTEST_INTERFACE String operator+(const String& lhs, const String& rhs);
+
+DOCTEST_INTERFACE bool operator==(const String& lhs, const String& rhs);
+DOCTEST_INTERFACE bool operator!=(const String& lhs, const String& rhs);
+DOCTEST_INTERFACE bool operator<(const String& lhs, const String& rhs);
+DOCTEST_INTERFACE bool operator>(const String& lhs, const String& rhs);
+DOCTEST_INTERFACE bool operator<=(const String& lhs, const String& rhs);
+DOCTEST_INTERFACE bool operator>=(const String& lhs, const String& rhs);
+
+class DOCTEST_INTERFACE Contains {
+public:
+    explicit Contains(const String& string);
+
+    bool checkWith(const String& other) const;
+
+    String string;
+};
+
+DOCTEST_INTERFACE String toString(const Contains& in);
+
+DOCTEST_INTERFACE bool operator==(const String& lhs, const Contains& rhs);
+DOCTEST_INTERFACE bool operator==(const Contains& lhs, const String& rhs);
+DOCTEST_INTERFACE bool operator!=(const String& lhs, const Contains& rhs);
+DOCTEST_INTERFACE bool operator!=(const Contains& lhs, const String& rhs);
+
+namespace Color {
+    enum Enum
+    {
+        None = 0,
+        White,
+        Red,
+        Green,
+        Blue,
+        Cyan,
+        Yellow,
+        Grey,
+
+        Bright = 0x10,
+
+        BrightRed   = Bright | Red,
+        BrightGreen = Bright | Green,
+        LightGrey   = Bright | Grey,
+        BrightWhite = Bright | White
+    };
+
+    DOCTEST_INTERFACE std::ostream& operator<<(std::ostream& s, Color::Enum code);
+} // namespace Color
+
+namespace assertType {
+    enum Enum
+    {
+        // macro traits
+
+        is_warn    = 1,
+        is_check   = 2 * is_warn,
+        is_require = 2 * is_check,
+
+        is_normal      = 2 * is_require,
+        is_throws      = 2 * is_normal,
+        is_throws_as   = 2 * is_throws,
+        is_throws_with = 2 * is_throws_as,
+        is_nothrow     = 2 * is_throws_with,
+
+        is_false = 2 * is_nothrow,
+        is_unary = 2 * is_false, // not checked anywhere - used just to distinguish the types
+
+        is_eq = 2 * is_unary,
+        is_ne = 2 * is_eq,
+
+        is_lt = 2 * is_ne,
+        is_gt = 2 * is_lt,
+
+        is_ge = 2 * is_gt,
+        is_le = 2 * is_ge,
+
+        // macro types
+
+        DT_WARN    = is_normal | is_warn,
+        DT_CHECK   = is_normal | is_check,
+        DT_REQUIRE = is_normal | is_require,
+
+        DT_WARN_FALSE    = is_normal | is_false | is_warn,
+        DT_CHECK_FALSE   = is_normal | is_false | is_check,
+        DT_REQUIRE_FALSE = is_normal | is_false | is_require,
+
+        DT_WARN_THROWS    = is_throws | is_warn,
+        DT_CHECK_THROWS   = is_throws | is_check,
+        DT_REQUIRE_THROWS = is_throws | is_require,
+
+        DT_WARN_THROWS_AS    = is_throws_as | is_warn,
+        DT_CHECK_THROWS_AS   = is_throws_as | is_check,
+        DT_REQUIRE_THROWS_AS = is_throws_as | is_require,
+
+        DT_WARN_THROWS_WITH    = is_throws_with | is_warn,
+        DT_CHECK_THROWS_WITH   = is_throws_with | is_check,
+        DT_REQUIRE_THROWS_WITH = is_throws_with | is_require,
+
+        DT_WARN_THROWS_WITH_AS    = is_throws_with | is_throws_as | is_warn,
+        DT_CHECK_THROWS_WITH_AS   = is_throws_with | is_throws_as | is_check,
+        DT_REQUIRE_THROWS_WITH_AS = is_throws_with | is_throws_as | is_require,
+
+        DT_WARN_NOTHROW    = is_nothrow | is_warn,
+        DT_CHECK_NOTHROW   = is_nothrow | is_check,
+        DT_REQUIRE_NOTHROW = is_nothrow | is_require,
+
+        DT_WARN_EQ    = is_normal | is_eq | is_warn,
+        DT_CHECK_EQ   = is_normal | is_eq | is_check,
+        DT_REQUIRE_EQ = is_normal | is_eq | is_require,
+
+        DT_WARN_NE    = is_normal | is_ne | is_warn,
+        DT_CHECK_NE   = is_normal | is_ne | is_check,
+        DT_REQUIRE_NE = is_normal | is_ne | is_require,
+
+        DT_WARN_GT    = is_normal | is_gt | is_warn,
+        DT_CHECK_GT   = is_normal | is_gt | is_check,
+        DT_REQUIRE_GT = is_normal | is_gt | is_require,
+
+        DT_WARN_LT    = is_normal | is_lt | is_warn,
+        DT_CHECK_LT   = is_normal | is_lt | is_check,
+        DT_REQUIRE_LT = is_normal | is_lt | is_require,
+
+        DT_WARN_GE    = is_normal | is_ge | is_warn,
+        DT_CHECK_GE   = is_normal | is_ge | is_check,
+        DT_REQUIRE_GE = is_normal | is_ge | is_require,
+
+        DT_WARN_LE    = is_normal | is_le | is_warn,
+        DT_CHECK_LE   = is_normal | is_le | is_check,
+        DT_REQUIRE_LE = is_normal | is_le | is_require,
+
+        DT_WARN_UNARY    = is_normal | is_unary | is_warn,
+        DT_CHECK_UNARY   = is_normal | is_unary | is_check,
+        DT_REQUIRE_UNARY = is_normal | is_unary | is_require,
+
+        DT_WARN_UNARY_FALSE    = is_normal | is_false | is_unary | is_warn,
+        DT_CHECK_UNARY_FALSE   = is_normal | is_false | is_unary | is_check,
+        DT_REQUIRE_UNARY_FALSE = is_normal | is_false | is_unary | is_require,
+    };
+} // namespace assertType
+
+DOCTEST_INTERFACE const char* assertString(assertType::Enum at);
+DOCTEST_INTERFACE const char* failureString(assertType::Enum at);
+DOCTEST_INTERFACE const char* skipPathFromFilename(const char* file);
+
+struct DOCTEST_INTERFACE TestCaseData
+{
+    String      m_file;       // the file in which the test was registered (using String - see #350)
+    unsigned    m_line;       // the line where the test was registered
+    const char* m_name;       // name of the test case
+    const char* m_test_suite; // the test suite in which the test was added
+    const char* m_description;
+    bool        m_skip;
+    bool        m_no_breaks;
+    bool        m_no_output;
+    bool        m_may_fail;
+    bool        m_should_fail;
+    int         m_expected_failures;
+    double      m_timeout;
+};
+
+struct DOCTEST_INTERFACE AssertData
+{
+    // common - for all asserts
+    const TestCaseData* m_test_case;
+    assertType::Enum    m_at;
+    const char*         m_file;
+    int                 m_line;
+    const char*         m_expr;
+    bool                m_failed;
+
+    // exception-related - for all asserts
+    bool   m_threw;
+    String m_exception;
+
+    // for normal asserts
+    String m_decomp;
+
+    // for specific exception-related asserts
+    bool           m_threw_as;
+    const char*    m_exception_type;
+
+    class DOCTEST_INTERFACE StringContains {
+        private:
+            Contains content;
+            bool isContains;
+
+        public:
+            StringContains(const String& str) : content(str), isContains(false) { }
+            StringContains(Contains cntn) : content(static_cast<Contains&&>(cntn)), isContains(true) { }
+
+            bool check(const String& str) { return isContains ? (content == str) : (content.string == str); }
+
+            operator const String&() const { return content.string; }
+
+            const char* c_str() const { return content.string.c_str(); }
+    } m_exception_string;
+
+    AssertData(assertType::Enum at, const char* file, int line, const char* expr,
+        const char* exception_type, const StringContains& exception_string);
+};
+
+struct DOCTEST_INTERFACE MessageData
+{
+    String           m_string;
+    const char*      m_file;
+    int              m_line;
+    assertType::Enum m_severity;
+};
+
+struct DOCTEST_INTERFACE SubcaseSignature
+{
+    String      m_name;
+    const char* m_file;
+    int         m_line;
+
+    bool operator==(const SubcaseSignature& other) const;
+    bool operator<(const SubcaseSignature& other) const;
+};
+
+struct DOCTEST_INTERFACE IContextScope
+{
+    DOCTEST_DECLARE_INTERFACE(IContextScope)
+    virtual void stringify(std::ostream*) const = 0;
+};
+
+namespace detail {
+    struct DOCTEST_INTERFACE TestCase;
+} // namespace detail
+
+struct ContextOptions //!OCLINT too many fields
+{
+    std::ostream* cout = nullptr; // stdout stream
+    String        binary_name;    // the test binary name
+
+    const detail::TestCase* currentTest = nullptr;
+
+    // == parameters from the command line
+    String   out;       // output filename
+    String   order_by;  // how tests should be ordered
+    unsigned rand_seed; // the seed for rand ordering
+
+    unsigned first; // the first (matching) test to be executed
+    unsigned last;  // the last (matching) test to be executed
+
+    int abort_after;           // stop tests after this many failed assertions
+    int subcase_filter_levels; // apply the subcase filters for the first N levels
+
+    bool success;              // include successful assertions in output
+    bool case_sensitive;       // if filtering should be case sensitive
+    bool exit;                 // if the program should be exited after the tests are ran/whatever
+    bool duration;             // print the time duration of each test case
+    bool minimal;              // minimal console output (only test failures)
+    bool quiet;                // no console output
+    bool no_throw;             // to skip exceptions-related assertion macros
+    bool no_exitcode;          // if the framework should return 0 as the exitcode
+    bool no_run;               // to not run the tests at all (can be done with an "*" exclude)
+    bool no_intro;             // to not print the intro of the framework
+    bool no_version;           // to not print the version of the framework
+    bool no_colors;            // if output to the console should be colorized
+    bool force_colors;         // forces the use of colors even when a tty cannot be detected
+    bool no_breaks;            // to not break into the debugger
+    bool no_skip;              // don't skip test cases which are marked to be skipped
+    bool gnu_file_line;        // if line numbers should be surrounded with :x: and not (x):
+    bool no_path_in_filenames; // if the path to files should be removed from the output
+    bool no_line_numbers;      // if source code line numbers should be omitted from the output
+    bool no_debug_output;      // no output in the debug console when a debugger is attached
+    bool no_skipped_summary;   // don't print "skipped" in the summary !!! UNDOCUMENTED !!!
+    bool no_time_in_output;    // omit any time/timestamps from output !!! UNDOCUMENTED !!!
+
+    bool help;             // to print the help
+    bool version;          // to print the version
+    bool count;            // if only the count of matching tests is to be retrieved
+    bool list_test_cases;  // to list all tests matching the filters
+    bool list_test_suites; // to list all suites matching the filters
+    bool list_reporters;   // lists all registered reporters
+};
+
+namespace detail {
+    namespace types {
+#ifdef DOCTEST_CONFIG_INCLUDE_TYPE_TRAITS
+        using namespace std;
+#else
+        template <bool COND, typename T = void>
+        struct enable_if { };
+
+        template <typename T>
+        struct enable_if<true, T> { using type = T; };
+
+        struct true_type { static DOCTEST_CONSTEXPR bool value = true; };
+        struct false_type { static DOCTEST_CONSTEXPR bool value = false; };
+
+        template <typename T> struct remove_reference { using type = T; };
+        template <typename T> struct remove_reference<T&> { using type = T; };
+        template <typename T> struct remove_reference<T&&> { using type = T; };
+
+        template <typename T> struct is_rvalue_reference : false_type { };
+        template <typename T> struct is_rvalue_reference<T&&> : true_type { };
+
+        template<typename T> struct remove_const { using type = T; };
+        template <typename T> struct remove_const<const T> { using type = T; };
+
+        // Compiler intrinsics
+        template <typename T> struct is_enum { static DOCTEST_CONSTEXPR bool value = __is_enum(T); };
+        template <typename T> struct underlying_type { using type = __underlying_type(T); };
+
+        template <typename T> struct is_pointer : false_type { };
+        template <typename T> struct is_pointer<T*> : true_type { };
+
+        template <typename T> struct is_array : false_type { };
+        // NOLINTNEXTLINE(*-avoid-c-arrays)
+        template <typename T, size_t SIZE> struct is_array<T[SIZE]> : true_type { };
+#endif
+    }
+
+    // <utility>
+    template <typename T>
+    T&& declval();
+
+    template <class T>
+    DOCTEST_CONSTEXPR_FUNC T&& forward(typename types::remove_reference<T>::type& t) DOCTEST_NOEXCEPT {
+        return static_cast<T&&>(t);
+    }
+
+    template <class T>
+    DOCTEST_CONSTEXPR_FUNC T&& forward(typename types::remove_reference<T>::type&& t) DOCTEST_NOEXCEPT {
+        return static_cast<T&&>(t);
+    }
+
+    template <typename T>
+    struct deferred_false : types::false_type { };
+
+// MSVS 2015 :(
+#if !DOCTEST_CLANG && defined(_MSC_VER) && _MSC_VER <= 1900
+    template <typename T, typename = void>
+    struct has_global_insertion_operator : types::false_type { };
+
+    template <typename T>
+    struct has_global_insertion_operator<T, decltype(::operator<<(declval<std::ostream&>(), declval<const T&>()), void())> : types::true_type { };
+
+    template <typename T, typename = void>
+    struct has_insertion_operator { static DOCTEST_CONSTEXPR bool value = has_global_insertion_operator<T>::value; };
+
+    template <typename T, bool global>
+    struct insert_hack;
+
+    template <typename T>
+    struct insert_hack<T, true> {
+        static void insert(std::ostream& os, const T& t) { ::operator<<(os, t); }
+    };
+
+    template <typename T>
+    struct insert_hack<T, false> {
+        static void insert(std::ostream& os, const T& t) { operator<<(os, t); }
+    };
+
+    template <typename T>
+    using insert_hack_t = insert_hack<T, has_global_insertion_operator<T>::value>;
+#else
+    template <typename T, typename = void>
+    struct has_insertion_operator : types::false_type { };
+#endif
+
+    template <typename T>
+    struct has_insertion_operator<T, decltype(operator<<(declval<std::ostream&>(), declval<const T&>()), void())> : types::true_type { };
+
+    template <typename T>
+    struct should_stringify_as_underlying_type {
+        static DOCTEST_CONSTEXPR bool value = detail::types::is_enum<T>::value && !doctest::detail::has_insertion_operator<T>::value;
+    };
+
+    DOCTEST_INTERFACE std::ostream* tlssPush();
+    DOCTEST_INTERFACE String tlssPop();
+
+    template <bool C>
+    struct StringMakerBase {
+        template <typename T>
+        static String convert(const DOCTEST_REF_WRAP(T)) {
+#ifdef DOCTEST_CONFIG_REQUIRE_STRINGIFICATION_FOR_ALL_USED_TYPES
+            static_assert(deferred_false<T>::value, "No stringification detected for type T. See string conversion manual");
+#endif
+            return "{?}";
+        }
+    };
+
+    template <typename T>
+    struct filldata;
+
+    template <typename T>
+    void filloss(std::ostream* stream, const T& in) {
+        filldata<T>::fill(stream, in);
+    }
+
+    template <typename T, size_t N>
+    void filloss(std::ostream* stream, const T (&in)[N]) { // NOLINT(*-avoid-c-arrays)
+        // T[N], T(&)[N], T(&&)[N] have same behaviour.
+        // Hence remove reference.
+        filloss<typename types::remove_reference<decltype(in)>::type>(stream, in);
+    }
+
+    template <typename T>
+    String toStream(const T& in) {
+        std::ostream* stream = tlssPush();
+        filloss(stream, in);
+        return tlssPop();
+    }
+
+    template <>
+    struct StringMakerBase<true> {
+        template <typename T>
+        static String convert(const DOCTEST_REF_WRAP(T) in) {
+            return toStream(in);
+        }
+    };
+} // namespace detail
+
+template <typename T>
+struct StringMaker : public detail::StringMakerBase<
+    detail::has_insertion_operator<T>::value || detail::types::is_pointer<T>::value || detail::types::is_array<T>::value>
+{};
+
+#ifndef DOCTEST_STRINGIFY
+#ifdef DOCTEST_CONFIG_DOUBLE_STRINGIFY
+#define DOCTEST_STRINGIFY(...) toString(toString(__VA_ARGS__))
+#else
+#define DOCTEST_STRINGIFY(...) toString(__VA_ARGS__)
+#endif
+#endif
+
+template <typename T>
+String toString() {
+#if DOCTEST_CLANG == 0 && DOCTEST_GCC == 0 && DOCTEST_ICC == 0
+    String ret = __FUNCSIG__; // class doctest::String __cdecl doctest::toString<TYPE>(void)
+    String::size_type beginPos = ret.find('<');
+    return ret.substr(beginPos + 1, ret.size() - beginPos - static_cast<String::size_type>(sizeof(">(void)")));
+#else
+    String ret = __PRETTY_FUNCTION__; // doctest::String toString() [with T = TYPE]
+    String::size_type begin = ret.find('=') + 2;
+    return ret.substr(begin, ret.size() - begin - 1);
+#endif
+}
+
+template <typename T, typename detail::types::enable_if<!detail::should_stringify_as_underlying_type<T>::value, bool>::type = true>
+String toString(const DOCTEST_REF_WRAP(T) value) {
+    return StringMaker<T>::convert(value);
+}
+
+#ifdef DOCTEST_CONFIG_TREAT_CHAR_STAR_AS_STRING
+DOCTEST_INTERFACE String toString(const char* in);
+#endif // DOCTEST_CONFIG_TREAT_CHAR_STAR_AS_STRING
+
+#if DOCTEST_MSVC >= DOCTEST_COMPILER(19, 20, 0)
+// see this issue on why this is needed: https://github.com/doctest/doctest/issues/183
+DOCTEST_INTERFACE String toString(const std::string& in);
+#endif // VS 2019
+
+DOCTEST_INTERFACE String toString(String in);
+
+DOCTEST_INTERFACE String toString(std::nullptr_t);
+
+DOCTEST_INTERFACE String toString(bool in);
+
+DOCTEST_INTERFACE String toString(float in);
+DOCTEST_INTERFACE String toString(double in);
+DOCTEST_INTERFACE String toString(double long in);
+
+DOCTEST_INTERFACE String toString(char in);
+DOCTEST_INTERFACE String toString(char signed in);
+DOCTEST_INTERFACE String toString(char unsigned in);
+DOCTEST_INTERFACE String toString(short in);
+DOCTEST_INTERFACE String toString(short unsigned in);
+DOCTEST_INTERFACE String toString(signed in);
+DOCTEST_INTERFACE String toString(unsigned in);
+DOCTEST_INTERFACE String toString(long in);
+DOCTEST_INTERFACE String toString(long unsigned in);
+DOCTEST_INTERFACE String toString(long long in);
+DOCTEST_INTERFACE String toString(long long unsigned in);
+
+template <typename T, typename detail::types::enable_if<detail::should_stringify_as_underlying_type<T>::value, bool>::type = true>
+String toString(const DOCTEST_REF_WRAP(T) value) {
+    using UT = typename detail::types::underlying_type<T>::type;
+    return (DOCTEST_STRINGIFY(static_cast<UT>(value)));
+}
+
+namespace detail {
+    template <typename T>
+    struct filldata
+    {
+        static void fill(std::ostream* stream, const T& in) {
+#if defined(_MSC_VER) && _MSC_VER <= 1900
+        insert_hack_t<T>::insert(*stream, in);
+#else
+        operator<<(*stream, in);
+#endif
+        }
+    };
+
+DOCTEST_MSVC_SUPPRESS_WARNING_WITH_PUSH(4866)
+// NOLINTBEGIN(*-avoid-c-arrays)
+    template <typename T, size_t N>
+    struct filldata<T[N]> {
+        static void fill(std::ostream* stream, const T(&in)[N]) {
+            *stream << "[";
+            for (size_t i = 0; i < N; i++) {
+                if (i != 0) { *stream << ", "; }
+                *stream << (DOCTEST_STRINGIFY(in[i]));
+            }
+            *stream << "]";
+        }
+    };
+// NOLINTEND(*-avoid-c-arrays)
+DOCTEST_MSVC_SUPPRESS_WARNING_POP
+
+    // Specialized since we don't want the terminating null byte!
+// NOLINTBEGIN(*-avoid-c-arrays)
+    template <size_t N>
+    struct filldata<const char[N]> {
+        static void fill(std::ostream* stream, const char (&in)[N]) {
+            *stream << String(in, in[N - 1] ? N : N - 1);
+        } // NOLINT(clang-analyzer-cplusplus.NewDeleteLeaks)
+    };
+// NOLINTEND(*-avoid-c-arrays)
+
+    template <>
