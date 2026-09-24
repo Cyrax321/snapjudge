@@ -2398,3 +2398,603 @@ public:
   gzip_decompressor();
   ~gzip_decompressor() override;
 
+  bool is_valid() const override;
+
+  bool decompress(const char *data, size_t data_length,
+                  Callback callback) override;
+
+private:
+  bool is_valid_ = false;
+  z_stream strm_;
+};
+#endif
+
+#ifdef CPPHTTPLIB_BROTLI_SUPPORT
+class brotli_compressor final : public compressor {
+public:
+  brotli_compressor();
+  ~brotli_compressor();
+
+  bool compress(const char *data, size_t data_length, bool last,
+                Callback callback) override;
+
+private:
+  BrotliEncoderState *state_ = nullptr;
+};
+
+class brotli_decompressor final : public decompressor {
+public:
+  brotli_decompressor();
+  ~brotli_decompressor();
+
+  bool is_valid() const override;
+
+  bool decompress(const char *data, size_t data_length,
+                  Callback callback) override;
+
+private:
+  BrotliDecoderResult decoder_r;
+  BrotliDecoderState *decoder_s = nullptr;
+};
+#endif
+
+// NOTE: until the read size reaches `fixed_buffer_size`, use `fixed_buffer`
+// to store data. The call can set memory on stack for performance.
+class stream_line_reader {
+public:
+  stream_line_reader(Stream &strm, char *fixed_buffer,
+                     size_t fixed_buffer_size);
+  const char *ptr() const;
+  size_t size() const;
+  bool end_with_crlf() const;
+  bool getline();
+
+private:
+  void append(char c);
+
+  Stream &strm_;
+  char *fixed_buffer_;
+  const size_t fixed_buffer_size_;
+  size_t fixed_buffer_used_size_ = 0;
+  std::string glowable_buffer_;
+};
+
+class mmap {
+public:
+  mmap(const char *path);
+  ~mmap();
+
+  bool open(const char *path);
+  void close();
+
+  bool is_open() const;
+  size_t size() const;
+  const char *data() const;
+
+private:
+#if defined(_WIN32)
+  HANDLE hFile_ = NULL;
+  HANDLE hMapping_ = NULL;
+#else
+  int fd_ = -1;
+#endif
+  size_t size_ = 0;
+  void *addr_ = nullptr;
+  bool is_open_empty_file = false;
+};
+
+} // namespace detail
+
+// ----------------------------------------------------------------------------
+
+/*
+ * Implementation that will be part of the .cc file if split into .h + .cc.
+ */
+
+namespace detail {
+
+inline bool is_hex(char c, int &v) {
+  if (0x20 <= c && isdigit(c)) {
+    v = c - '0';
+    return true;
+  } else if ('A' <= c && c <= 'F') {
+    v = c - 'A' + 10;
+    return true;
+  } else if ('a' <= c && c <= 'f') {
+    v = c - 'a' + 10;
+    return true;
+  }
+  return false;
+}
+
+inline bool from_hex_to_i(const std::string &s, size_t i, size_t cnt,
+                          int &val) {
+  if (i >= s.size()) { return false; }
+
+  val = 0;
+  for (; cnt; i++, cnt--) {
+    if (!s[i]) { return false; }
+    auto v = 0;
+    if (is_hex(s[i], v)) {
+      val = val * 16 + v;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
+inline std::string from_i_to_hex(size_t n) {
+  static const auto charset = "0123456789abcdef";
+  std::string ret;
+  do {
+    ret = charset[n & 15] + ret;
+    n >>= 4;
+  } while (n > 0);
+  return ret;
+}
+
+inline size_t to_utf8(int code, char *buff) {
+  if (code < 0x0080) {
+    buff[0] = static_cast<char>(code & 0x7F);
+    return 1;
+  } else if (code < 0x0800) {
+    buff[0] = static_cast<char>(0xC0 | ((code >> 6) & 0x1F));
+    buff[1] = static_cast<char>(0x80 | (code & 0x3F));
+    return 2;
+  } else if (code < 0xD800) {
+    buff[0] = static_cast<char>(0xE0 | ((code >> 12) & 0xF));
+    buff[1] = static_cast<char>(0x80 | ((code >> 6) & 0x3F));
+    buff[2] = static_cast<char>(0x80 | (code & 0x3F));
+    return 3;
+  } else if (code < 0xE000) { // D800 - DFFF is invalid...
+    return 0;
+  } else if (code < 0x10000) {
+    buff[0] = static_cast<char>(0xE0 | ((code >> 12) & 0xF));
+    buff[1] = static_cast<char>(0x80 | ((code >> 6) & 0x3F));
+    buff[2] = static_cast<char>(0x80 | (code & 0x3F));
+    return 3;
+  } else if (code < 0x110000) {
+    buff[0] = static_cast<char>(0xF0 | ((code >> 18) & 0x7));
+    buff[1] = static_cast<char>(0x80 | ((code >> 12) & 0x3F));
+    buff[2] = static_cast<char>(0x80 | ((code >> 6) & 0x3F));
+    buff[3] = static_cast<char>(0x80 | (code & 0x3F));
+    return 4;
+  }
+
+  // NOTREACHED
+  return 0;
+}
+
+// NOTE: This code came up with the following stackoverflow post:
+// https://stackoverflow.com/questions/180947/base64-decode-snippet-in-c
+inline std::string base64_encode(const std::string &in) {
+  static const auto lookup =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+  std::string out;
+  out.reserve(in.size());
+
+  auto val = 0;
+  auto valb = -6;
+
+  for (auto c : in) {
+    val = (val << 8) + static_cast<uint8_t>(c);
+    valb += 8;
+    while (valb >= 0) {
+      out.push_back(lookup[(val >> valb) & 0x3F]);
+      valb -= 6;
+    }
+  }
+
+  if (valb > -6) { out.push_back(lookup[((val << 8) >> (valb + 8)) & 0x3F]); }
+
+  while (out.size() % 4) {
+    out.push_back('=');
+  }
+
+  return out;
+}
+
+inline bool is_valid_path(const std::string &path) {
+  size_t level = 0;
+  size_t i = 0;
+
+  // Skip slash
+  while (i < path.size() && path[i] == '/') {
+    i++;
+  }
+
+  while (i < path.size()) {
+    // Read component
+    auto beg = i;
+    while (i < path.size() && path[i] != '/') {
+      if (path[i] == '\0') {
+        return false;
+      } else if (path[i] == '\\') {
+        return false;
+      }
+      i++;
+    }
+
+    auto len = i - beg;
+    assert(len > 0);
+
+    if (!path.compare(beg, len, ".")) {
+      ;
+    } else if (!path.compare(beg, len, "..")) {
+      if (level == 0) { return false; }
+      level--;
+    } else {
+      level++;
+    }
+
+    // Skip slash
+    while (i < path.size() && path[i] == '/') {
+      i++;
+    }
+  }
+
+  return true;
+}
+
+inline FileStat::FileStat(const std::string &path) {
+  ret_ = stat(path.c_str(), &st_);
+}
+inline bool FileStat::is_file() const {
+  return ret_ >= 0 && S_ISREG(st_.st_mode);
+}
+inline bool FileStat::is_dir() const {
+  return ret_ >= 0 && S_ISDIR(st_.st_mode);
+}
+
+inline std::string encode_query_param(const std::string &value) {
+  std::ostringstream escaped;
+  escaped.fill('0');
+  escaped << std::hex;
+
+  for (auto c : value) {
+    if (std::isalnum(static_cast<uint8_t>(c)) || c == '-' || c == '_' ||
+        c == '.' || c == '!' || c == '~' || c == '*' || c == '\'' || c == '(' ||
+        c == ')') {
+      escaped << c;
+    } else {
+      escaped << std::uppercase;
+      escaped << '%' << std::setw(2)
+              << static_cast<int>(static_cast<unsigned char>(c));
+      escaped << std::nouppercase;
+    }
+  }
+
+  return escaped.str();
+}
+
+inline std::string encode_url(const std::string &s) {
+  std::string result;
+  result.reserve(s.size());
+
+  for (size_t i = 0; s[i]; i++) {
+    switch (s[i]) {
+    case ' ': result += "%20"; break;
+    case '+': result += "%2B"; break;
+    case '\r': result += "%0D"; break;
+    case '\n': result += "%0A"; break;
+    case '\'': result += "%27"; break;
+    case ',': result += "%2C"; break;
+    // case ':': result += "%3A"; break; // ok? probably...
+    case ';': result += "%3B"; break;
+    default:
+      auto c = static_cast<uint8_t>(s[i]);
+      if (c >= 0x80) {
+        result += '%';
+        char hex[4];
+        auto len = snprintf(hex, sizeof(hex) - 1, "%02X", c);
+        assert(len == 2);
+        result.append(hex, static_cast<size_t>(len));
+      } else {
+        result += s[i];
+      }
+      break;
+    }
+  }
+
+  return result;
+}
+
+inline std::string decode_url(const std::string &s,
+                              bool convert_plus_to_space) {
+  std::string result;
+
+  for (size_t i = 0; i < s.size(); i++) {
+    if (s[i] == '%' && i + 1 < s.size()) {
+      if (s[i + 1] == 'u') {
+        auto val = 0;
+        if (from_hex_to_i(s, i + 2, 4, val)) {
+          // 4 digits Unicode codes
+          char buff[4];
+          size_t len = to_utf8(val, buff);
+          if (len > 0) { result.append(buff, len); }
+          i += 5; // 'u0000'
+        } else {
+          result += s[i];
+        }
+      } else {
+        auto val = 0;
+        if (from_hex_to_i(s, i + 1, 2, val)) {
+          // 2 digits hex codes
+          result += static_cast<char>(val);
+          i += 2; // '00'
+        } else {
+          result += s[i];
+        }
+      }
+    } else if (convert_plus_to_space && s[i] == '+') {
+      result += ' ';
+    } else {
+      result += s[i];
+    }
+  }
+
+  return result;
+}
+
+inline void read_file(const std::string &path, std::string &out) {
+  std::ifstream fs(path, std::ios_base::binary);
+  fs.seekg(0, std::ios_base::end);
+  auto size = fs.tellg();
+  fs.seekg(0);
+  out.resize(static_cast<size_t>(size));
+  fs.read(&out[0], static_cast<std::streamsize>(size));
+}
+
+inline std::string file_extension(const std::string &path) {
+  std::smatch m;
+  static auto re = std::regex("\\.([a-zA-Z0-9]+)$");
+  if (std::regex_search(path, m, re)) { return m[1].str(); }
+  return std::string();
+}
+
+inline bool is_space_or_tab(char c) { return c == ' ' || c == '\t'; }
+
+inline std::pair<size_t, size_t> trim(const char *b, const char *e, size_t left,
+                                      size_t right) {
+  while (b + left < e && is_space_or_tab(b[left])) {
+    left++;
+  }
+  while (right > 0 && is_space_or_tab(b[right - 1])) {
+    right--;
+  }
+  return std::make_pair(left, right);
+}
+
+inline std::string trim_copy(const std::string &s) {
+  auto r = trim(s.data(), s.data() + s.size(), 0, s.size());
+  return s.substr(r.first, r.second - r.first);
+}
+
+inline std::string trim_double_quotes_copy(const std::string &s) {
+  if (s.length() >= 2 && s.front() == '"' && s.back() == '"') {
+    return s.substr(1, s.size() - 2);
+  }
+  return s;
+}
+
+inline void
+divide(const char *data, std::size_t size, char d,
+       std::function<void(const char *, std::size_t, const char *, std::size_t)>
+           fn) {
+  const auto it = std::find(data, data + size, d);
+  const auto found = static_cast<std::size_t>(it != data + size);
+  const auto lhs_data = data;
+  const auto lhs_size = static_cast<std::size_t>(it - data);
+  const auto rhs_data = it + found;
+  const auto rhs_size = size - lhs_size - found;
+
+  fn(lhs_data, lhs_size, rhs_data, rhs_size);
+}
+
+inline void
+divide(const std::string &str, char d,
+       std::function<void(const char *, std::size_t, const char *, std::size_t)>
+           fn) {
+  divide(str.data(), str.size(), d, std::move(fn));
+}
+
+inline void split(const char *b, const char *e, char d,
+                  std::function<void(const char *, const char *)> fn) {
+  return split(b, e, d, (std::numeric_limits<size_t>::max)(), std::move(fn));
+}
+
+inline void split(const char *b, const char *e, char d, size_t m,
+                  std::function<void(const char *, const char *)> fn) {
+  size_t i = 0;
+  size_t beg = 0;
+  size_t count = 1;
+
+  while (e ? (b + i < e) : (b[i] != '\0')) {
+    if (b[i] == d && count < m) {
+      auto r = trim(b, e, beg, i);
+      if (r.first < r.second) { fn(&b[r.first], &b[r.second]); }
+      beg = i + 1;
+      count++;
+    }
+    i++;
+  }
+
+  if (i) {
+    auto r = trim(b, e, beg, i);
+    if (r.first < r.second) { fn(&b[r.first], &b[r.second]); }
+  }
+}
+
+inline stream_line_reader::stream_line_reader(Stream &strm, char *fixed_buffer,
+                                              size_t fixed_buffer_size)
+    : strm_(strm), fixed_buffer_(fixed_buffer),
+      fixed_buffer_size_(fixed_buffer_size) {}
+
+inline const char *stream_line_reader::ptr() const {
+  if (glowable_buffer_.empty()) {
+    return fixed_buffer_;
+  } else {
+    return glowable_buffer_.data();
+  }
+}
+
+inline size_t stream_line_reader::size() const {
+  if (glowable_buffer_.empty()) {
+    return fixed_buffer_used_size_;
+  } else {
+    return glowable_buffer_.size();
+  }
+}
+
+inline bool stream_line_reader::end_with_crlf() const {
+  auto end = ptr() + size();
+  return size() >= 2 && end[-2] == '\r' && end[-1] == '\n';
+}
+
+inline bool stream_line_reader::getline() {
+  fixed_buffer_used_size_ = 0;
+  glowable_buffer_.clear();
+
+#ifndef CPPHTTPLIB_ALLOW_LF_AS_LINE_TERMINATOR
+  char prev_byte = 0;
+#endif
+
+  for (size_t i = 0;; i++) {
+    char byte;
+    auto n = strm_.read(&byte, 1);
+
+    if (n < 0) {
+      return false;
+    } else if (n == 0) {
+      if (i == 0) {
+        return false;
+      } else {
+        break;
+      }
+    }
+
+    append(byte);
+
+#ifdef CPPHTTPLIB_ALLOW_LF_AS_LINE_TERMINATOR
+    if (byte == '\n') { break; }
+#else
+    if (prev_byte == '\r' && byte == '\n') { break; }
+    prev_byte = byte;
+#endif
+  }
+
+  return true;
+}
+
+inline void stream_line_reader::append(char c) {
+  if (fixed_buffer_used_size_ < fixed_buffer_size_ - 1) {
+    fixed_buffer_[fixed_buffer_used_size_++] = c;
+    fixed_buffer_[fixed_buffer_used_size_] = '\0';
+  } else {
+    if (glowable_buffer_.empty()) {
+      assert(fixed_buffer_[fixed_buffer_used_size_] == '\0');
+      glowable_buffer_.assign(fixed_buffer_, fixed_buffer_used_size_);
+    }
+    glowable_buffer_ += c;
+  }
+}
+
+inline mmap::mmap(const char *path) { open(path); }
+
+inline mmap::~mmap() { close(); }
+
+inline bool mmap::open(const char *path) {
+  close();
+
+#if defined(_WIN32)
+  std::wstring wpath;
+  for (size_t i = 0; i < strlen(path); i++) {
+    wpath += path[i];
+  }
+
+#if _WIN32_WINNT >= _WIN32_WINNT_WIN8
+  hFile_ = ::CreateFile2(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                         OPEN_EXISTING, NULL);
+#else
+  hFile_ = ::CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
+                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+#endif
+
+  if (hFile_ == INVALID_HANDLE_VALUE) { return false; }
+
+  LARGE_INTEGER size{};
+  if (!::GetFileSizeEx(hFile_, &size)) { return false; }
+  // If the following line doesn't compile due to QuadPart, update Windows SDK.
+  // See:
+  // https://github.com/yhirose/cpp-httplib/issues/1903#issuecomment-2316520721
+  if (static_cast<ULONGLONG>(size.QuadPart) >
+      (std::numeric_limits<decltype(size_)>::max)()) {
+    // `size_t` might be 32-bits, on 32-bits Windows.
+    return false;
+  }
+  size_ = static_cast<size_t>(size.QuadPart);
+
+#if _WIN32_WINNT >= _WIN32_WINNT_WIN8
+  hMapping_ =
+      ::CreateFileMappingFromApp(hFile_, NULL, PAGE_READONLY, size_, NULL);
+#else
+  hMapping_ = ::CreateFileMappingW(hFile_, NULL, PAGE_READONLY, 0, 0, NULL);
+#endif
+
+  // Special treatment for an empty file...
+  if (hMapping_ == NULL && size_ == 0) {
+    close();
+    is_open_empty_file = true;
+    return true;
+  }
+
+  if (hMapping_ == NULL) {
+    close();
+    return false;
+  }
+
+#if _WIN32_WINNT >= _WIN32_WINNT_WIN8
+  addr_ = ::MapViewOfFileFromApp(hMapping_, FILE_MAP_READ, 0, 0);
+#else
+  addr_ = ::MapViewOfFile(hMapping_, FILE_MAP_READ, 0, 0, 0);
+#endif
+
+  if (addr_ == nullptr) {
+    close();
+    return false;
+  }
+#else
+  fd_ = ::open(path, O_RDONLY);
+  if (fd_ == -1) { return false; }
+
+  struct stat sb;
+  if (fstat(fd_, &sb) == -1) {
+    close();
+    return false;
+  }
+  size_ = static_cast<size_t>(sb.st_size);
+
+  addr_ = ::mmap(NULL, size_, PROT_READ, MAP_PRIVATE, fd_, 0);
+
+  // Special treatment for an empty file...
+  if (addr_ == MAP_FAILED && size_ == 0) {
+    close();
+    is_open_empty_file = true;
+    return false;
+  }
+#endif
+
+  return true;
+}
+
+inline bool mmap::is_open() const {
+  return is_open_empty_file ? true : addr_ != nullptr;
+}
+
+inline size_t mmap::size() const { return size_; }
+
+inline const char *mmap::data() const {
+  return is_open_empty_file ? "" : static_cast<const char *>(addr_);
+}
