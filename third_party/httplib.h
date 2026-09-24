@@ -7198,3 +7198,603 @@ inline bool Server::process_and_close_socket(socket_t sock) {
   detail::get_remote_ip_and_port(sock, remote_addr, remote_port);
 
   std::string local_addr;
+  int local_port = 0;
+  detail::get_local_ip_and_port(sock, local_addr, local_port);
+
+  auto ret = detail::process_server_socket(
+      svr_sock_, sock, keep_alive_max_count_, keep_alive_timeout_sec_,
+      read_timeout_sec_, read_timeout_usec_, write_timeout_sec_,
+      write_timeout_usec_,
+      [&](Stream &strm, bool close_connection, bool &connection_closed) {
+        return process_request(strm, remote_addr, remote_port, local_addr,
+                               local_port, close_connection, connection_closed,
+                               nullptr);
+      });
+
+  detail::shutdown_socket(sock);
+  detail::close_socket(sock);
+  return ret;
+}
+
+// HTTP client implementation
+inline ClientImpl::ClientImpl(const std::string &host)
+    : ClientImpl(host, 80, std::string(), std::string()) {}
+
+inline ClientImpl::ClientImpl(const std::string &host, int port)
+    : ClientImpl(host, port, std::string(), std::string()) {}
+
+inline ClientImpl::ClientImpl(const std::string &host, int port,
+                              const std::string &client_cert_path,
+                              const std::string &client_key_path)
+    : host_(detail::escape_abstract_namespace_unix_domain(host)), port_(port),
+      host_and_port_(adjust_host_string(host_) + ":" + std::to_string(port)),
+      client_cert_path_(client_cert_path), client_key_path_(client_key_path) {}
+
+inline ClientImpl::~ClientImpl() {
+  std::lock_guard<std::mutex> guard(socket_mutex_);
+  shutdown_socket(socket_);
+  close_socket(socket_);
+}
+
+inline bool ClientImpl::is_valid() const { return true; }
+
+inline void ClientImpl::copy_settings(const ClientImpl &rhs) {
+  client_cert_path_ = rhs.client_cert_path_;
+  client_key_path_ = rhs.client_key_path_;
+  connection_timeout_sec_ = rhs.connection_timeout_sec_;
+  read_timeout_sec_ = rhs.read_timeout_sec_;
+  read_timeout_usec_ = rhs.read_timeout_usec_;
+  write_timeout_sec_ = rhs.write_timeout_sec_;
+  write_timeout_usec_ = rhs.write_timeout_usec_;
+  basic_auth_username_ = rhs.basic_auth_username_;
+  basic_auth_password_ = rhs.basic_auth_password_;
+  bearer_token_auth_token_ = rhs.bearer_token_auth_token_;
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+  digest_auth_username_ = rhs.digest_auth_username_;
+  digest_auth_password_ = rhs.digest_auth_password_;
+#endif
+  keep_alive_ = rhs.keep_alive_;
+  follow_location_ = rhs.follow_location_;
+  url_encode_ = rhs.url_encode_;
+  address_family_ = rhs.address_family_;
+  tcp_nodelay_ = rhs.tcp_nodelay_;
+  ipv6_v6only_ = rhs.ipv6_v6only_;
+  socket_options_ = rhs.socket_options_;
+  compress_ = rhs.compress_;
+  decompress_ = rhs.decompress_;
+  interface_ = rhs.interface_;
+  proxy_host_ = rhs.proxy_host_;
+  proxy_port_ = rhs.proxy_port_;
+  proxy_basic_auth_username_ = rhs.proxy_basic_auth_username_;
+  proxy_basic_auth_password_ = rhs.proxy_basic_auth_password_;
+  proxy_bearer_token_auth_token_ = rhs.proxy_bearer_token_auth_token_;
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+  proxy_digest_auth_username_ = rhs.proxy_digest_auth_username_;
+  proxy_digest_auth_password_ = rhs.proxy_digest_auth_password_;
+#endif
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+  ca_cert_file_path_ = rhs.ca_cert_file_path_;
+  ca_cert_dir_path_ = rhs.ca_cert_dir_path_;
+  ca_cert_store_ = rhs.ca_cert_store_;
+#endif
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+  server_certificate_verification_ = rhs.server_certificate_verification_;
+  server_hostname_verification_ = rhs.server_hostname_verification_;
+  server_certificate_verifier_ = rhs.server_certificate_verifier_;
+#endif
+  logger_ = rhs.logger_;
+}
+
+inline socket_t ClientImpl::create_client_socket(Error &error) const {
+  if (!proxy_host_.empty() && proxy_port_ != -1) {
+    return detail::create_client_socket(
+        proxy_host_, std::string(), proxy_port_, address_family_, tcp_nodelay_,
+        ipv6_v6only_, socket_options_, connection_timeout_sec_,
+        connection_timeout_usec_, read_timeout_sec_, read_timeout_usec_,
+        write_timeout_sec_, write_timeout_usec_, interface_, error);
+  }
+
+  // Check is custom IP specified for host_
+  std::string ip;
+  auto it = addr_map_.find(host_);
+  if (it != addr_map_.end()) { ip = it->second; }
+
+  return detail::create_client_socket(
+      host_, ip, port_, address_family_, tcp_nodelay_, ipv6_v6only_,
+      socket_options_, connection_timeout_sec_, connection_timeout_usec_,
+      read_timeout_sec_, read_timeout_usec_, write_timeout_sec_,
+      write_timeout_usec_, interface_, error);
+}
+
+inline bool ClientImpl::create_and_connect_socket(Socket &socket,
+                                                  Error &error) {
+  auto sock = create_client_socket(error);
+  if (sock == INVALID_SOCKET) { return false; }
+  socket.sock = sock;
+  return true;
+}
+
+inline void ClientImpl::shutdown_ssl(Socket & /*socket*/,
+                                     bool /*shutdown_gracefully*/) {
+  // If there are any requests in flight from threads other than us, then it's
+  // a thread-unsafe race because individual ssl* objects are not thread-safe.
+  assert(socket_requests_in_flight_ == 0 ||
+         socket_requests_are_from_thread_ == std::this_thread::get_id());
+}
+
+inline void ClientImpl::shutdown_socket(Socket &socket) const {
+  if (socket.sock == INVALID_SOCKET) { return; }
+  detail::shutdown_socket(socket.sock);
+}
+
+inline void ClientImpl::close_socket(Socket &socket) {
+  // If there are requests in flight in another thread, usually closing
+  // the socket will be fine and they will simply receive an error when
+  // using the closed socket, but it is still a bug since rarely the OS
+  // may reassign the socket id to be used for a new socket, and then
+  // suddenly they will be operating on a live socket that is different
+  // than the one they intended!
+  assert(socket_requests_in_flight_ == 0 ||
+         socket_requests_are_from_thread_ == std::this_thread::get_id());
+
+  // It is also a bug if this happens while SSL is still active
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+  assert(socket.ssl == nullptr);
+#endif
+  if (socket.sock == INVALID_SOCKET) { return; }
+  detail::close_socket(socket.sock);
+  socket.sock = INVALID_SOCKET;
+}
+
+inline bool ClientImpl::read_response_line(Stream &strm, const Request &req,
+                                           Response &res) const {
+  std::array<char, 2048> buf{};
+
+  detail::stream_line_reader line_reader(strm, buf.data(), buf.size());
+
+  if (!line_reader.getline()) { return false; }
+
+#ifdef CPPHTTPLIB_ALLOW_LF_AS_LINE_TERMINATOR
+  const static std::regex re("(HTTP/1\\.[01]) (\\d{3})(?: (.*?))?\r?\n");
+#else
+  const static std::regex re("(HTTP/1\\.[01]) (\\d{3})(?: (.*?))?\r\n");
+#endif
+
+  std::cmatch m;
+  if (!std::regex_match(line_reader.ptr(), m, re)) {
+    return req.method == "CONNECT";
+  }
+  res.version = std::string(m[1]);
+  res.status = std::stoi(std::string(m[2]));
+  res.reason = std::string(m[3]);
+
+  // Ignore '100 Continue'
+  while (res.status == StatusCode::Continue_100) {
+    if (!line_reader.getline()) { return false; } // CRLF
+    if (!line_reader.getline()) { return false; } // next response line
+
+    if (!std::regex_match(line_reader.ptr(), m, re)) { return false; }
+    res.version = std::string(m[1]);
+    res.status = std::stoi(std::string(m[2]));
+    res.reason = std::string(m[3]);
+  }
+
+  return true;
+}
+
+inline bool ClientImpl::send(Request &req, Response &res, Error &error) {
+  std::lock_guard<std::recursive_mutex> request_mutex_guard(request_mutex_);
+  auto ret = send_(req, res, error);
+  if (error == Error::SSLPeerCouldBeClosed_) {
+    assert(!ret);
+    ret = send_(req, res, error);
+  }
+  return ret;
+}
+
+inline bool ClientImpl::send_(Request &req, Response &res, Error &error) {
+  {
+    std::lock_guard<std::mutex> guard(socket_mutex_);
+
+    // Set this to false immediately - if it ever gets set to true by the end of
+    // the request, we know another thread instructed us to close the socket.
+    socket_should_be_closed_when_request_is_done_ = false;
+
+    auto is_alive = false;
+    if (socket_.is_open()) {
+      is_alive = detail::is_socket_alive(socket_.sock);
+      if (!is_alive) {
+        // Attempt to avoid sigpipe by shutting down nongracefully if it seems
+        // like the other side has already closed the connection Also, there
+        // cannot be any requests in flight from other threads since we locked
+        // request_mutex_, so safe to close everything immediately
+        const bool shutdown_gracefully = false;
+        shutdown_ssl(socket_, shutdown_gracefully);
+        shutdown_socket(socket_);
+        close_socket(socket_);
+      }
+    }
+
+    if (!is_alive) {
+      if (!create_and_connect_socket(socket_, error)) { return false; }
+
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+      // TODO: refactoring
+      if (is_ssl()) {
+        auto &scli = static_cast<SSLClient &>(*this);
+        if (!proxy_host_.empty() && proxy_port_ != -1) {
+          auto success = false;
+          if (!scli.connect_with_proxy(socket_, res, success, error)) {
+            return success;
+          }
+        }
+
+        if (!scli.initialize_ssl(socket_, error)) { return false; }
+      }
+#endif
+    }
+
+    // Mark the current socket as being in use so that it cannot be closed by
+    // anyone else while this request is ongoing, even though we will be
+    // releasing the mutex.
+    if (socket_requests_in_flight_ > 1) {
+      assert(socket_requests_are_from_thread_ == std::this_thread::get_id());
+    }
+    socket_requests_in_flight_ += 1;
+    socket_requests_are_from_thread_ = std::this_thread::get_id();
+  }
+
+  for (const auto &header : default_headers_) {
+    if (req.headers.find(header.first) == req.headers.end()) {
+      req.headers.insert(header);
+    }
+  }
+
+  auto ret = false;
+  auto close_connection = !keep_alive_;
+
+  auto se = detail::scope_exit([&]() {
+    // Briefly lock mutex in order to mark that a request is no longer ongoing
+    std::lock_guard<std::mutex> guard(socket_mutex_);
+    socket_requests_in_flight_ -= 1;
+    if (socket_requests_in_flight_ <= 0) {
+      assert(socket_requests_in_flight_ == 0);
+      socket_requests_are_from_thread_ = std::thread::id();
+    }
+
+    if (socket_should_be_closed_when_request_is_done_ || close_connection ||
+        !ret) {
+      shutdown_ssl(socket_, true);
+      shutdown_socket(socket_);
+      close_socket(socket_);
+    }
+  });
+
+  ret = process_socket(socket_, [&](Stream &strm) {
+    return handle_request(strm, req, res, close_connection, error);
+  });
+
+  if (!ret) {
+    if (error == Error::Success) { error = Error::Unknown; }
+  }
+
+  return ret;
+}
+
+inline Result ClientImpl::send(const Request &req) {
+  auto req2 = req;
+  return send_(std::move(req2));
+}
+
+inline Result ClientImpl::send_(Request &&req) {
+  auto res = detail::make_unique<Response>();
+  auto error = Error::Success;
+  auto ret = send(req, *res, error);
+  return Result{ret ? std::move(res) : nullptr, error, std::move(req.headers)};
+}
+
+inline bool ClientImpl::handle_request(Stream &strm, Request &req,
+                                       Response &res, bool close_connection,
+                                       Error &error) {
+  if (req.path.empty()) {
+    error = Error::Connection;
+    return false;
+  }
+
+  auto req_save = req;
+
+  bool ret;
+
+  if (!is_ssl() && !proxy_host_.empty() && proxy_port_ != -1) {
+    auto req2 = req;
+    req2.path = "http://" + host_and_port_ + req.path;
+    ret = process_request(strm, req2, res, close_connection, error);
+    req = req2;
+    req.path = req_save.path;
+  } else {
+    ret = process_request(strm, req, res, close_connection, error);
+  }
+
+  if (!ret) { return false; }
+
+  if (res.get_header_value("Connection") == "close" ||
+      (res.version == "HTTP/1.0" && res.reason != "Connection established")) {
+    // TODO this requires a not-entirely-obvious chain of calls to be correct
+    // for this to be safe.
+
+    // This is safe to call because handle_request is only called by send_
+    // which locks the request mutex during the process. It would be a bug
+    // to call it from a different thread since it's a thread-safety issue
+    // to do these things to the socket if another thread is using the socket.
+    std::lock_guard<std::mutex> guard(socket_mutex_);
+    shutdown_ssl(socket_, true);
+    shutdown_socket(socket_);
+    close_socket(socket_);
+  }
+
+  if (300 < res.status && res.status < 400 && follow_location_) {
+    req = req_save;
+    ret = redirect(req, res, error);
+  }
+
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+  if ((res.status == StatusCode::Unauthorized_401 ||
+       res.status == StatusCode::ProxyAuthenticationRequired_407) &&
+      req.authorization_count_ < 5) {
+    auto is_proxy = res.status == StatusCode::ProxyAuthenticationRequired_407;
+    const auto &username =
+        is_proxy ? proxy_digest_auth_username_ : digest_auth_username_;
+    const auto &password =
+        is_proxy ? proxy_digest_auth_password_ : digest_auth_password_;
+
+    if (!username.empty() && !password.empty()) {
+      std::map<std::string, std::string> auth;
+      if (detail::parse_www_authenticate(res, auth, is_proxy)) {
+        Request new_req = req;
+        new_req.authorization_count_ += 1;
+        new_req.headers.erase(is_proxy ? "Proxy-Authorization"
+                                       : "Authorization");
+        new_req.headers.insert(detail::make_digest_authentication_header(
+            req, auth, new_req.authorization_count_, detail::random_string(10),
+            username, password, is_proxy));
+
+        Response new_res;
+
+        ret = send(new_req, new_res, error);
+        if (ret) { res = new_res; }
+      }
+    }
+  }
+#endif
+
+  return ret;
+}
+
+inline bool ClientImpl::redirect(Request &req, Response &res, Error &error) {
+  if (req.redirect_count_ == 0) {
+    error = Error::ExceedRedirectCount;
+    return false;
+  }
+
+  auto location = res.get_header_value("location");
+  if (location.empty()) { return false; }
+
+  const static std::regex re(
+      R"((?:(https?):)?(?://(?:\[([a-fA-F\d:]+)\]|([^:/?#]+))(?::(\d+))?)?([^?#]*)(\?[^#]*)?(?:#.*)?)");
+
+  std::smatch m;
+  if (!std::regex_match(location, m, re)) { return false; }
+
+  auto scheme = is_ssl() ? "https" : "http";
+
+  auto next_scheme = m[1].str();
+  auto next_host = m[2].str();
+  if (next_host.empty()) { next_host = m[3].str(); }
+  auto port_str = m[4].str();
+  auto next_path = m[5].str();
+  auto next_query = m[6].str();
+
+  auto next_port = port_;
+  if (!port_str.empty()) {
+    next_port = std::stoi(port_str);
+  } else if (!next_scheme.empty()) {
+    next_port = next_scheme == "https" ? 443 : 80;
+  }
+
+  if (next_scheme.empty()) { next_scheme = scheme; }
+  if (next_host.empty()) { next_host = host_; }
+  if (next_path.empty()) { next_path = "/"; }
+
+  auto path = detail::decode_url(next_path, true) + next_query;
+
+  if (next_scheme == scheme && next_host == host_ && next_port == port_) {
+    return detail::redirect(*this, req, res, path, location, error);
+  } else {
+    if (next_scheme == "https") {
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+      SSLClient cli(next_host, next_port);
+      cli.copy_settings(*this);
+      if (ca_cert_store_) { cli.set_ca_cert_store(ca_cert_store_); }
+      return detail::redirect(cli, req, res, path, location, error);
+#else
+      return false;
+#endif
+    } else {
+      ClientImpl cli(next_host, next_port);
+      cli.copy_settings(*this);
+      return detail::redirect(cli, req, res, path, location, error);
+    }
+  }
+}
+
+inline bool ClientImpl::write_content_with_provider(Stream &strm,
+                                                    const Request &req,
+                                                    Error &error) const {
+  auto is_shutting_down = []() { return false; };
+
+  if (req.is_chunked_content_provider_) {
+    // TODO: Brotli support
+    std::unique_ptr<detail::compressor> compressor;
+#ifdef CPPHTTPLIB_ZLIB_SUPPORT
+    if (compress_) {
+      compressor = detail::make_unique<detail::gzip_compressor>();
+    } else
+#endif
+    {
+      compressor = detail::make_unique<detail::nocompressor>();
+    }
+
+    return detail::write_content_chunked(strm, req.content_provider_,
+                                         is_shutting_down, *compressor, error);
+  } else {
+    return detail::write_content(strm, req.content_provider_, 0,
+                                 req.content_length_, is_shutting_down, error);
+  }
+}
+
+inline bool ClientImpl::write_request(Stream &strm, Request &req,
+                                      bool close_connection, Error &error) {
+  // Prepare additional headers
+  if (close_connection) {
+    if (!req.has_header("Connection")) {
+      req.set_header("Connection", "close");
+    }
+  }
+
+  if (!req.has_header("Host")) {
+    if (is_ssl()) {
+      if (port_ == 443) {
+        req.set_header("Host", host_);
+      } else {
+        req.set_header("Host", host_and_port_);
+      }
+    } else {
+      if (port_ == 80) {
+        req.set_header("Host", host_);
+      } else {
+        req.set_header("Host", host_and_port_);
+      }
+    }
+  }
+
+  if (!req.has_header("Accept")) { req.set_header("Accept", "*/*"); }
+
+#ifndef CPPHTTPLIB_NO_DEFAULT_USER_AGENT
+  if (!req.has_header("User-Agent")) {
+    auto agent = std::string("cpp-httplib/") + CPPHTTPLIB_VERSION;
+    req.set_header("User-Agent", agent);
+  }
+#endif
+
+  if (req.body.empty()) {
+    if (req.content_provider_) {
+      if (!req.is_chunked_content_provider_) {
+        if (!req.has_header("Content-Length")) {
+          auto length = std::to_string(req.content_length_);
+          req.set_header("Content-Length", length);
+        }
+      }
+    } else {
+      if (req.method == "POST" || req.method == "PUT" ||
+          req.method == "PATCH") {
+        req.set_header("Content-Length", "0");
+      }
+    }
+  } else {
+    if (!req.has_header("Content-Type")) {
+      req.set_header("Content-Type", "text/plain");
+    }
+
+    if (!req.has_header("Content-Length")) {
+      auto length = std::to_string(req.body.size());
+      req.set_header("Content-Length", length);
+    }
+  }
+
+  if (!basic_auth_password_.empty() || !basic_auth_username_.empty()) {
+    if (!req.has_header("Authorization")) {
+      req.headers.insert(make_basic_authentication_header(
+          basic_auth_username_, basic_auth_password_, false));
+    }
+  }
+
+  if (!proxy_basic_auth_username_.empty() &&
+      !proxy_basic_auth_password_.empty()) {
+    if (!req.has_header("Proxy-Authorization")) {
+      req.headers.insert(make_basic_authentication_header(
+          proxy_basic_auth_username_, proxy_basic_auth_password_, true));
+    }
+  }
+
+  if (!bearer_token_auth_token_.empty()) {
+    if (!req.has_header("Authorization")) {
+      req.headers.insert(make_bearer_token_authentication_header(
+          bearer_token_auth_token_, false));
+    }
+  }
+
+  if (!proxy_bearer_token_auth_token_.empty()) {
+    if (!req.has_header("Proxy-Authorization")) {
+      req.headers.insert(make_bearer_token_authentication_header(
+          proxy_bearer_token_auth_token_, true));
+    }
+  }
+
+  // Request line and headers
+  {
+    detail::BufferStream bstrm;
+
+    const auto &path = url_encode_ ? detail::encode_url(req.path) : req.path;
+    detail::write_request_line(bstrm, req.method, path);
+
+    header_writer_(bstrm, req.headers);
+
+    // Flush buffer
+    auto &data = bstrm.get_buffer();
+    if (!detail::write_data(strm, data.data(), data.size())) {
+      error = Error::Write;
+      return false;
+    }
+  }
+
+  // Body
+  if (req.body.empty()) {
+    return write_content_with_provider(strm, req, error);
+  }
+
+  if (!detail::write_data(strm, req.body.data(), req.body.size())) {
+    error = Error::Write;
+    return false;
+  }
+
+  return true;
+}
+
+inline std::unique_ptr<Response> ClientImpl::send_with_content_provider(
+    Request &req, const char *body, size_t content_length,
+    ContentProvider content_provider,
+    ContentProviderWithoutLength content_provider_without_length,
+    const std::string &content_type, Error &error) {
+  if (!content_type.empty()) { req.set_header("Content-Type", content_type); }
+
+#ifdef CPPHTTPLIB_ZLIB_SUPPORT
+  if (compress_) { req.set_header("Content-Encoding", "gzip"); }
+#endif
+
+#ifdef CPPHTTPLIB_ZLIB_SUPPORT
+  if (compress_ && !content_provider_without_length) {
+    // TODO: Brotli support
+    detail::gzip_compressor compressor;
+
+    if (content_provider) {
+      auto ok = true;
+      size_t offset = 0;
+      DataSink data_sink;
+
+      data_sink.write = [&](const char *data, size_t data_len) -> bool {
+        if (ok) {
+          auto last = offset + data_len == content_length;
+
+          auto ret = compressor.compress(
+              data, data_len, last,
+              [&](const char *compressed_data, size_t compressed_data_len) {
