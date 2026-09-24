@@ -6642,3 +6642,603 @@ unsigned lodepng_encode(unsigned char** out, size_t* outsize,
     }
   }
 #endif /*LODEPNG_COMPILE_ANCILLARY_CHUNKS*/
+  if(!lodepng_color_mode_equal(&state->info_raw, &info.color)) {
+    unsigned char* converted;
+    size_t size = ((size_t)w * (size_t)h * (size_t)lodepng_get_bpp(&info.color) + 7u) / 8u;
+
+    converted = (unsigned char*)lodepng_malloc(size);
+    if(!converted && size) error = 83; /*alloc fail*/
+    if(!error) {
+      error = lodepng_convert(converted, image, &info.color, &state->info_raw, w, h);
+    }
+    if(!error) {
+      error = preProcessScanlines(&data, &datasize, converted, w, h, &info, &state->encoder);
+    }
+    lodepng_free(converted);
+    if(error) goto cleanup;
+  } else {
+    error = preProcessScanlines(&data, &datasize, image, w, h, &info, &state->encoder);
+    if(error) goto cleanup;
+  }
+
+  /* output all PNG chunks */ {
+#ifdef LODEPNG_COMPILE_ANCILLARY_CHUNKS
+    size_t i;
+#endif /*LODEPNG_COMPILE_ANCILLARY_CHUNKS*/
+    /*write signature and chunks*/
+    error = writeSignature(&outv);
+    if(error) goto cleanup;
+    /*IHDR*/
+    error = addChunk_IHDR(&outv, w, h, info.color.colortype, info.color.bitdepth, info.interlace_method);
+    if(error) goto cleanup;
+#ifdef LODEPNG_COMPILE_ANCILLARY_CHUNKS
+    /*unknown chunks between IHDR and PLTE*/
+    if(info.unknown_chunks_data[0]) {
+      error = addUnknownChunks(&outv, info.unknown_chunks_data[0], info.unknown_chunks_size[0]);
+      if(error) goto cleanup;
+    }
+    /*color profile chunks must come before PLTE */
+    if(info.cicp_defined) {
+      error = addChunk_cICP(&outv, &info);
+      if(error) goto cleanup;
+    }
+    if(info.mdcv_defined) {
+      error = addChunk_mDCV(&outv, &info);
+      if(error) goto cleanup;
+    }
+    if(info.clli_defined) {
+      error = addChunk_cLLI(&outv, &info);
+      if(error) goto cleanup;
+    }
+    if(info.iccp_defined) {
+      error = addChunk_iCCP(&outv, &info, &state->encoder.zlibsettings);
+      if(error) goto cleanup;
+    }
+    if(info.srgb_defined) {
+      error = addChunk_sRGB(&outv, &info);
+      if(error) goto cleanup;
+    }
+    if(info.gama_defined) {
+      error = addChunk_gAMA(&outv, &info);
+      if(error) goto cleanup;
+    }
+    if(info.chrm_defined) {
+      error = addChunk_cHRM(&outv, &info);
+      if(error) goto cleanup;
+    }
+    if(info_png->sbit_defined) {
+      error = addChunk_sBIT(&outv, &info);
+      if(error) goto cleanup;
+    }
+    if(info.exif_defined) {
+      error = addChunk_eXIf(&outv, &info);
+      if(error) goto cleanup;
+    }
+#endif /*LODEPNG_COMPILE_ANCILLARY_CHUNKS*/
+    /*PLTE*/
+    if(info.color.colortype == LCT_PALETTE) {
+      error = addChunk_PLTE(&outv, &info.color);
+      if(error) goto cleanup;
+    }
+    if(state->encoder.force_palette && (info.color.colortype == LCT_RGB || info.color.colortype == LCT_RGBA)) {
+      /*force_palette means: write suggested palette for truecolor in PLTE chunk*/
+      error = addChunk_PLTE(&outv, &info.color);
+      if(error) goto cleanup;
+    }
+    /*tRNS (this will only add if when necessary) */
+    error = addChunk_tRNS(&outv, &info.color);
+    if(error) goto cleanup;
+#ifdef LODEPNG_COMPILE_ANCILLARY_CHUNKS
+    /*bKGD (must come between PLTE and the IDAt chunks*/
+    if(info.background_defined) {
+      error = addChunk_bKGD(&outv, &info);
+      if(error) goto cleanup;
+    }
+    /*pHYs (must come before the IDAT chunks)*/
+    if(info.phys_defined) {
+      error = addChunk_pHYs(&outv, &info);
+      if(error) goto cleanup;
+    }
+
+    /*unknown chunks between PLTE and IDAT*/
+    if(info.unknown_chunks_data[1]) {
+      error = addUnknownChunks(&outv, info.unknown_chunks_data[1], info.unknown_chunks_size[1]);
+      if(error) goto cleanup;
+    }
+#endif /*LODEPNG_COMPILE_ANCILLARY_CHUNKS*/
+    /*IDAT (multiple IDAT chunks must be consecutive)*/
+    error = addChunk_IDAT(&outv, data, datasize, &state->encoder.zlibsettings);
+    if(error) goto cleanup;
+#ifdef LODEPNG_COMPILE_ANCILLARY_CHUNKS
+    /*tIME*/
+    if(info.time_defined) {
+      error = addChunk_tIME(&outv, &info.time);
+      if(error) goto cleanup;
+    }
+    /*tEXt and/or zTXt*/
+    for(i = 0; i != info.text_num; ++i) {
+      if(lodepng_strlen(info.text_keys[i]) > 79) {
+        error = 66; /*text chunk too large*/
+        goto cleanup;
+      }
+      if(lodepng_strlen(info.text_keys[i]) < 1) {
+        error = 67; /*text chunk too small*/
+        goto cleanup;
+      }
+      if(state->encoder.text_compression) {
+        error = addChunk_zTXt(&outv, info.text_keys[i], info.text_strings[i], &state->encoder.zlibsettings);
+        if(error) goto cleanup;
+      } else {
+        error = addChunk_tEXt(&outv, info.text_keys[i], info.text_strings[i]);
+        if(error) goto cleanup;
+      }
+    }
+    /*LodePNG version id in text chunk*/
+    if(state->encoder.add_id) {
+      unsigned already_added_id_text = 0;
+      for(i = 0; i != info.text_num; ++i) {
+        const char* k = info.text_keys[i];
+        /* Could use strcmp, but we're not calling or reimplementing this C library function for this use only */
+        if(k[0] == 'L' && k[1] == 'o' && k[2] == 'd' && k[3] == 'e' &&
+           k[4] == 'P' && k[5] == 'N' && k[6] == 'G' && k[7] == '\0') {
+          already_added_id_text = 1;
+          break;
+        }
+      }
+      if(already_added_id_text == 0) {
+        error = addChunk_tEXt(&outv, "LodePNG", LODEPNG_VERSION_STRING); /*it's shorter as tEXt than as zTXt chunk*/
+        if(error) goto cleanup;
+      }
+    }
+    /*iTXt*/
+    for(i = 0; i != info.itext_num; ++i) {
+      if(lodepng_strlen(info.itext_keys[i]) > 79) {
+        error = 66; /*text chunk too large*/
+        goto cleanup;
+      }
+      if(lodepng_strlen(info.itext_keys[i]) < 1) {
+        error = 67; /*text chunk too small*/
+        goto cleanup;
+      }
+      error = addChunk_iTXt(
+          &outv, state->encoder.text_compression,
+          info.itext_keys[i], info.itext_langtags[i], info.itext_transkeys[i], info.itext_strings[i],
+          &state->encoder.zlibsettings);
+      if(error) goto cleanup;
+    }
+
+    /*unknown chunks between IDAT and IEND*/
+    if(info.unknown_chunks_data[2]) {
+      error = addUnknownChunks(&outv, info.unknown_chunks_data[2], info.unknown_chunks_size[2]);
+      if(error) goto cleanup;
+    }
+#endif /*LODEPNG_COMPILE_ANCILLARY_CHUNKS*/
+    error = addChunk_IEND(&outv);
+    if(error) goto cleanup;
+  }
+
+cleanup:
+  lodepng_info_cleanup(&info);
+  lodepng_free(data);
+  lodepng_color_mode_cleanup(&auto_color);
+
+  /*instead of cleaning the vector up, give it to the output*/
+  *out = outv.data;
+  *outsize = outv.size;
+
+  state->error = error; /*TODO: remove this and make input state const*/
+
+  return error;
+}
+
+unsigned lodepng_encode_memory(unsigned char** out, size_t* outsize, const unsigned char* image,
+                               unsigned w, unsigned h, LodePNGColorType colortype, unsigned bitdepth) {
+  unsigned error;
+  LodePNGState state;
+  lodepng_state_init(&state);
+  state.info_raw.colortype = colortype;
+  state.info_raw.bitdepth = bitdepth;
+  state.info_png.color.colortype = colortype;
+  state.info_png.color.bitdepth = bitdepth;
+  error = lodepng_encode(out, outsize, image, w, h, &state);
+  lodepng_state_cleanup(&state);
+  return error;
+}
+
+unsigned lodepng_encode32(unsigned char** out, size_t* outsize, const unsigned char* image, unsigned w, unsigned h) {
+  return lodepng_encode_memory(out, outsize, image, w, h, LCT_RGBA, 8);
+}
+
+unsigned lodepng_encode24(unsigned char** out, size_t* outsize, const unsigned char* image, unsigned w, unsigned h) {
+  return lodepng_encode_memory(out, outsize, image, w, h, LCT_RGB, 8);
+}
+
+#ifdef LODEPNG_COMPILE_DISK
+unsigned lodepng_encode_file(const char* filename, const unsigned char* image, unsigned w, unsigned h,
+                             LodePNGColorType colortype, unsigned bitdepth) {
+  unsigned char* buffer;
+  size_t buffersize;
+  unsigned error = lodepng_encode_memory(&buffer, &buffersize, image, w, h, colortype, bitdepth);
+  if(!error) error = lodepng_save_file(buffer, buffersize, filename);
+  lodepng_free(buffer);
+  return error;
+}
+
+unsigned lodepng_encode32_file(const char* filename, const unsigned char* image, unsigned w, unsigned h) {
+  return lodepng_encode_file(filename, image, w, h, LCT_RGBA, 8);
+}
+
+unsigned lodepng_encode24_file(const char* filename, const unsigned char* image, unsigned w, unsigned h) {
+  return lodepng_encode_file(filename, image, w, h, LCT_RGB, 8);
+}
+#endif /*LODEPNG_COMPILE_DISK*/
+
+void lodepng_encoder_settings_init(LodePNGEncoderSettings* settings) {
+  lodepng_compress_settings_init(&settings->zlibsettings);
+  settings->filter_palette_zero = 1;
+  settings->filter_strategy = LFS_MINSUM;
+  settings->auto_convert = 1;
+  settings->force_palette = 0;
+  settings->predefined_filters = 0;
+#ifdef LODEPNG_COMPILE_ANCILLARY_CHUNKS
+  settings->add_id = 0;
+  settings->text_compression = 1;
+#endif /*LODEPNG_COMPILE_ANCILLARY_CHUNKS*/
+}
+
+#endif /*LODEPNG_COMPILE_ENCODER*/
+#endif /*LODEPNG_COMPILE_PNG*/
+
+#ifdef LODEPNG_COMPILE_ERROR_TEXT
+/*
+This returns the description of a numerical error code in English. This is also
+the documentation of all the error codes.
+*/
+const char* lodepng_error_text(unsigned code) {
+  switch(code) {
+    case 0: return "no error, everything went ok";
+    case 1: return "nothing done yet"; /*the Encoder/Decoder has done nothing yet, error checking makes no sense yet*/
+    case 10: return "end of input memory reached without huffman end code"; /*while huffman decoding*/
+    case 11: return "error in code tree made it jump outside of huffman tree"; /*while huffman decoding*/
+    case 13: return "problem while processing dynamic deflate block";
+    case 14: return "problem while processing dynamic deflate block";
+    case 15: return "problem while processing dynamic deflate block";
+    /*this error could happen if there are only 0 or 1 symbols present in the huffman code:*/
+    case 16: return "invalid code while processing dynamic deflate block";
+    case 17: return "end of out buffer memory reached while inflating";
+    case 18: return "invalid distance code while inflating";
+    case 19: return "end of out buffer memory reached while inflating";
+    case 20: return "invalid deflate block BTYPE encountered while decoding";
+    case 21: return "NLEN is not ones complement of LEN in a deflate block";
+
+    /*end of out buffer memory reached while inflating:
+    This can happen if the inflated deflate data is longer than the amount of bytes required to fill up
+    all the pixels of the image, given the color depth and image dimensions. Something that doesn't
+    happen in a normal, well encoded, PNG image.*/
+    case 22: return "end of out buffer memory reached while inflating";
+    case 23: return "end of in buffer memory reached while inflating";
+    case 24: return "invalid FCHECK in zlib header";
+    case 25: return "invalid compression method in zlib header";
+    case 26: return "FDICT encountered in zlib header while it's not used for PNG";
+    case 27: return "PNG file is smaller than a PNG header";
+    /*Checks the magic file header, the first 8 bytes of the PNG file*/
+    case 28: return "incorrect PNG signature, it's no PNG or corrupted";
+    case 29: return "first chunk is not the header chunk";
+    case 30: return "chunk length too large, chunk broken off at end of file";
+    case 31: return "illegal PNG color type or bpp";
+    case 32: return "illegal PNG compression method";
+    case 33: return "illegal PNG filter method";
+    case 34: return "illegal PNG interlace method";
+    case 35: return "chunk length of a chunk is too large or the chunk too small";
+    case 36: return "illegal PNG filter type encountered";
+    case 37: return "illegal bit depth for this color type given";
+    case 38: return "the palette is too small or too big"; /*0, or more than 256 colors*/
+    case 39: return "tRNS chunk before PLTE or has more entries than palette size";
+    case 40: return "tRNS chunk has wrong size for grayscale image";
+    case 41: return "tRNS chunk has wrong size for RGB image";
+    case 42: return "tRNS chunk appeared while it was not allowed for this color type";
+    case 43: return "bKGD chunk has wrong size for palette image";
+    case 44: return "bKGD chunk has wrong size for grayscale image";
+    case 45: return "bKGD chunk has wrong size for RGB image";
+    case 48: return "empty input buffer given to decoder. Maybe caused by non-existing file?";
+    case 49: return "jumped past memory while generating dynamic huffman tree";
+    case 50: return "jumped past memory while generating dynamic huffman tree";
+    case 51: return "jumped past memory while inflating huffman block";
+    case 52: return "jumped past memory while inflating";
+    case 53: return "size of zlib data too small";
+    case 54: return "repeat symbol in tree while there was no value symbol yet";
+    /*jumped past tree while generating huffman tree, this could be when the
+    tree will have more leaves than symbols after generating it out of the
+    given lengths. They call this an oversubscribed dynamic bit lengths tree in zlib.*/
+    case 55: return "jumped past tree while generating huffman tree";
+    case 56: return "given output image colortype or bitdepth not supported for color conversion";
+    case 57: return "invalid CRC encountered (checking CRC can be disabled)";
+    case 58: return "invalid ADLER32 encountered (checking ADLER32 can be disabled)";
+    case 59: return "requested color conversion not supported";
+    case 60: return "invalid window size given in the settings of the encoder (must be 0-32768)";
+    case 61: return "invalid BTYPE given in the settings of the encoder (only 0, 1 and 2 are allowed)";
+    /*LodePNG leaves the choice of RGB to grayscale conversion formula to the user.*/
+    case 62: return "conversion from color to grayscale not supported";
+    /*(2^31-1)*/
+    case 63: return "length of a chunk too long, max allowed for PNG is 2147483647 bytes per chunk";
+    /*this would result in the inability of a deflated block to ever contain an end code. It must be at least 1.*/
+    case 64: return "the length of the END symbol 256 in the Huffman tree is 0";
+    case 66: return "the length of a text chunk keyword given to the encoder is longer than the maximum of 79 bytes";
+    case 67: return "the length of a text chunk keyword given to the encoder is smaller than the minimum of 1 byte";
+    case 68: return "tried to encode a PLTE chunk with a palette that has less than 1 or more than 256 colors";
+    case 69: return "unknown chunk type with 'critical' flag encountered by the decoder";
+    case 71: return "invalid interlace mode given to encoder (must be 0 or 1)";
+    case 72: return "while decoding, invalid compression method encountered in zTXt, iTXt or iCCP chunk (it must be 0)";
+    case 73: return "invalid tIME chunk size";
+    case 74: return "invalid pHYs chunk size";
+    /*length could be wrong, or data chopped off*/
+    case 75: return "no null termination char found while decoding text chunk";
+    case 76: return "iTXt chunk too short to contain required bytes";
+    case 77: return "integer overflow in buffer size";
+    case 78: return "failed to open file for reading"; /*file doesn't exist or couldn't be opened for reading*/
+    case 79: return "failed to open file for writing";
+    case 80: return "tried creating a tree of 0 symbols";
+    case 81: return "lazy matching at pos 0 is impossible";
+    case 82: return "color conversion to palette requested while a color isn't in palette, or index out of bounds";
+    case 83: return "memory allocation failed";
+    case 84: return "given image too small to contain all pixels to be encoded";
+    case 86: return "impossible offset in lz77 encoding (internal bug)";
+    case 87: return "must provide custom zlib function pointer if LODEPNG_COMPILE_ZLIB is not defined";
+    case 88: return "invalid filter strategy given for LodePNGEncoderSettings.filter_strategy";
+    case 89: return "text chunk keyword too short or long: must have size 1-79";
+    /*the windowsize in the LodePNGCompressSettings. Requiring POT(==> & instead of %) makes encoding 12% faster.*/
+    case 90: return "windowsize must be a power of two";
+    case 91: return "invalid decompressed idat size";
+    case 92: return "integer overflow due to too many pixels";
+    case 93: return "zero width or height is invalid";
+    case 94: return "header chunk must have a size of 13 bytes";
+    case 95: return "integer overflow with combined idat chunk size";
+    case 96: return "invalid gAMA chunk size";
+    case 97: return "invalid cHRM chunk size";
+    case 98: return "invalid sRGB chunk size";
+    case 99: return "invalid sRGB rendering intent";
+    case 100: return "invalid ICC profile color type, the PNG specification only allows RGB or GRAY";
+    case 101: return "PNG specification does not allow RGB ICC profile on gray color types and vice versa";
+    case 102: return "not allowed to set grayscale ICC profile with colored pixels by PNG specification";
+    case 103: return "invalid palette index in bKGD chunk. Maybe it came before PLTE chunk?";
+    case 104: return "invalid bKGD color while encoding (e.g. palette index out of range)";
+    case 105: return "integer overflow of bitsize";
+    case 106: return "PNG file must have PLTE chunk if color type is palette";
+    case 107: return "color convert from palette mode requested without setting the palette data in it";
+    case 108: return "tried to add more than 256 values to a palette";
+    /*this limit can be configured in LodePNGDecompressSettings*/
+    case 109: return "tried to decompress zlib or deflate data larger than desired max_output_size";
+    case 110: return "custom zlib or inflate decompression failed";
+    case 111: return "custom zlib or deflate compression failed";
+    /*max text size limit can be configured in LodePNGDecoderSettings. This error prevents
+    unreasonable memory consumption when decoding due to impossibly large text sizes.*/
+    case 112: return "compressed text unreasonably large";
+    /*max ICC size limit can be configured in LodePNGDecoderSettings. This error prevents
+    unreasonable memory consumption when decoding due to impossibly large ICC profile*/
+    case 113: return "ICC profile unreasonably large";
+    case 114: return "sBIT chunk has wrong size for the color type of the image";
+    case 115: return "sBIT value out of range";
+    case 116: return "cICP value out of range";
+    case 117: return "invalid cICP chunk size";
+    case 118: return "mDCV value out of range";
+    case 119: return "invalid mDCV chunk size";
+    case 120: return "invalid cLLI chunk size";
+    case 121: return "invalid chunk type name: may only contain [a-zA-Z]";
+    case 122: return "invalid chunk type name: third character must be uppercase";
+    case 123: return "invalid ICC profile size";
+  }
+  return "unknown error code";
+}
+#endif /*LODEPNG_COMPILE_ERROR_TEXT*/
+
+/* ////////////////////////////////////////////////////////////////////////// */
+/* ////////////////////////////////////////////////////////////////////////// */
+/* // C++ Wrapper                                                          // */
+/* ////////////////////////////////////////////////////////////////////////// */
+/* ////////////////////////////////////////////////////////////////////////// */
+
+#ifdef LODEPNG_COMPILE_CPP
+namespace lodepng {
+
+#ifdef LODEPNG_COMPILE_DISK
+/* Resizes the vector to the file size and reads the file into it. Returns error code.*/
+static unsigned load_file_(std::vector<unsigned char>& buffer, FILE* file) {
+  long size = lodepng_filesize(file);
+  if(size < 0) return 78;
+  buffer.resize((size_t)size);
+  if(size == 0) return 0; /*ok*/
+  if(fread(&buffer[0], 1, buffer.size(), file) != buffer.size()) return 78;
+  return 0; /*ok*/
+}
+
+unsigned load_file(std::vector<unsigned char>& buffer, const std::string& filename) {
+  unsigned error;
+  FILE* file = fopen(filename.c_str(), "rb");
+  if(!file) return 78;
+  error = load_file_(buffer, file);
+  fclose(file);
+  return error;
+}
+
+/*write given buffer to the file, overwriting the file, it doesn't append to it.*/
+unsigned save_file(const std::vector<unsigned char>& buffer, const std::string& filename) {
+  return lodepng_save_file(buffer.empty() ? 0 : &buffer[0], buffer.size(), filename.c_str());
+}
+#endif /* LODEPNG_COMPILE_DISK */
+
+#ifdef LODEPNG_COMPILE_ZLIB
+#ifdef LODEPNG_COMPILE_DECODER
+unsigned decompress(std::vector<unsigned char>& out, const unsigned char* in, size_t insize,
+                    const LodePNGDecompressSettings& settings) {
+  unsigned char* buffer = 0;
+  size_t buffersize = 0;
+  unsigned error = zlib_decompress(&buffer, &buffersize, 0, in, insize, &settings);
+  if(buffer) {
+    out.insert(out.end(), buffer, &buffer[buffersize]);
+    lodepng_free(buffer);
+  }
+  return error;
+}
+
+unsigned decompress(std::vector<unsigned char>& out, const std::vector<unsigned char>& in,
+                    const LodePNGDecompressSettings& settings) {
+  return decompress(out, in.empty() ? 0 : &in[0], in.size(), settings);
+}
+#endif /* LODEPNG_COMPILE_DECODER */
+
+#ifdef LODEPNG_COMPILE_ENCODER
+unsigned compress(std::vector<unsigned char>& out, const unsigned char* in, size_t insize,
+                  const LodePNGCompressSettings& settings) {
+  unsigned char* buffer = 0;
+  size_t buffersize = 0;
+  unsigned error = zlib_compress(&buffer, &buffersize, in, insize, &settings);
+  if(buffer) {
+    out.insert(out.end(), buffer, &buffer[buffersize]);
+    lodepng_free(buffer);
+  }
+  return error;
+}
+
+unsigned compress(std::vector<unsigned char>& out, const std::vector<unsigned char>& in,
+                  const LodePNGCompressSettings& settings) {
+  return compress(out, in.empty() ? 0 : &in[0], in.size(), settings);
+}
+#endif /* LODEPNG_COMPILE_ENCODER */
+#endif /* LODEPNG_COMPILE_ZLIB */
+
+
+#ifdef LODEPNG_COMPILE_PNG
+
+State::State() {
+  lodepng_state_init(this);
+}
+
+State::State(const State& other) {
+  lodepng_state_init(this);
+  lodepng_state_copy(this, &other);
+}
+
+State::~State() {
+  lodepng_state_cleanup(this);
+}
+
+State& State::operator=(const State& other) {
+  lodepng_state_copy(this, &other);
+  return *this;
+}
+
+#ifdef LODEPNG_COMPILE_DECODER
+
+unsigned decode(std::vector<unsigned char>& out, unsigned& w, unsigned& h, const unsigned char* in,
+                size_t insize, LodePNGColorType colortype, unsigned bitdepth) {
+  unsigned char* buffer = 0;
+  unsigned error = lodepng_decode_memory(&buffer, &w, &h, in, insize, colortype, bitdepth);
+  if(buffer && !error) {
+    State state;
+    state.info_raw.colortype = colortype;
+    state.info_raw.bitdepth = bitdepth;
+    size_t buffersize = lodepng_get_raw_size(w, h, &state.info_raw);
+    out.insert(out.end(), buffer, &buffer[buffersize]);
+  }
+  lodepng_free(buffer);
+  return error;
+}
+
+unsigned decode(std::vector<unsigned char>& out, unsigned& w, unsigned& h,
+                const std::vector<unsigned char>& in, LodePNGColorType colortype, unsigned bitdepth) {
+  return decode(out, w, h, in.empty() ? 0 : &in[0], (unsigned)in.size(), colortype, bitdepth);
+}
+
+unsigned decode(std::vector<unsigned char>& out, unsigned& w, unsigned& h,
+                State& state,
+                const unsigned char* in, size_t insize) {
+  unsigned char* buffer = NULL;
+  unsigned error = lodepng_decode(&buffer, &w, &h, &state, in, insize);
+  if(buffer && !error) {
+    size_t buffersize = lodepng_get_raw_size(w, h, &state.info_raw);
+    out.insert(out.end(), buffer, &buffer[buffersize]);
+  }
+  lodepng_free(buffer);
+  return error;
+}
+
+unsigned decode(std::vector<unsigned char>& out, unsigned& w, unsigned& h,
+                State& state,
+                const std::vector<unsigned char>& in) {
+  return decode(out, w, h, state, in.empty() ? 0 : &in[0], in.size());
+}
+
+#ifdef LODEPNG_COMPILE_DISK
+unsigned decode(std::vector<unsigned char>& out, unsigned& w, unsigned& h, const std::string& filename,
+                LodePNGColorType colortype, unsigned bitdepth) {
+  std::vector<unsigned char> buffer;
+  /* safe output values in case error happens */
+  w = h = 0;
+  unsigned error = load_file(buffer, filename);
+  if(error) return error;
+  return decode(out, w, h, buffer, colortype, bitdepth);
+}
+#endif /* LODEPNG_COMPILE_DECODER */
+#endif /* LODEPNG_COMPILE_DISK */
+
+#ifdef LODEPNG_COMPILE_ENCODER
+unsigned encode(std::vector<unsigned char>& out, const unsigned char* in, unsigned w, unsigned h,
+                LodePNGColorType colortype, unsigned bitdepth) {
+  unsigned char* buffer;
+  size_t buffersize;
+  unsigned error = lodepng_encode_memory(&buffer, &buffersize, in, w, h, colortype, bitdepth);
+  if(buffer) {
+    out.insert(out.end(), buffer, &buffer[buffersize]);
+    lodepng_free(buffer);
+  }
+  return error;
+}
+
+unsigned encode(std::vector<unsigned char>& out,
+                const std::vector<unsigned char>& in, unsigned w, unsigned h,
+                LodePNGColorType colortype, unsigned bitdepth) {
+  if(lodepng_get_raw_size_lct(w, h, colortype, bitdepth) > in.size()) return 84;
+  return encode(out, in.empty() ? 0 : &in[0], w, h, colortype, bitdepth);
+}
+
+unsigned encode(std::vector<unsigned char>& out,
+                const unsigned char* in, unsigned w, unsigned h,
+                State& state) {
+  unsigned char* buffer;
+  size_t buffersize;
+  unsigned error = lodepng_encode(&buffer, &buffersize, in, w, h, &state);
+  if(buffer) {
+    out.insert(out.end(), buffer, &buffer[buffersize]);
+    lodepng_free(buffer);
+  }
+  return error;
+}
+
+unsigned encode(std::vector<unsigned char>& out,
+                const std::vector<unsigned char>& in, unsigned w, unsigned h,
+                State& state) {
+  if(lodepng_get_raw_size(w, h, &state.info_raw) > in.size()) return 84;
+  return encode(out, in.empty() ? 0 : &in[0], w, h, state);
+}
+
+#ifdef LODEPNG_COMPILE_DISK
+unsigned encode(const std::string& filename,
+                const unsigned char* in, unsigned w, unsigned h,
+                LodePNGColorType colortype, unsigned bitdepth) {
+  std::vector<unsigned char> buffer;
+  unsigned error = encode(buffer, in, w, h, colortype, bitdepth);
+  if(!error) error = save_file(buffer, filename);
+  return error;
+}
+
+unsigned encode(const std::string& filename,
+                const std::vector<unsigned char>& in, unsigned w, unsigned h,
+                LodePNGColorType colortype, unsigned bitdepth) {
+  if(lodepng_get_raw_size_lct(w, h, colortype, bitdepth) > in.size()) return 84;
+  return encode(filename, in.empty() ? 0 : &in[0], w, h, colortype, bitdepth);
+}
+#endif /* LODEPNG_COMPILE_DISK */
+#endif /* LODEPNG_COMPILE_ENCODER */
+#endif /* LODEPNG_COMPILE_PNG */
+} /* namespace lodepng */
+#endif /*LODEPNG_COMPILE_CPP*/
