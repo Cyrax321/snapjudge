@@ -8998,3 +8998,603 @@ inline ssize_t SSLSocketStream::write(const char *ptr, size_t size) {
           return -1;
         }
       }
+    }
+    return ret;
+  }
+  return -1;
+}
+
+inline void SSLSocketStream::get_remote_ip_and_port(std::string &ip,
+                                                    int &port) const {
+  detail::get_remote_ip_and_port(sock_, ip, port);
+}
+
+inline void SSLSocketStream::get_local_ip_and_port(std::string &ip,
+                                                   int &port) const {
+  detail::get_local_ip_and_port(sock_, ip, port);
+}
+
+inline socket_t SSLSocketStream::socket() const { return sock_; }
+
+static SSLInit sslinit_;
+
+} // namespace detail
+
+// SSL HTTP server implementation
+inline SSLServer::SSLServer(const char *cert_path, const char *private_key_path,
+                            const char *client_ca_cert_file_path,
+                            const char *client_ca_cert_dir_path,
+                            const char *private_key_password) {
+  ctx_ = SSL_CTX_new(TLS_server_method());
+
+  if (ctx_) {
+    SSL_CTX_set_options(ctx_,
+                        SSL_OP_NO_COMPRESSION |
+                            SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION);
+
+    SSL_CTX_set_min_proto_version(ctx_, TLS1_2_VERSION);
+
+    if (private_key_password != nullptr && (private_key_password[0] != '\0')) {
+      SSL_CTX_set_default_passwd_cb_userdata(
+          ctx_,
+          reinterpret_cast<void *>(const_cast<char *>(private_key_password)));
+    }
+
+    if (SSL_CTX_use_certificate_chain_file(ctx_, cert_path) != 1 ||
+        SSL_CTX_use_PrivateKey_file(ctx_, private_key_path, SSL_FILETYPE_PEM) !=
+            1 ||
+        SSL_CTX_check_private_key(ctx_) != 1) {
+      SSL_CTX_free(ctx_);
+      ctx_ = nullptr;
+    } else if (client_ca_cert_file_path || client_ca_cert_dir_path) {
+      SSL_CTX_load_verify_locations(ctx_, client_ca_cert_file_path,
+                                    client_ca_cert_dir_path);
+
+      SSL_CTX_set_verify(
+          ctx_, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, nullptr);
+    }
+  }
+}
+
+inline SSLServer::SSLServer(X509 *cert, EVP_PKEY *private_key,
+                            X509_STORE *client_ca_cert_store) {
+  ctx_ = SSL_CTX_new(TLS_server_method());
+
+  if (ctx_) {
+    SSL_CTX_set_options(ctx_,
+                        SSL_OP_NO_COMPRESSION |
+                            SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION);
+
+    SSL_CTX_set_min_proto_version(ctx_, TLS1_2_VERSION);
+
+    if (SSL_CTX_use_certificate(ctx_, cert) != 1 ||
+        SSL_CTX_use_PrivateKey(ctx_, private_key) != 1) {
+      SSL_CTX_free(ctx_);
+      ctx_ = nullptr;
+    } else if (client_ca_cert_store) {
+      SSL_CTX_set_cert_store(ctx_, client_ca_cert_store);
+
+      SSL_CTX_set_verify(
+          ctx_, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, nullptr);
+    }
+  }
+}
+
+inline SSLServer::SSLServer(
+    const std::function<bool(SSL_CTX &ssl_ctx)> &setup_ssl_ctx_callback) {
+  ctx_ = SSL_CTX_new(TLS_method());
+  if (ctx_) {
+    if (!setup_ssl_ctx_callback(*ctx_)) {
+      SSL_CTX_free(ctx_);
+      ctx_ = nullptr;
+    }
+  }
+}
+
+inline SSLServer::~SSLServer() {
+  if (ctx_) { SSL_CTX_free(ctx_); }
+}
+
+inline bool SSLServer::is_valid() const { return ctx_; }
+
+inline SSL_CTX *SSLServer::ssl_context() const { return ctx_; }
+
+inline void SSLServer::update_certs(X509 *cert, EVP_PKEY *private_key,
+                                    X509_STORE *client_ca_cert_store) {
+
+  std::lock_guard<std::mutex> guard(ctx_mutex_);
+
+  SSL_CTX_use_certificate(ctx_, cert);
+  SSL_CTX_use_PrivateKey(ctx_, private_key);
+
+  if (client_ca_cert_store != nullptr) {
+    SSL_CTX_set_cert_store(ctx_, client_ca_cert_store);
+  }
+}
+
+inline bool SSLServer::process_and_close_socket(socket_t sock) {
+  auto ssl = detail::ssl_new(
+      sock, ctx_, ctx_mutex_,
+      [&](SSL *ssl2) {
+        return detail::ssl_connect_or_accept_nonblocking(
+            sock, ssl2, SSL_accept, read_timeout_sec_, read_timeout_usec_);
+      },
+      [](SSL * /*ssl2*/) { return true; });
+
+  auto ret = false;
+  if (ssl) {
+    std::string remote_addr;
+    int remote_port = 0;
+    detail::get_remote_ip_and_port(sock, remote_addr, remote_port);
+
+    std::string local_addr;
+    int local_port = 0;
+    detail::get_local_ip_and_port(sock, local_addr, local_port);
+
+    ret = detail::process_server_socket_ssl(
+        svr_sock_, ssl, sock, keep_alive_max_count_, keep_alive_timeout_sec_,
+        read_timeout_sec_, read_timeout_usec_, write_timeout_sec_,
+        write_timeout_usec_,
+        [&](Stream &strm, bool close_connection, bool &connection_closed) {
+          return process_request(strm, remote_addr, remote_port, local_addr,
+                                 local_port, close_connection,
+                                 connection_closed,
+                                 [&](Request &req) { req.ssl = ssl; });
+        });
+
+    // Shutdown gracefully if the result seemed successful, non-gracefully if
+    // the connection appeared to be closed.
+    const bool shutdown_gracefully = ret;
+    detail::ssl_delete(ctx_mutex_, ssl, sock, shutdown_gracefully);
+  }
+
+  detail::shutdown_socket(sock);
+  detail::close_socket(sock);
+  return ret;
+}
+
+// SSL HTTP client implementation
+inline SSLClient::SSLClient(const std::string &host)
+    : SSLClient(host, 443, std::string(), std::string()) {}
+
+inline SSLClient::SSLClient(const std::string &host, int port)
+    : SSLClient(host, port, std::string(), std::string()) {}
+
+inline SSLClient::SSLClient(const std::string &host, int port,
+                            const std::string &client_cert_path,
+                            const std::string &client_key_path,
+                            const std::string &private_key_password)
+    : ClientImpl(host, port, client_cert_path, client_key_path) {
+  ctx_ = SSL_CTX_new(TLS_client_method());
+
+  SSL_CTX_set_min_proto_version(ctx_, TLS1_2_VERSION);
+
+  detail::split(&host_[0], &host_[host_.size()], '.',
+                [&](const char *b, const char *e) {
+                  host_components_.emplace_back(b, e);
+                });
+
+  if (!client_cert_path.empty() && !client_key_path.empty()) {
+    if (!private_key_password.empty()) {
+      SSL_CTX_set_default_passwd_cb_userdata(
+          ctx_, reinterpret_cast<void *>(
+                    const_cast<char *>(private_key_password.c_str())));
+    }
+
+    if (SSL_CTX_use_certificate_file(ctx_, client_cert_path.c_str(),
+                                     SSL_FILETYPE_PEM) != 1 ||
+        SSL_CTX_use_PrivateKey_file(ctx_, client_key_path.c_str(),
+                                    SSL_FILETYPE_PEM) != 1) {
+      SSL_CTX_free(ctx_);
+      ctx_ = nullptr;
+    }
+  }
+}
+
+inline SSLClient::SSLClient(const std::string &host, int port,
+                            X509 *client_cert, EVP_PKEY *client_key,
+                            const std::string &private_key_password)
+    : ClientImpl(host, port) {
+  ctx_ = SSL_CTX_new(TLS_client_method());
+
+  detail::split(&host_[0], &host_[host_.size()], '.',
+                [&](const char *b, const char *e) {
+                  host_components_.emplace_back(b, e);
+                });
+
+  if (client_cert != nullptr && client_key != nullptr) {
+    if (!private_key_password.empty()) {
+      SSL_CTX_set_default_passwd_cb_userdata(
+          ctx_, reinterpret_cast<void *>(
+                    const_cast<char *>(private_key_password.c_str())));
+    }
+
+    if (SSL_CTX_use_certificate(ctx_, client_cert) != 1 ||
+        SSL_CTX_use_PrivateKey(ctx_, client_key) != 1) {
+      SSL_CTX_free(ctx_);
+      ctx_ = nullptr;
+    }
+  }
+}
+
+inline SSLClient::~SSLClient() {
+  if (ctx_) { SSL_CTX_free(ctx_); }
+  // Make sure to shut down SSL since shutdown_ssl will resolve to the
+  // base function rather than the derived function once we get to the
+  // base class destructor, and won't free the SSL (causing a leak).
+  shutdown_ssl_impl(socket_, true);
+}
+
+inline bool SSLClient::is_valid() const { return ctx_; }
+
+inline void SSLClient::set_ca_cert_store(X509_STORE *ca_cert_store) {
+  if (ca_cert_store) {
+    if (ctx_) {
+      if (SSL_CTX_get_cert_store(ctx_) != ca_cert_store) {
+        // Free memory allocated for old cert and use new store `ca_cert_store`
+        SSL_CTX_set_cert_store(ctx_, ca_cert_store);
+      }
+    } else {
+      X509_STORE_free(ca_cert_store);
+    }
+  }
+}
+
+inline void SSLClient::load_ca_cert_store(const char *ca_cert,
+                                          std::size_t size) {
+  set_ca_cert_store(ClientImpl::create_ca_cert_store(ca_cert, size));
+}
+
+inline long SSLClient::get_openssl_verify_result() const {
+  return verify_result_;
+}
+
+inline SSL_CTX *SSLClient::ssl_context() const { return ctx_; }
+
+inline bool SSLClient::create_and_connect_socket(Socket &socket, Error &error) {
+  return is_valid() && ClientImpl::create_and_connect_socket(socket, error);
+}
+
+// Assumes that socket_mutex_ is locked and that there are no requests in flight
+inline bool SSLClient::connect_with_proxy(Socket &socket, Response &res,
+                                          bool &success, Error &error) {
+  success = true;
+  Response proxy_res;
+  if (!detail::process_client_socket(
+          socket.sock, read_timeout_sec_, read_timeout_usec_,
+          write_timeout_sec_, write_timeout_usec_, [&](Stream &strm) {
+            Request req2;
+            req2.method = "CONNECT";
+            req2.path = host_and_port_;
+            return process_request(strm, req2, proxy_res, false, error);
+          })) {
+    // Thread-safe to close everything because we are assuming there are no
+    // requests in flight
+    shutdown_ssl(socket, true);
+    shutdown_socket(socket);
+    close_socket(socket);
+    success = false;
+    return false;
+  }
+
+  if (proxy_res.status == StatusCode::ProxyAuthenticationRequired_407) {
+    if (!proxy_digest_auth_username_.empty() &&
+        !proxy_digest_auth_password_.empty()) {
+      std::map<std::string, std::string> auth;
+      if (detail::parse_www_authenticate(proxy_res, auth, true)) {
+        proxy_res = Response();
+        if (!detail::process_client_socket(
+                socket.sock, read_timeout_sec_, read_timeout_usec_,
+                write_timeout_sec_, write_timeout_usec_, [&](Stream &strm) {
+                  Request req3;
+                  req3.method = "CONNECT";
+                  req3.path = host_and_port_;
+                  req3.headers.insert(detail::make_digest_authentication_header(
+                      req3, auth, 1, detail::random_string(10),
+                      proxy_digest_auth_username_, proxy_digest_auth_password_,
+                      true));
+                  return process_request(strm, req3, proxy_res, false, error);
+                })) {
+          // Thread-safe to close everything because we are assuming there are
+          // no requests in flight
+          shutdown_ssl(socket, true);
+          shutdown_socket(socket);
+          close_socket(socket);
+          success = false;
+          return false;
+        }
+      }
+    }
+  }
+
+  // If status code is not 200, proxy request is failed.
+  // Set error to ProxyConnection and return proxy response
+  // as the response of the request
+  if (proxy_res.status != StatusCode::OK_200) {
+    error = Error::ProxyConnection;
+    res = std::move(proxy_res);
+    // Thread-safe to close everything because we are assuming there are
+    // no requests in flight
+    shutdown_ssl(socket, true);
+    shutdown_socket(socket);
+    close_socket(socket);
+    return false;
+  }
+
+  return true;
+}
+
+inline bool SSLClient::load_certs() {
+  auto ret = true;
+
+  std::call_once(initialize_cert_, [&]() {
+    std::lock_guard<std::mutex> guard(ctx_mutex_);
+    if (!ca_cert_file_path_.empty()) {
+      if (!SSL_CTX_load_verify_locations(ctx_, ca_cert_file_path_.c_str(),
+                                         nullptr)) {
+        ret = false;
+      }
+    } else if (!ca_cert_dir_path_.empty()) {
+      if (!SSL_CTX_load_verify_locations(ctx_, nullptr,
+                                         ca_cert_dir_path_.c_str())) {
+        ret = false;
+      }
+    } else {
+      auto loaded = false;
+#ifdef _WIN32
+      loaded =
+          detail::load_system_certs_on_windows(SSL_CTX_get_cert_store(ctx_));
+#elif defined(CPPHTTPLIB_USE_CERTS_FROM_MACOSX_KEYCHAIN) && defined(__APPLE__)
+#if TARGET_OS_OSX
+      loaded = detail::load_system_certs_on_macos(SSL_CTX_get_cert_store(ctx_));
+#endif // TARGET_OS_OSX
+#endif // _WIN32
+      if (!loaded) { SSL_CTX_set_default_verify_paths(ctx_); }
+    }
+  });
+
+  return ret;
+}
+
+inline bool SSLClient::initialize_ssl(Socket &socket, Error &error) {
+  auto ssl = detail::ssl_new(
+      socket.sock, ctx_, ctx_mutex_,
+      [&](SSL *ssl2) {
+        if (server_certificate_verification_) {
+          if (!load_certs()) {
+            error = Error::SSLLoadingCerts;
+            return false;
+          }
+          SSL_set_verify(ssl2, SSL_VERIFY_NONE, nullptr);
+        }
+
+        if (!detail::ssl_connect_or_accept_nonblocking(
+                socket.sock, ssl2, SSL_connect, connection_timeout_sec_,
+                connection_timeout_usec_)) {
+          error = Error::SSLConnection;
+          return false;
+        }
+
+        if (server_certificate_verification_) {
+          if (server_certificate_verifier_) {
+            if (!server_certificate_verifier_(ssl2)) {
+              error = Error::SSLServerVerification;
+              return false;
+            }
+          } else {
+            verify_result_ = SSL_get_verify_result(ssl2);
+
+            if (verify_result_ != X509_V_OK) {
+              error = Error::SSLServerVerification;
+              return false;
+            }
+
+            auto server_cert = SSL_get1_peer_certificate(ssl2);
+            auto se = detail::scope_exit([&] { X509_free(server_cert); });
+
+            if (server_cert == nullptr) {
+              error = Error::SSLServerVerification;
+              return false;
+            }
+
+            if (server_hostname_verification_) {
+              if (!verify_host(server_cert)) {
+                error = Error::SSLServerHostnameVerification;
+                return false;
+              }
+            }
+          }
+        }
+
+        return true;
+      },
+      [&](SSL *ssl2) {
+#if defined(OPENSSL_IS_BORINGSSL)
+        SSL_set_tlsext_host_name(ssl2, host_.c_str());
+#else
+        // NOTE: Direct call instead of using the OpenSSL macro to suppress
+        // -Wold-style-cast warning
+        SSL_ctrl(ssl2, SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_host_name,
+                 static_cast<void *>(const_cast<char *>(host_.c_str())));
+#endif
+        return true;
+      });
+
+  if (ssl) {
+    socket.ssl = ssl;
+    return true;
+  }
+
+  shutdown_socket(socket);
+  close_socket(socket);
+  return false;
+}
+
+inline void SSLClient::shutdown_ssl(Socket &socket, bool shutdown_gracefully) {
+  shutdown_ssl_impl(socket, shutdown_gracefully);
+}
+
+inline void SSLClient::shutdown_ssl_impl(Socket &socket,
+                                         bool shutdown_gracefully) {
+  if (socket.sock == INVALID_SOCKET) {
+    assert(socket.ssl == nullptr);
+    return;
+  }
+  if (socket.ssl) {
+    detail::ssl_delete(ctx_mutex_, socket.ssl, socket.sock,
+                       shutdown_gracefully);
+    socket.ssl = nullptr;
+  }
+  assert(socket.ssl == nullptr);
+}
+
+inline bool
+SSLClient::process_socket(const Socket &socket,
+                          std::function<bool(Stream &strm)> callback) {
+  assert(socket.ssl);
+  return detail::process_client_socket_ssl(
+      socket.ssl, socket.sock, read_timeout_sec_, read_timeout_usec_,
+      write_timeout_sec_, write_timeout_usec_, std::move(callback));
+}
+
+inline bool SSLClient::is_ssl() const { return true; }
+
+inline bool SSLClient::verify_host(X509 *server_cert) const {
+  /* Quote from RFC2818 section 3.1 "Server Identity"
+
+     If a subjectAltName extension of type dNSName is present, that MUST
+     be used as the identity. Otherwise, the (most specific) Common Name
+     field in the Subject field of the certificate MUST be used. Although
+     the use of the Common Name is existing practice, it is deprecated and
+     Certification Authorities are encouraged to use the dNSName instead.
+
+     Matching is performed using the matching rules specified by
+     [RFC2459].  If more than one identity of a given type is present in
+     the certificate (e.g., more than one dNSName name, a match in any one
+     of the set is considered acceptable.) Names may contain the wildcard
+     character * which is considered to match any single domain name
+     component or component fragment. E.g., *.a.com matches foo.a.com but
+     not bar.foo.a.com. f*.com matches foo.com but not bar.com.
+
+     In some cases, the URI is specified as an IP address rather than a
+     hostname. In this case, the iPAddress subjectAltName must be present
+     in the certificate and must exactly match the IP in the URI.
+
+  */
+  return verify_host_with_subject_alt_name(server_cert) ||
+         verify_host_with_common_name(server_cert);
+}
+
+inline bool
+SSLClient::verify_host_with_subject_alt_name(X509 *server_cert) const {
+  auto ret = false;
+
+  auto type = GEN_DNS;
+
+  struct in6_addr addr6{};
+  struct in_addr addr{};
+  size_t addr_len = 0;
+
+#ifndef __MINGW32__
+  if (inet_pton(AF_INET6, host_.c_str(), &addr6)) {
+    type = GEN_IPADD;
+    addr_len = sizeof(struct in6_addr);
+  } else if (inet_pton(AF_INET, host_.c_str(), &addr)) {
+    type = GEN_IPADD;
+    addr_len = sizeof(struct in_addr);
+  }
+#endif
+
+  auto alt_names = static_cast<const struct stack_st_GENERAL_NAME *>(
+      X509_get_ext_d2i(server_cert, NID_subject_alt_name, nullptr, nullptr));
+
+  if (alt_names) {
+    auto dsn_matched = false;
+    auto ip_matched = false;
+
+    auto count = sk_GENERAL_NAME_num(alt_names);
+
+    for (decltype(count) i = 0; i < count && !dsn_matched; i++) {
+      auto val = sk_GENERAL_NAME_value(alt_names, i);
+      if (val->type == type) {
+        auto name =
+            reinterpret_cast<const char *>(ASN1_STRING_get0_data(val->d.ia5));
+        auto name_len = static_cast<size_t>(ASN1_STRING_length(val->d.ia5));
+
+        switch (type) {
+        case GEN_DNS: dsn_matched = check_host_name(name, name_len); break;
+
+        case GEN_IPADD:
+          if (!memcmp(&addr6, name, addr_len) ||
+              !memcmp(&addr, name, addr_len)) {
+            ip_matched = true;
+          }
+          break;
+        }
+      }
+    }
+
+    if (dsn_matched || ip_matched) { ret = true; }
+  }
+
+  GENERAL_NAMES_free(const_cast<STACK_OF(GENERAL_NAME) *>(
+      reinterpret_cast<const STACK_OF(GENERAL_NAME) *>(alt_names)));
+  return ret;
+}
+
+inline bool SSLClient::verify_host_with_common_name(X509 *server_cert) const {
+  const auto subject_name = X509_get_subject_name(server_cert);
+
+  if (subject_name != nullptr) {
+    char name[BUFSIZ];
+    auto name_len = X509_NAME_get_text_by_NID(subject_name, NID_commonName,
+                                              name, sizeof(name));
+
+    if (name_len != -1) {
+      return check_host_name(name, static_cast<size_t>(name_len));
+    }
+  }
+
+  return false;
+}
+
+inline bool SSLClient::check_host_name(const char *pattern,
+                                       size_t pattern_len) const {
+  if (host_.size() == pattern_len && host_ == pattern) { return true; }
+
+  // Wildcard match
+  // https://bugs.launchpad.net/ubuntu/+source/firefox-3.0/+bug/376484
+  std::vector<std::string> pattern_components;
+  detail::split(&pattern[0], &pattern[pattern_len], '.',
+                [&](const char *b, const char *e) {
+                  pattern_components.emplace_back(b, e);
+                });
+
+  if (host_components_.size() != pattern_components.size()) { return false; }
+
+  auto itr = pattern_components.begin();
+  for (const auto &h : host_components_) {
+    auto &p = *itr;
+    if (p != h && p != "*") {
+      auto partial_match = (p.size() > 0 && p[p.size() - 1] == '*' &&
+                            !p.compare(0, p.size() - 1, h));
+      if (!partial_match) { return false; }
+    }
+    ++itr;
+  }
+
+  return true;
+}
+#endif
+
+// Universal client implementation
+inline Client::Client(const std::string &scheme_host_port)
+    : Client(scheme_host_port, std::string(), std::string()) {}
+
+inline Client::Client(const std::string &scheme_host_port,
+                      const std::string &client_cert_path,
+                      const std::string &client_key_path) {
+  const static std::regex re(
+      R"((?:([a-z]+):\/\/)?(?:\[([a-fA-F\d:]+)\]|([^:/?#]+))(?::(\d+))?)");
+
+  std::smatch m;
