@@ -1810,3 +1810,607 @@ static unsigned deflateDynamic(LodePNGBitWriter* writer, Hash* hash,
   tree_cl in CLCL_ORDER, then due to the huffman compression of huffman tree representations ("two levels"), there are
   some analogies:
   bitlen_lld is to tree_cl what data is to tree_ll and tree_d.
+  bitlen_lld_e is to bitlen_lld what lz77_encoded is to data.
+  bitlen_cl is to bitlen_lld_e what bitlen_lld is to lz77_encoded.
+  */
+
+  unsigned BFINAL = final;
+  size_t i;
+  size_t numcodes_ll, numcodes_d, numcodes_lld, numcodes_lld_e, numcodes_cl;
+  unsigned HLIT, HDIST, HCLEN;
+
+  uivector_init(&lz77_encoded);
+  HuffmanTree_init(&tree_ll);
+  HuffmanTree_init(&tree_d);
+  HuffmanTree_init(&tree_cl);
+  /* could fit on stack, but >1KB is on the larger side so allocate instead */
+  frequencies_ll = (unsigned*)lodepng_malloc(286 * sizeof(*frequencies_ll));
+  frequencies_d = (unsigned*)lodepng_malloc(30 * sizeof(*frequencies_d));
+  frequencies_cl = (unsigned*)lodepng_malloc(NUM_CODE_LENGTH_CODES * sizeof(*frequencies_cl));
+
+  if(!frequencies_ll || !frequencies_d || !frequencies_cl) error = 83; /*alloc fail*/
+
+  /*This while loop never loops due to a break at the end, it is here to
+  allow breaking out of it to the cleanup phase on error conditions.*/
+  while(!error) {
+    lodepng_memset(frequencies_ll, 0, 286 * sizeof(*frequencies_ll));
+    lodepng_memset(frequencies_d, 0, 30 * sizeof(*frequencies_d));
+    lodepng_memset(frequencies_cl, 0, NUM_CODE_LENGTH_CODES * sizeof(*frequencies_cl));
+
+    if(settings->use_lz77) {
+      error = encodeLZ77(&lz77_encoded, hash, data, datapos, dataend, settings->windowsize,
+                         settings->minmatch, settings->nicematch, settings->lazymatching);
+      if(error) break;
+    } else {
+      if(!uivector_resize(&lz77_encoded, datasize)) ERROR_BREAK(83 /*alloc fail*/);
+      for(i = datapos; i < dataend; ++i) lz77_encoded.data[i - datapos] = data[i]; /*no LZ77, but still will be Huffman compressed*/
+    }
+
+    /*Count the frequencies of lit, len and dist codes*/
+    for(i = 0; i != lz77_encoded.size; ++i) {
+      unsigned symbol = lz77_encoded.data[i];
+      ++frequencies_ll[symbol];
+      if(symbol > 256) {
+        unsigned dist = lz77_encoded.data[i + 2];
+        ++frequencies_d[dist];
+        i += 3;
+      }
+    }
+    frequencies_ll[256] = 1; /*there will be exactly 1 end code, at the end of the block*/
+
+    /*Make both huffman trees, one for the lit and len codes, one for the dist codes*/
+    error = HuffmanTree_makeFromFrequencies(&tree_ll, frequencies_ll, 257, 286, 15);
+    if(error) break;
+    /*2, not 1, is chosen for mincodes: some buggy PNG decoders require at least 2 symbols in the dist tree*/
+    error = HuffmanTree_makeFromFrequencies(&tree_d, frequencies_d, 2, 30, 15);
+    if(error) break;
+
+    numcodes_ll = LODEPNG_MIN(tree_ll.numcodes, 286);
+    numcodes_d = LODEPNG_MIN(tree_d.numcodes, 30);
+    /*store the code lengths of both generated trees in bitlen_lld*/
+    numcodes_lld = numcodes_ll + numcodes_d;
+    bitlen_lld = (unsigned*)lodepng_malloc(numcodes_lld * sizeof(*bitlen_lld));
+    /*numcodes_lld_e never needs more size than bitlen_lld*/
+    bitlen_lld_e = (unsigned*)lodepng_malloc(numcodes_lld * sizeof(*bitlen_lld_e));
+    if(!bitlen_lld || !bitlen_lld_e) ERROR_BREAK(83); /*alloc fail*/
+    numcodes_lld_e = 0;
+
+    for(i = 0; i != numcodes_ll; ++i) bitlen_lld[i] = tree_ll.lengths[i];
+    for(i = 0; i != numcodes_d; ++i) bitlen_lld[numcodes_ll + i] = tree_d.lengths[i];
+
+    /*run-length compress bitlen_ldd into bitlen_lld_e by using repeat codes 16 (copy length 3-6 times),
+    17 (3-10 zeroes), 18 (11-138 zeroes)*/
+    for(i = 0; i != numcodes_lld; ++i) {
+      unsigned j = 0; /*amount of repetitions*/
+      while(i + j + 1 < numcodes_lld && bitlen_lld[i + j + 1] == bitlen_lld[i]) ++j;
+
+      if(bitlen_lld[i] == 0 && j >= 2) /*repeat code for zeroes*/ {
+        ++j; /*include the first zero*/
+        if(j <= 10) /*repeat code 17 supports max 10 zeroes*/ {
+          bitlen_lld_e[numcodes_lld_e++] = 17;
+          bitlen_lld_e[numcodes_lld_e++] = j - 3;
+        } else /*repeat code 18 supports max 138 zeroes*/ {
+          if(j > 138) j = 138;
+          bitlen_lld_e[numcodes_lld_e++] = 18;
+          bitlen_lld_e[numcodes_lld_e++] = j - 11;
+        }
+        i += (j - 1);
+      } else if(j >= 3) /*repeat code for value other than zero*/ {
+        size_t k;
+        unsigned num = j / 6u, rest = j % 6u;
+        bitlen_lld_e[numcodes_lld_e++] = bitlen_lld[i];
+        for(k = 0; k < num; ++k) {
+          bitlen_lld_e[numcodes_lld_e++] = 16;
+          bitlen_lld_e[numcodes_lld_e++] = 6 - 3;
+        }
+        if(rest >= 3) {
+          bitlen_lld_e[numcodes_lld_e++] = 16;
+          bitlen_lld_e[numcodes_lld_e++] = rest - 3;
+        }
+        else j -= rest;
+        i += j;
+      } else /*too short to benefit from repeat code*/ {
+        bitlen_lld_e[numcodes_lld_e++] = bitlen_lld[i];
+      }
+    }
+
+    /*generate tree_cl, the huffmantree of huffmantrees*/
+    for(i = 0; i != numcodes_lld_e; ++i) {
+      ++frequencies_cl[bitlen_lld_e[i]];
+      /*after a repeat code come the bits that specify the number of repetitions,
+      those don't need to be in the frequencies_cl calculation*/
+      if(bitlen_lld_e[i] >= 16) ++i;
+    }
+
+    error = HuffmanTree_makeFromFrequencies(&tree_cl, frequencies_cl,
+                                            NUM_CODE_LENGTH_CODES, NUM_CODE_LENGTH_CODES, 7);
+    if(error) break;
+
+    /*compute amount of code-length-code-lengths to output*/
+    numcodes_cl = NUM_CODE_LENGTH_CODES;
+    /*trim zeros at the end (using CLCL_ORDER), but minimum size must be 4 (see HCLEN below)*/
+    while(numcodes_cl > 4u && tree_cl.lengths[CLCL_ORDER[numcodes_cl - 1u]] == 0) {
+      numcodes_cl--;
+    }
+
+    /*
+    Write everything into the output
+
+    After the BFINAL and BTYPE, the dynamic block consists out of the following:
+    - 5 bits HLIT, 5 bits HDIST, 4 bits HCLEN
+    - (HCLEN+4)*3 bits code lengths of code length alphabet
+    - HLIT + 257 code lengths of lit/length alphabet (encoded using the code length
+      alphabet, + possible repetition codes 16, 17, 18)
+    - HDIST + 1 code lengths of distance alphabet (encoded using the code length
+      alphabet, + possible repetition codes 16, 17, 18)
+    - compressed data
+    - 256 (end code)
+    */
+
+    /*Write block type*/
+    writeBits(writer, BFINAL, 1);
+    writeBits(writer, 0, 1); /*first bit of BTYPE "dynamic"*/
+    writeBits(writer, 1, 1); /*second bit of BTYPE "dynamic"*/
+
+    /*write the HLIT, HDIST and HCLEN values*/
+    /*all three sizes take trimmed ending zeroes into account, done either by HuffmanTree_makeFromFrequencies
+    or in the loop for numcodes_cl above, which saves space. */
+    HLIT = (unsigned)(numcodes_ll - 257);
+    HDIST = (unsigned)(numcodes_d - 1);
+    HCLEN = (unsigned)(numcodes_cl - 4);
+    writeBits(writer, HLIT, 5);
+    writeBits(writer, HDIST, 5);
+    writeBits(writer, HCLEN, 4);
+
+    /*write the code lengths of the code length alphabet ("bitlen_cl")*/
+    for(i = 0; i != numcodes_cl; ++i) writeBits(writer, tree_cl.lengths[CLCL_ORDER[i]], 3);
+
+    /*write the lengths of the lit/len AND the dist alphabet*/
+    for(i = 0; i != numcodes_lld_e; ++i) {
+      writeBitsReversed(writer, tree_cl.codes[bitlen_lld_e[i]], tree_cl.lengths[bitlen_lld_e[i]]);
+      /*extra bits of repeat codes*/
+      if(bitlen_lld_e[i] == 16) writeBits(writer, bitlen_lld_e[++i], 2);
+      else if(bitlen_lld_e[i] == 17) writeBits(writer, bitlen_lld_e[++i], 3);
+      else if(bitlen_lld_e[i] == 18) writeBits(writer, bitlen_lld_e[++i], 7);
+    }
+
+    /*write the compressed data symbols*/
+    writeLZ77data(writer, &lz77_encoded, &tree_ll, &tree_d);
+    /*error: the length of the end code 256 must be larger than 0*/
+    if(tree_ll.lengths[256] == 0) ERROR_BREAK(64);
+
+    /*write the end code*/
+    writeBitsReversed(writer, tree_ll.codes[256], tree_ll.lengths[256]);
+
+    break; /*end of error-while*/
+  }
+
+  /*cleanup*/
+  uivector_cleanup(&lz77_encoded);
+  HuffmanTree_cleanup(&tree_ll);
+  HuffmanTree_cleanup(&tree_d);
+  HuffmanTree_cleanup(&tree_cl);
+  lodepng_free(frequencies_ll);
+  lodepng_free(frequencies_d);
+  lodepng_free(frequencies_cl);
+  lodepng_free(bitlen_lld);
+  lodepng_free(bitlen_lld_e);
+
+  return error;
+}
+
+static unsigned deflateFixed(LodePNGBitWriter* writer, Hash* hash,
+                             const unsigned char* data,
+                             size_t datapos, size_t dataend,
+                             const LodePNGCompressSettings* settings, unsigned final) {
+  HuffmanTree tree_ll; /*tree for literal values and length codes*/
+  HuffmanTree tree_d; /*tree for distance codes*/
+
+  unsigned BFINAL = final;
+  unsigned error = 0;
+  size_t i;
+
+  HuffmanTree_init(&tree_ll);
+  HuffmanTree_init(&tree_d);
+
+  error = generateFixedLitLenTree(&tree_ll);
+  if(!error) error = generateFixedDistanceTree(&tree_d);
+
+  if(!error) {
+    writeBits(writer, BFINAL, 1);
+    writeBits(writer, 1, 1); /*first bit of BTYPE*/
+    writeBits(writer, 0, 1); /*second bit of BTYPE*/
+
+    if(settings->use_lz77) /*LZ77 encoded*/ {
+      uivector lz77_encoded;
+      uivector_init(&lz77_encoded);
+      error = encodeLZ77(&lz77_encoded, hash, data, datapos, dataend, settings->windowsize,
+                         settings->minmatch, settings->nicematch, settings->lazymatching);
+      if(!error) writeLZ77data(writer, &lz77_encoded, &tree_ll, &tree_d);
+      uivector_cleanup(&lz77_encoded);
+    } else /*no LZ77, but still will be Huffman compressed*/ {
+      for(i = datapos; i < dataend; ++i) {
+        writeBitsReversed(writer, tree_ll.codes[data[i]], tree_ll.lengths[data[i]]);
+      }
+    }
+    /*add END code*/
+    if(!error) writeBitsReversed(writer,tree_ll.codes[256], tree_ll.lengths[256]);
+  }
+
+  /*cleanup*/
+  HuffmanTree_cleanup(&tree_ll);
+  HuffmanTree_cleanup(&tree_d);
+
+  return error;
+}
+
+static unsigned lodepng_deflatev(ucvector* out, const unsigned char* in, size_t insize,
+                                 const LodePNGCompressSettings* settings) {
+  unsigned error = 0;
+  size_t i, blocksize, numdeflateblocks;
+  Hash hash;
+  LodePNGBitWriter writer;
+
+  LodePNGBitWriter_init(&writer, out);
+
+  if(settings->btype > 2) return 61;
+  else if(settings->btype == 0) return deflateNoCompression(out, in, insize);
+  else if(settings->btype == 1) blocksize = insize;
+  else /*if(settings->btype == 2)*/ {
+    /*on PNGs, deflate blocks of 65-262k seem to give most dense encoding*/
+    blocksize = insize / 8u + 8;
+    if(blocksize < 65536) blocksize = 65536;
+    if(blocksize > 262144) blocksize = 262144;
+  }
+
+  numdeflateblocks = (insize + blocksize - 1) / blocksize;
+  if(numdeflateblocks == 0) numdeflateblocks = 1;
+
+  error = hash_init(&hash, settings->windowsize);
+
+  if(!error) {
+    for(i = 0; i != numdeflateblocks && !error; ++i) {
+      unsigned final = (i == numdeflateblocks - 1);
+      size_t start = i * blocksize;
+      size_t end = start + blocksize;
+      if(end > insize) end = insize;
+
+      if(settings->btype == 1) error = deflateFixed(&writer, &hash, in, start, end, settings, final);
+      else if(settings->btype == 2) error = deflateDynamic(&writer, &hash, in, start, end, settings, final);
+    }
+  }
+
+  hash_cleanup(&hash);
+
+  return error;
+}
+
+unsigned lodepng_deflate(unsigned char** out, size_t* outsize,
+                         const unsigned char* in, size_t insize,
+                         const LodePNGCompressSettings* settings) {
+  ucvector v = ucvector_init(*out, *outsize);
+  unsigned error = lodepng_deflatev(&v, in, insize, settings);
+  *out = v.data;
+  *outsize = v.size;
+  return error;
+}
+
+static unsigned deflate(unsigned char** out, size_t* outsize,
+                        const unsigned char* in, size_t insize,
+                        const LodePNGCompressSettings* settings) {
+  if(settings->custom_deflate) {
+    unsigned error = settings->custom_deflate(out, outsize, in, insize, settings);
+    /*the custom deflate is allowed to have its own error codes, however, we translate it to code 111*/
+    return error ? 111 : 0;
+  } else {
+    return lodepng_deflate(out, outsize, in, insize, settings);
+  }
+}
+
+#endif /*LODEPNG_COMPILE_DECODER*/
+
+/* ////////////////////////////////////////////////////////////////////////// */
+/* / Adler32                                                                / */
+/* ////////////////////////////////////////////////////////////////////////// */
+
+static unsigned update_adler32(unsigned adler, const unsigned char* data, unsigned len) {
+  unsigned s1 = adler & 0xffffu;
+  unsigned s2 = (adler >> 16u) & 0xffffu;
+
+  while(len != 0u) {
+    unsigned i;
+    /*at least 5552 sums can be done before the sums overflow, saving a lot of module divisions*/
+    unsigned amount = len > 5552u ? 5552u : len;
+    len -= amount;
+    for(i = 0; i != amount; ++i) {
+      s1 += (*data++);
+      s2 += s1;
+    }
+    s1 %= 65521u;
+    s2 %= 65521u;
+  }
+
+  return (s2 << 16u) | s1;
+}
+
+/*Return the adler32 of the bytes data[0..len-1]*/
+static unsigned adler32(const unsigned char* data, unsigned len) {
+  return update_adler32(1u, data, len);
+}
+
+/* ////////////////////////////////////////////////////////////////////////// */
+/* / Zlib                                                                   / */
+/* ////////////////////////////////////////////////////////////////////////// */
+
+#ifdef LODEPNG_COMPILE_DECODER
+
+static unsigned lodepng_zlib_decompressv(ucvector* out,
+                                         const unsigned char* in, size_t insize,
+                                         const LodePNGDecompressSettings* settings) {
+  unsigned error = 0;
+  unsigned CM, CINFO, FDICT;
+
+  if(insize < 2) return 53; /*error, size of zlib data too small*/
+  /*read information from zlib header*/
+  if((in[0] * 256 + in[1]) % 31 != 0) {
+    /*error: 256 * in[0] + in[1] must be a multiple of 31, the FCHECK value is supposed to be made that way*/
+    return 24;
+  }
+
+  CM = in[0] & 15;
+  CINFO = (in[0] >> 4) & 15;
+  /*FCHECK = in[1] & 31;*/ /*FCHECK is already tested above*/
+  FDICT = (in[1] >> 5) & 1;
+  /*FLEVEL = (in[1] >> 6) & 3;*/ /*FLEVEL is not used here*/
+
+  if(CM != 8 || CINFO > 7) {
+    /*error: only compression method 8: inflate with sliding window of 32k is supported by the PNG spec*/
+    return 25;
+  }
+  if(FDICT != 0) {
+    /*error: the specification of PNG says about the zlib stream:
+      "The additional flags shall not specify a preset dictionary."*/
+    return 26;
+  }
+
+  error = inflatev(out, in + 2, insize - 2, settings);
+  if(error) return error;
+
+  if(!settings->ignore_adler32) {
+    unsigned ADLER32 = lodepng_read32bitInt(&in[insize - 4]);
+    unsigned checksum = adler32(out->data, (unsigned)(out->size));
+    if(checksum != ADLER32) return 58; /*error, adler checksum not correct, data must be corrupted*/
+  }
+
+  return 0; /*no error*/
+}
+
+
+unsigned lodepng_zlib_decompress(unsigned char** out, size_t* outsize, const unsigned char* in,
+                                 size_t insize, const LodePNGDecompressSettings* settings) {
+  ucvector v = ucvector_init(*out, *outsize);
+  unsigned error = lodepng_zlib_decompressv(&v, in, insize, settings);
+  *out = v.data;
+  *outsize = v.size;
+  return error;
+}
+
+/*expected_size is expected output size, to avoid intermediate allocations. Set to 0 if not known. */
+static unsigned zlib_decompress(unsigned char** out, size_t* outsize, size_t expected_size,
+                                const unsigned char* in, size_t insize, const LodePNGDecompressSettings* settings) {
+  unsigned error;
+  if(settings->custom_zlib) {
+    error = settings->custom_zlib(out, outsize, in, insize, settings);
+    if(error) {
+      /*the custom zlib is allowed to have its own error codes, however, we translate it to code 110*/
+      error = 110;
+      /*if there's a max output size, and the custom zlib returned error, then indicate that error instead*/
+      if(settings->max_output_size && *outsize > settings->max_output_size) error = 109;
+    }
+  } else {
+    ucvector v = ucvector_init(*out, *outsize);
+    if(expected_size) {
+      /*reserve the memory to avoid intermediate reallocations*/
+      ucvector_resize(&v, *outsize + expected_size);
+      v.size = *outsize;
+    }
+    error = lodepng_zlib_decompressv(&v, in, insize, settings);
+    *out = v.data;
+    *outsize = v.size;
+  }
+  return error;
+}
+
+#endif /*LODEPNG_COMPILE_DECODER*/
+
+#ifdef LODEPNG_COMPILE_ENCODER
+
+unsigned lodepng_zlib_compress(unsigned char** out, size_t* outsize, const unsigned char* in,
+                               size_t insize, const LodePNGCompressSettings* settings) {
+  size_t i;
+  unsigned error;
+  unsigned char* deflatedata = 0;
+  size_t deflatesize = 0;
+
+  error = deflate(&deflatedata, &deflatesize, in, insize, settings);
+
+  *out = NULL;
+  *outsize = 0;
+  if(!error) {
+    *outsize = deflatesize + 6;
+    *out = (unsigned char*)lodepng_malloc(*outsize);
+    if(!*out) error = 83; /*alloc fail*/
+  }
+
+  if(!error) {
+    unsigned ADLER32 = adler32(in, (unsigned)insize);
+    /*zlib data: 1 byte CMF (CM+CINFO), 1 byte FLG, deflate data, 4 byte ADLER32 checksum of the Decompressed data*/
+    unsigned CMF = 120; /*0b01111000: CM 8, CINFO 7. With CINFO 7, any window size up to 32768 can be used.*/
+    unsigned FLEVEL = 0;
+    unsigned FDICT = 0;
+    unsigned CMFFLG = 256 * CMF + FDICT * 32 + FLEVEL * 64;
+    unsigned FCHECK = 31 - CMFFLG % 31;
+    CMFFLG += FCHECK;
+
+    (*out)[0] = (unsigned char)(CMFFLG >> 8);
+    (*out)[1] = (unsigned char)(CMFFLG & 255);
+    for(i = 0; i != deflatesize; ++i) (*out)[i + 2] = deflatedata[i];
+    lodepng_set32bitInt(&(*out)[*outsize - 4], ADLER32);
+  }
+
+  lodepng_free(deflatedata);
+  return error;
+}
+
+/* compress using the default or custom zlib function */
+static unsigned zlib_compress(unsigned char** out, size_t* outsize, const unsigned char* in,
+                              size_t insize, const LodePNGCompressSettings* settings) {
+  if(settings->custom_zlib) {
+    unsigned error = settings->custom_zlib(out, outsize, in, insize, settings);
+    /*the custom zlib is allowed to have its own error codes, however, we translate it to code 111*/
+    return error ? 111 : 0;
+  } else {
+    return lodepng_zlib_compress(out, outsize, in, insize, settings);
+  }
+}
+
+#endif /*LODEPNG_COMPILE_ENCODER*/
+
+#else /*no LODEPNG_COMPILE_ZLIB*/
+
+#ifdef LODEPNG_COMPILE_DECODER
+static unsigned zlib_decompress(unsigned char** out, size_t* outsize, size_t expected_size,
+                                const unsigned char* in, size_t insize, const LodePNGDecompressSettings* settings) {
+  if(!settings->custom_zlib) return 87; /*no custom zlib function provided */
+  (void)expected_size;
+  return settings->custom_zlib(out, outsize, in, insize, settings);
+}
+#endif /*LODEPNG_COMPILE_DECODER*/
+#ifdef LODEPNG_COMPILE_ENCODER
+static unsigned zlib_compress(unsigned char** out, size_t* outsize, const unsigned char* in,
+                              size_t insize, const LodePNGCompressSettings* settings) {
+  if(!settings->custom_zlib) return 87; /*no custom zlib function provided */
+  return settings->custom_zlib(out, outsize, in, insize, settings);
+}
+#endif /*LODEPNG_COMPILE_ENCODER*/
+
+#endif /*LODEPNG_COMPILE_ZLIB*/
+
+/* ////////////////////////////////////////////////////////////////////////// */
+
+#ifdef LODEPNG_COMPILE_ENCODER
+
+/*this is a good tradeoff between speed and compression ratio*/
+#define DEFAULT_WINDOWSIZE 2048
+
+void lodepng_compress_settings_init(LodePNGCompressSettings* settings) {
+  /*compress with dynamic huffman tree (not in the mathematical sense, just not the predefined one)*/
+  settings->btype = 2;
+  settings->use_lz77 = 1;
+  settings->windowsize = DEFAULT_WINDOWSIZE;
+  settings->minmatch = 3;
+  settings->nicematch = 128;
+  settings->lazymatching = 1;
+
+  settings->custom_zlib = 0;
+  settings->custom_deflate = 0;
+  settings->custom_context = 0;
+}
+
+const LodePNGCompressSettings lodepng_default_compress_settings = {2, 1, DEFAULT_WINDOWSIZE, 3, 128, 1, 0, 0, 0};
+
+
+#endif /*LODEPNG_COMPILE_ENCODER*/
+
+#ifdef LODEPNG_COMPILE_DECODER
+
+void lodepng_decompress_settings_init(LodePNGDecompressSettings* settings) {
+  settings->ignore_adler32 = 0;
+  settings->ignore_nlen = 0;
+  settings->max_output_size = 0;
+
+  settings->custom_zlib = 0;
+  settings->custom_inflate = 0;
+  settings->custom_context = 0;
+}
+
+const LodePNGDecompressSettings lodepng_default_decompress_settings = {0, 0, 0, 0, 0, 0};
+
+#endif /*LODEPNG_COMPILE_DECODER*/
+
+/* ////////////////////////////////////////////////////////////////////////// */
+/* ////////////////////////////////////////////////////////////////////////// */
+/* // End of Zlib related code. Begin of PNG related code.                 // */
+/* ////////////////////////////////////////////////////////////////////////// */
+/* ////////////////////////////////////////////////////////////////////////// */
+
+#ifdef LODEPNG_COMPILE_PNG
+
+/* ////////////////////////////////////////////////////////////////////////// */
+/* / CRC32                                                                  / */
+/* ////////////////////////////////////////////////////////////////////////// */
+
+
+#ifdef LODEPNG_COMPILE_CRC
+
+static const unsigned lodepng_crc32_table0[256] = {
+  0x00000000u, 0x77073096u, 0xee0e612cu, 0x990951bau, 0x076dc419u, 0x706af48fu, 0xe963a535u, 0x9e6495a3u,
+  0x0edb8832u, 0x79dcb8a4u, 0xe0d5e91eu, 0x97d2d988u, 0x09b64c2bu, 0x7eb17cbdu, 0xe7b82d07u, 0x90bf1d91u,
+  0x1db71064u, 0x6ab020f2u, 0xf3b97148u, 0x84be41deu, 0x1adad47du, 0x6ddde4ebu, 0xf4d4b551u, 0x83d385c7u,
+  0x136c9856u, 0x646ba8c0u, 0xfd62f97au, 0x8a65c9ecu, 0x14015c4fu, 0x63066cd9u, 0xfa0f3d63u, 0x8d080df5u,
+  0x3b6e20c8u, 0x4c69105eu, 0xd56041e4u, 0xa2677172u, 0x3c03e4d1u, 0x4b04d447u, 0xd20d85fdu, 0xa50ab56bu,
+  0x35b5a8fau, 0x42b2986cu, 0xdbbbc9d6u, 0xacbcf940u, 0x32d86ce3u, 0x45df5c75u, 0xdcd60dcfu, 0xabd13d59u,
+  0x26d930acu, 0x51de003au, 0xc8d75180u, 0xbfd06116u, 0x21b4f4b5u, 0x56b3c423u, 0xcfba9599u, 0xb8bda50fu,
+  0x2802b89eu, 0x5f058808u, 0xc60cd9b2u, 0xb10be924u, 0x2f6f7c87u, 0x58684c11u, 0xc1611dabu, 0xb6662d3du,
+  0x76dc4190u, 0x01db7106u, 0x98d220bcu, 0xefd5102au, 0x71b18589u, 0x06b6b51fu, 0x9fbfe4a5u, 0xe8b8d433u,
+  0x7807c9a2u, 0x0f00f934u, 0x9609a88eu, 0xe10e9818u, 0x7f6a0dbbu, 0x086d3d2du, 0x91646c97u, 0xe6635c01u,
+  0x6b6b51f4u, 0x1c6c6162u, 0x856530d8u, 0xf262004eu, 0x6c0695edu, 0x1b01a57bu, 0x8208f4c1u, 0xf50fc457u,
+  0x65b0d9c6u, 0x12b7e950u, 0x8bbeb8eau, 0xfcb9887cu, 0x62dd1ddfu, 0x15da2d49u, 0x8cd37cf3u, 0xfbd44c65u,
+  0x4db26158u, 0x3ab551ceu, 0xa3bc0074u, 0xd4bb30e2u, 0x4adfa541u, 0x3dd895d7u, 0xa4d1c46du, 0xd3d6f4fbu,
+  0x4369e96au, 0x346ed9fcu, 0xad678846u, 0xda60b8d0u, 0x44042d73u, 0x33031de5u, 0xaa0a4c5fu, 0xdd0d7cc9u,
+  0x5005713cu, 0x270241aau, 0xbe0b1010u, 0xc90c2086u, 0x5768b525u, 0x206f85b3u, 0xb966d409u, 0xce61e49fu,
+  0x5edef90eu, 0x29d9c998u, 0xb0d09822u, 0xc7d7a8b4u, 0x59b33d17u, 0x2eb40d81u, 0xb7bd5c3bu, 0xc0ba6cadu,
+  0xedb88320u, 0x9abfb3b6u, 0x03b6e20cu, 0x74b1d29au, 0xead54739u, 0x9dd277afu, 0x04db2615u, 0x73dc1683u,
+  0xe3630b12u, 0x94643b84u, 0x0d6d6a3eu, 0x7a6a5aa8u, 0xe40ecf0bu, 0x9309ff9du, 0x0a00ae27u, 0x7d079eb1u,
+  0xf00f9344u, 0x8708a3d2u, 0x1e01f268u, 0x6906c2feu, 0xf762575du, 0x806567cbu, 0x196c3671u, 0x6e6b06e7u,
+  0xfed41b76u, 0x89d32be0u, 0x10da7a5au, 0x67dd4accu, 0xf9b9df6fu, 0x8ebeeff9u, 0x17b7be43u, 0x60b08ed5u,
+  0xd6d6a3e8u, 0xa1d1937eu, 0x38d8c2c4u, 0x4fdff252u, 0xd1bb67f1u, 0xa6bc5767u, 0x3fb506ddu, 0x48b2364bu,
+  0xd80d2bdau, 0xaf0a1b4cu, 0x36034af6u, 0x41047a60u, 0xdf60efc3u, 0xa867df55u, 0x316e8eefu, 0x4669be79u,
+  0xcb61b38cu, 0xbc66831au, 0x256fd2a0u, 0x5268e236u, 0xcc0c7795u, 0xbb0b4703u, 0x220216b9u, 0x5505262fu,
+  0xc5ba3bbeu, 0xb2bd0b28u, 0x2bb45a92u, 0x5cb36a04u, 0xc2d7ffa7u, 0xb5d0cf31u, 0x2cd99e8bu, 0x5bdeae1du,
+  0x9b64c2b0u, 0xec63f226u, 0x756aa39cu, 0x026d930au, 0x9c0906a9u, 0xeb0e363fu, 0x72076785u, 0x05005713u,
+  0x95bf4a82u, 0xe2b87a14u, 0x7bb12baeu, 0x0cb61b38u, 0x92d28e9bu, 0xe5d5be0du, 0x7cdcefb7u, 0x0bdbdf21u,
+  0x86d3d2d4u, 0xf1d4e242u, 0x68ddb3f8u, 0x1fda836eu, 0x81be16cdu, 0xf6b9265bu, 0x6fb077e1u, 0x18b74777u,
+  0x88085ae6u, 0xff0f6a70u, 0x66063bcau, 0x11010b5cu, 0x8f659effu, 0xf862ae69u, 0x616bffd3u, 0x166ccf45u,
+  0xa00ae278u, 0xd70dd2eeu, 0x4e048354u, 0x3903b3c2u, 0xa7672661u, 0xd06016f7u, 0x4969474du, 0x3e6e77dbu,
+  0xaed16a4au, 0xd9d65adcu, 0x40df0b66u, 0x37d83bf0u, 0xa9bcae53u, 0xdebb9ec5u, 0x47b2cf7fu, 0x30b5ffe9u,
+  0xbdbdf21cu, 0xcabac28au, 0x53b39330u, 0x24b4a3a6u, 0xbad03605u, 0xcdd70693u, 0x54de5729u, 0x23d967bfu,
+  0xb3667a2eu, 0xc4614ab8u, 0x5d681b02u, 0x2a6f2b94u, 0xb40bbe37u, 0xc30c8ea1u, 0x5a05df1bu, 0x2d02ef8du
+};
+
+static const unsigned lodepng_crc32_table1[256] = {
+  0x00000000u, 0x191b3141u, 0x32366282u, 0x2b2d53c3u, 0x646cc504u, 0x7d77f445u, 0x565aa786u, 0x4f4196c7u,
+  0xc8d98a08u, 0xd1c2bb49u, 0xfaefe88au, 0xe3f4d9cbu, 0xacb54f0cu, 0xb5ae7e4du, 0x9e832d8eu, 0x87981ccfu,
+  0x4ac21251u, 0x53d92310u, 0x78f470d3u, 0x61ef4192u, 0x2eaed755u, 0x37b5e614u, 0x1c98b5d7u, 0x05838496u,
+  0x821b9859u, 0x9b00a918u, 0xb02dfadbu, 0xa936cb9au, 0xe6775d5du, 0xff6c6c1cu, 0xd4413fdfu, 0xcd5a0e9eu,
+  0x958424a2u, 0x8c9f15e3u, 0xa7b24620u, 0xbea97761u, 0xf1e8e1a6u, 0xe8f3d0e7u, 0xc3de8324u, 0xdac5b265u,
+  0x5d5daeaau, 0x44469febu, 0x6f6bcc28u, 0x7670fd69u, 0x39316baeu, 0x202a5aefu, 0x0b07092cu, 0x121c386du,
+  0xdf4636f3u, 0xc65d07b2u, 0xed705471u, 0xf46b6530u, 0xbb2af3f7u, 0xa231c2b6u, 0x891c9175u, 0x9007a034u,
+  0x179fbcfbu, 0x0e848dbau, 0x25a9de79u, 0x3cb2ef38u, 0x73f379ffu, 0x6ae848beu, 0x41c51b7du, 0x58de2a3cu,
+  0xf0794f05u, 0xe9627e44u, 0xc24f2d87u, 0xdb541cc6u, 0x94158a01u, 0x8d0ebb40u, 0xa623e883u, 0xbf38d9c2u,
+  0x38a0c50du, 0x21bbf44cu, 0x0a96a78fu, 0x138d96ceu, 0x5ccc0009u, 0x45d73148u, 0x6efa628bu, 0x77e153cau,
+  0xbabb5d54u, 0xa3a06c15u, 0x888d3fd6u, 0x91960e97u, 0xded79850u, 0xc7cca911u, 0xece1fad2u, 0xf5facb93u,
+  0x7262d75cu, 0x6b79e61du, 0x4054b5deu, 0x594f849fu, 0x160e1258u, 0x0f152319u, 0x243870dau, 0x3d23419bu,
+  0x65fd6ba7u, 0x7ce65ae6u, 0x57cb0925u, 0x4ed03864u, 0x0191aea3u, 0x188a9fe2u, 0x33a7cc21u, 0x2abcfd60u,
+  0xad24e1afu, 0xb43fd0eeu, 0x9f12832du, 0x8609b26cu, 0xc94824abu, 0xd05315eau, 0xfb7e4629u, 0xe2657768u,
+  0x2f3f79f6u, 0x362448b7u, 0x1d091b74u, 0x04122a35u, 0x4b53bcf2u, 0x52488db3u, 0x7965de70u, 0x607eef31u,
+  0xe7e6f3feu, 0xfefdc2bfu, 0xd5d0917cu, 0xcccba03du, 0x838a36fau, 0x9a9107bbu, 0xb1bc5478u, 0xa8a76539u,
+  0x3b83984bu, 0x2298a90au, 0x09b5fac9u, 0x10aecb88u, 0x5fef5d4fu, 0x46f46c0eu, 0x6dd93fcdu, 0x74c20e8cu,
+  0xf35a1243u, 0xea412302u, 0xc16c70c1u, 0xd8774180u, 0x9736d747u, 0x8e2de606u, 0xa500b5c5u, 0xbc1b8484u,
+  0x71418a1au, 0x685abb5bu, 0x4377e898u, 0x5a6cd9d9u, 0x152d4f1eu, 0x0c367e5fu, 0x271b2d9cu, 0x3e001cddu,
+  0xb9980012u, 0xa0833153u, 0x8bae6290u, 0x92b553d1u, 0xddf4c516u, 0xc4eff457u, 0xefc2a794u, 0xf6d996d5u,
+  0xae07bce9u, 0xb71c8da8u, 0x9c31de6bu, 0x852aef2au, 0xca6b79edu, 0xd37048acu, 0xf85d1b6fu, 0xe1462a2eu,
+  0x66de36e1u, 0x7fc507a0u, 0x54e85463u, 0x4df36522u, 0x02b2f3e5u, 0x1ba9c2a4u, 0x30849167u, 0x299fa026u,
+  0xe4c5aeb8u, 0xfdde9ff9u, 0xd6f3cc3au, 0xcfe8fd7bu, 0x80a96bbcu, 0x99b25afdu, 0xb29f093eu, 0xab84387fu,
+  0x2c1c24b0u, 0x350715f1u, 0x1e2a4632u, 0x07317773u, 0x4870e1b4u, 0x516bd0f5u, 0x7a468336u, 0x635db277u,
+  0xcbfad74eu, 0xd2e1e60fu, 0xf9ccb5ccu, 0xe0d7848du, 0xaf96124au, 0xb68d230bu, 0x9da070c8u, 0x84bb4189u,
