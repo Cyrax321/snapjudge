@@ -20648,3 +20648,593 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     }
 
     /// @brief return whether value is a floating-point number
+    /// @sa https://json.nlohmann.me/api/basic_json/is_number_float/
+    constexpr bool is_number_float() const noexcept
+    {
+        return m_data.m_type == value_t::number_float;
+    }
+
+    /// @brief return whether value is an object
+    /// @sa https://json.nlohmann.me/api/basic_json/is_object/
+    constexpr bool is_object() const noexcept
+    {
+        return m_data.m_type == value_t::object;
+    }
+
+    /// @brief return whether value is an array
+    /// @sa https://json.nlohmann.me/api/basic_json/is_array/
+    constexpr bool is_array() const noexcept
+    {
+        return m_data.m_type == value_t::array;
+    }
+
+    /// @brief return whether value is a string
+    /// @sa https://json.nlohmann.me/api/basic_json/is_string/
+    constexpr bool is_string() const noexcept
+    {
+        return m_data.m_type == value_t::string;
+    }
+
+    /// @brief return whether value is a binary array
+    /// @sa https://json.nlohmann.me/api/basic_json/is_binary/
+    constexpr bool is_binary() const noexcept
+    {
+        return m_data.m_type == value_t::binary;
+    }
+
+    /// @brief return whether value is discarded
+    /// @sa https://json.nlohmann.me/api/basic_json/is_discarded/
+    constexpr bool is_discarded() const noexcept
+    {
+        return m_data.m_type == value_t::discarded;
+    }
+
+    /// @brief return the type of the JSON value (implicit)
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_value_t/
+    constexpr operator value_t() const noexcept
+    {
+        return m_data.m_type;
+    }
+
+    /// @}
+
+  private:
+    //////////////////
+    // value access //
+    //////////////////
+
+    /// get a boolean (explicit)
+    boolean_t get_impl(boolean_t* /*unused*/) const
+    {
+        if (JSON_HEDLEY_LIKELY(is_boolean()))
+        {
+            return m_data.m_value.boolean;
+        }
+
+        JSON_THROW(type_error::create(302, detail::concat("type must be boolean, but is ", type_name()), this));
+    }
+
+    /// get a pointer to the value (object)
+    object_t* get_impl_ptr(object_t* /*unused*/) noexcept
+    {
+        return is_object() ? m_data.m_value.object : nullptr;
+    }
+
+    /// get a pointer to the value (object)
+    constexpr const object_t* get_impl_ptr(const object_t* /*unused*/) const noexcept
+    {
+        return is_object() ? m_data.m_value.object : nullptr;
+    }
+
+    /// get a pointer to the value (array)
+    array_t* get_impl_ptr(array_t* /*unused*/) noexcept
+    {
+        return is_array() ? m_data.m_value.array : nullptr;
+    }
+
+    /// get a pointer to the value (array)
+    constexpr const array_t* get_impl_ptr(const array_t* /*unused*/) const noexcept
+    {
+        return is_array() ? m_data.m_value.array : nullptr;
+    }
+
+    /// get a pointer to the value (string)
+    string_t* get_impl_ptr(string_t* /*unused*/) noexcept
+    {
+        return is_string() ? m_data.m_value.string : nullptr;
+    }
+
+    /// get a pointer to the value (string)
+    constexpr const string_t* get_impl_ptr(const string_t* /*unused*/) const noexcept
+    {
+        return is_string() ? m_data.m_value.string : nullptr;
+    }
+
+    /// get a pointer to the value (boolean)
+    boolean_t* get_impl_ptr(boolean_t* /*unused*/) noexcept
+    {
+        return is_boolean() ? &m_data.m_value.boolean : nullptr;
+    }
+
+    /// get a pointer to the value (boolean)
+    constexpr const boolean_t* get_impl_ptr(const boolean_t* /*unused*/) const noexcept
+    {
+        return is_boolean() ? &m_data.m_value.boolean : nullptr;
+    }
+
+    /// get a pointer to the value (integer number)
+    number_integer_t* get_impl_ptr(number_integer_t* /*unused*/) noexcept
+    {
+        return is_number_integer() ? &m_data.m_value.number_integer : nullptr;
+    }
+
+    /// get a pointer to the value (integer number)
+    constexpr const number_integer_t* get_impl_ptr(const number_integer_t* /*unused*/) const noexcept
+    {
+        return is_number_integer() ? &m_data.m_value.number_integer : nullptr;
+    }
+
+    /// get a pointer to the value (unsigned number)
+    number_unsigned_t* get_impl_ptr(number_unsigned_t* /*unused*/) noexcept
+    {
+        return is_number_unsigned() ? &m_data.m_value.number_unsigned : nullptr;
+    }
+
+    /// get a pointer to the value (unsigned number)
+    constexpr const number_unsigned_t* get_impl_ptr(const number_unsigned_t* /*unused*/) const noexcept
+    {
+        return is_number_unsigned() ? &m_data.m_value.number_unsigned : nullptr;
+    }
+
+    /// get a pointer to the value (floating-point number)
+    number_float_t* get_impl_ptr(number_float_t* /*unused*/) noexcept
+    {
+        return is_number_float() ? &m_data.m_value.number_float : nullptr;
+    }
+
+    /// get a pointer to the value (floating-point number)
+    constexpr const number_float_t* get_impl_ptr(const number_float_t* /*unused*/) const noexcept
+    {
+        return is_number_float() ? &m_data.m_value.number_float : nullptr;
+    }
+
+    /// get a pointer to the value (binary)
+    binary_t* get_impl_ptr(binary_t* /*unused*/) noexcept
+    {
+        return is_binary() ? m_data.m_value.binary : nullptr;
+    }
+
+    /// get a pointer to the value (binary)
+    constexpr const binary_t* get_impl_ptr(const binary_t* /*unused*/) const noexcept
+    {
+        return is_binary() ? m_data.m_value.binary : nullptr;
+    }
+
+    /*!
+    @brief helper function to implement get_ref()
+
+    This function helps to implement get_ref() without code duplication for
+    const and non-const overloads
+
+    @tparam ThisType will be deduced as `basic_json` or `const basic_json`
+
+    @throw type_error.303 if ReferenceType does not match underlying value
+    type of the current JSON
+    */
+    template<typename ReferenceType, typename ThisType>
+    static ReferenceType get_ref_impl(ThisType& obj)
+    {
+        // delegate the call to get_ptr<>()
+        auto* ptr = obj.template get_ptr<typename std::add_pointer<ReferenceType>::type>();
+
+        if (JSON_HEDLEY_LIKELY(ptr != nullptr))
+        {
+            return *ptr;
+        }
+
+        JSON_THROW(type_error::create(303, detail::concat("incompatible ReferenceType for get_ref, actual type is ", obj.type_name()), &obj));
+    }
+
+  public:
+    /// @name value access
+    /// Direct access to the stored value of a JSON value.
+    /// @{
+
+    /// @brief get a pointer value (implicit)
+    /// @sa https://json.nlohmann.me/api/basic_json/get_ptr/
+    template<typename PointerType, typename std::enable_if<
+                 std::is_pointer<PointerType>::value, int>::type = 0>
+    auto get_ptr() noexcept -> decltype(std::declval<basic_json_t&>().get_impl_ptr(std::declval<PointerType>()))
+    {
+        // delegate the call to get_impl_ptr<>()
+        return get_impl_ptr(static_cast<PointerType>(nullptr));
+    }
+
+    /// @brief get a pointer value (implicit)
+    /// @sa https://json.nlohmann.me/api/basic_json/get_ptr/
+    template < typename PointerType, typename std::enable_if <
+                   std::is_pointer<PointerType>::value&&
+                   std::is_const<typename std::remove_pointer<PointerType>::type>::value, int >::type = 0 >
+    constexpr auto get_ptr() const noexcept -> decltype(std::declval<const basic_json_t&>().get_impl_ptr(std::declval<PointerType>()))
+    {
+        // delegate the call to get_impl_ptr<>() const
+        return get_impl_ptr(static_cast<PointerType>(nullptr));
+    }
+
+  private:
+    /*!
+    @brief get a value (explicit)
+
+    Explicit type conversion between the JSON value and a compatible value
+    which is [CopyConstructible](https://en.cppreference.com/w/cpp/named_req/CopyConstructible)
+    and [DefaultConstructible](https://en.cppreference.com/w/cpp/named_req/DefaultConstructible).
+    The value is converted by calling the @ref json_serializer<ValueType>
+    `from_json()` method.
+
+    The function is equivalent to executing
+    @code {.cpp}
+    ValueType ret;
+    JSONSerializer<ValueType>::from_json(*this, ret);
+    return ret;
+    @endcode
+
+    This overloads is chosen if:
+    - @a ValueType is not @ref basic_json,
+    - @ref json_serializer<ValueType> has a `from_json()` method of the form
+      `void from_json(const basic_json&, ValueType&)`, and
+    - @ref json_serializer<ValueType> does not have a `from_json()` method of
+      the form `ValueType from_json(const basic_json&)`
+
+    @tparam ValueType the returned value type
+
+    @return copy of the JSON value, converted to @a ValueType
+
+    @throw what @ref json_serializer<ValueType> `from_json()` method throws
+
+    @liveexample{The example below shows several conversions from JSON values
+    to other types. There a few things to note: (1) Floating-point numbers can
+    be converted to integers\, (2) A JSON array can be converted to a standard
+    `std::vector<short>`\, (3) A JSON object can be converted to C++
+    associative containers such as `std::unordered_map<std::string\,
+    json>`.,get__ValueType_const}
+
+    @since version 2.1.0
+    */
+    template < typename ValueType,
+               detail::enable_if_t <
+                   detail::is_default_constructible<ValueType>::value&&
+                   detail::has_from_json<basic_json_t, ValueType>::value,
+                   int > = 0 >
+    ValueType get_impl(detail::priority_tag<0> /*unused*/) const noexcept(noexcept(
+                JSONSerializer<ValueType>::from_json(std::declval<const basic_json_t&>(), std::declval<ValueType&>())))
+    {
+        auto ret = ValueType();
+        JSONSerializer<ValueType>::from_json(*this, ret);
+        return ret;
+    }
+
+    /*!
+    @brief get a value (explicit); special case
+
+    Explicit type conversion between the JSON value and a compatible value
+    which is **not** [CopyConstructible](https://en.cppreference.com/w/cpp/named_req/CopyConstructible)
+    and **not** [DefaultConstructible](https://en.cppreference.com/w/cpp/named_req/DefaultConstructible).
+    The value is converted by calling the @ref json_serializer<ValueType>
+    `from_json()` method.
+
+    The function is equivalent to executing
+    @code {.cpp}
+    return JSONSerializer<ValueType>::from_json(*this);
+    @endcode
+
+    This overloads is chosen if:
+    - @a ValueType is not @ref basic_json and
+    - @ref json_serializer<ValueType> has a `from_json()` method of the form
+      `ValueType from_json(const basic_json&)`
+
+    @note If @ref json_serializer<ValueType> has both overloads of
+    `from_json()`, this one is chosen.
+
+    @tparam ValueType the returned value type
+
+    @return copy of the JSON value, converted to @a ValueType
+
+    @throw what @ref json_serializer<ValueType> `from_json()` method throws
+
+    @since version 2.1.0
+    */
+    template < typename ValueType,
+               detail::enable_if_t <
+                   detail::has_non_default_from_json<basic_json_t, ValueType>::value,
+                   int > = 0 >
+    ValueType get_impl(detail::priority_tag<1> /*unused*/) const noexcept(noexcept(
+                JSONSerializer<ValueType>::from_json(std::declval<const basic_json_t&>())))
+    {
+        return JSONSerializer<ValueType>::from_json(*this);
+    }
+
+    /*!
+    @brief get special-case overload
+
+    This overloads converts the current @ref basic_json in a different
+    @ref basic_json type
+
+    @tparam BasicJsonType == @ref basic_json
+
+    @return a copy of *this, converted into @a BasicJsonType
+
+    @complexity Depending on the implementation of the called `from_json()`
+                method.
+
+    @since version 3.2.0
+    */
+    template < typename BasicJsonType,
+               detail::enable_if_t <
+                   detail::is_basic_json<BasicJsonType>::value,
+                   int > = 0 >
+    BasicJsonType get_impl(detail::priority_tag<2> /*unused*/) const
+    {
+        return *this;
+    }
+
+    /*!
+    @brief get special-case overload
+
+    This overloads avoids a lot of template boilerplate, it can be seen as the
+    identity method
+
+    @tparam BasicJsonType == @ref basic_json
+
+    @return a copy of *this
+
+    @complexity Constant.
+
+    @since version 2.1.0
+    */
+    template<typename BasicJsonType,
+             detail::enable_if_t<
+                 std::is_same<BasicJsonType, basic_json_t>::value,
+                 int> = 0>
+    basic_json get_impl(detail::priority_tag<3> /*unused*/) const
+    {
+        return *this;
+    }
+
+    /*!
+    @brief get a pointer value (explicit)
+    @copydoc get()
+    */
+    template<typename PointerType,
+             detail::enable_if_t<
+                 std::is_pointer<PointerType>::value,
+                 int> = 0>
+    constexpr auto get_impl(detail::priority_tag<4> /*unused*/) const noexcept
+    -> decltype(std::declval<const basic_json_t&>().template get_ptr<PointerType>())
+    {
+        // delegate the call to get_ptr
+        return get_ptr<PointerType>();
+    }
+
+  public:
+    /*!
+    @brief get a (pointer) value (explicit)
+
+    Performs explicit type conversion between the JSON value and a compatible value if required.
+
+    - If the requested type is a pointer to the internally stored JSON value that pointer is returned.
+    No copies are made.
+
+    - If the requested type is the current @ref basic_json, or a different @ref basic_json convertible
+    from the current @ref basic_json.
+
+    - Otherwise the value is converted by calling the @ref json_serializer<ValueType> `from_json()`
+    method.
+
+    @tparam ValueTypeCV the provided value type
+    @tparam ValueType the returned value type
+
+    @return copy of the JSON value, converted to @tparam ValueType if necessary
+
+    @throw what @ref json_serializer<ValueType> `from_json()` method throws if conversion is required
+
+    @since version 2.1.0
+    */
+    template < typename ValueTypeCV, typename ValueType = detail::uncvref_t<ValueTypeCV>>
+#if defined(JSON_HAS_CPP_14)
+    constexpr
+#endif
+    auto get() const noexcept(
+    noexcept(std::declval<const basic_json_t&>().template get_impl<ValueType>(detail::priority_tag<4> {})))
+    -> decltype(std::declval<const basic_json_t&>().template get_impl<ValueType>(detail::priority_tag<4> {}))
+    {
+        // we cannot static_assert on ValueTypeCV being non-const, because
+        // there is support for get<const basic_json_t>(), which is why we
+        // still need the uncvref
+        static_assert(!std::is_reference<ValueTypeCV>::value,
+                      "get() cannot be used with reference types, you might want to use get_ref()");
+        return get_impl<ValueType>(detail::priority_tag<4> {});
+    }
+
+    /*!
+    @brief get a pointer value (explicit)
+
+    Explicit pointer access to the internally stored JSON value. No copies are
+    made.
+
+    @warning The pointer becomes invalid if the underlying JSON object
+    changes.
+
+    @tparam PointerType pointer type; must be a pointer to @ref array_t, @ref
+    object_t, @ref string_t, @ref boolean_t, @ref number_integer_t,
+    @ref number_unsigned_t, or @ref number_float_t.
+
+    @return pointer to the internally stored JSON value if the requested
+    pointer type @a PointerType fits to the JSON value; `nullptr` otherwise
+
+    @complexity Constant.
+
+    @liveexample{The example below shows how pointers to internal values of a
+    JSON value can be requested. Note that no type conversions are made and a
+    `nullptr` is returned if the value and the requested pointer type does not
+    match.,get__PointerType}
+
+    @sa see @ref get_ptr() for explicit pointer-member access
+
+    @since version 1.0.0
+    */
+    template<typename PointerType, typename std::enable_if<
+                 std::is_pointer<PointerType>::value, int>::type = 0>
+    auto get() noexcept -> decltype(std::declval<basic_json_t&>().template get_ptr<PointerType>())
+    {
+        // delegate the call to get_ptr
+        return get_ptr<PointerType>();
+    }
+
+    /// @brief get a value (explicit)
+    /// @sa https://json.nlohmann.me/api/basic_json/get_to/
+    template < typename ValueType,
+               detail::enable_if_t <
+                   !detail::is_basic_json<ValueType>::value&&
+                   detail::has_from_json<basic_json_t, ValueType>::value,
+                   int > = 0 >
+    ValueType & get_to(ValueType& v) const noexcept(noexcept(
+                JSONSerializer<ValueType>::from_json(std::declval<const basic_json_t&>(), v)))
+    {
+        JSONSerializer<ValueType>::from_json(*this, v);
+        return v;
+    }
+
+    // specialization to allow calling get_to with a basic_json value
+    // see https://github.com/nlohmann/json/issues/2175
+    template<typename ValueType,
+             detail::enable_if_t <
+                 detail::is_basic_json<ValueType>::value,
+                 int> = 0>
+    ValueType & get_to(ValueType& v) const
+    {
+        v = *this;
+        return v;
+    }
+
+    template <
+        typename T, std::size_t N,
+        typename Array = T (&)[N], // NOLINT(cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays)
+        detail::enable_if_t <
+            detail::has_from_json<basic_json_t, Array>::value, int > = 0 >
+    Array get_to(T (&v)[N]) const // NOLINT(cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays)
+    noexcept(noexcept(JSONSerializer<Array>::from_json(
+                          std::declval<const basic_json_t&>(), v)))
+    {
+        JSONSerializer<Array>::from_json(*this, v);
+        return v;
+    }
+
+    /// @brief get a reference value (implicit)
+    /// @sa https://json.nlohmann.me/api/basic_json/get_ref/
+    template<typename ReferenceType, typename std::enable_if<
+                 std::is_reference<ReferenceType>::value, int>::type = 0>
+    ReferenceType get_ref()
+    {
+        // delegate call to get_ref_impl
+        return get_ref_impl<ReferenceType>(*this);
+    }
+
+    /// @brief get a reference value (implicit)
+    /// @sa https://json.nlohmann.me/api/basic_json/get_ref/
+    template < typename ReferenceType, typename std::enable_if <
+                   std::is_reference<ReferenceType>::value&&
+                   std::is_const<typename std::remove_reference<ReferenceType>::type>::value, int >::type = 0 >
+    ReferenceType get_ref() const
+    {
+        // delegate call to get_ref_impl
+        return get_ref_impl<ReferenceType>(*this);
+    }
+
+    /*!
+    @brief get a value (implicit)
+
+    Implicit type conversion between the JSON value and a compatible value.
+    The call is realized by calling @ref get() const.
+
+    @tparam ValueType non-pointer type compatible to the JSON value, for
+    instance `int` for JSON integer numbers, `bool` for JSON booleans, or
+    `std::vector` types for JSON arrays. The character type of @ref string_t
+    as well as an initializer list of this type is excluded to avoid
+    ambiguities as these types implicitly convert to `std::string`.
+
+    @return copy of the JSON value, converted to type @a ValueType
+
+    @throw type_error.302 in case passed type @a ValueType is incompatible
+    to the JSON value type (e.g., the JSON value is of type boolean, but a
+    string is requested); see example below
+
+    @complexity Linear in the size of the JSON value.
+
+    @liveexample{The example below shows several conversions from JSON values
+    to other types. There a few things to note: (1) Floating-point numbers can
+    be converted to integers\, (2) A JSON array can be converted to a standard
+    `std::vector<short>`\, (3) A JSON object can be converted to C++
+    associative containers such as `std::unordered_map<std::string\,
+    json>`.,operator__ValueType}
+
+    @since version 1.0.0
+    */
+    template < typename ValueType, typename std::enable_if <
+                   detail::conjunction <
+                       detail::negation<std::is_pointer<ValueType>>,
+                       detail::negation<std::is_same<ValueType, std::nullptr_t>>,
+                       detail::negation<std::is_same<ValueType, detail::json_ref<basic_json>>>,
+                                        detail::negation<std::is_same<ValueType, typename string_t::value_type>>,
+                                        detail::negation<detail::is_basic_json<ValueType>>,
+                                        detail::negation<std::is_same<ValueType, std::initializer_list<typename string_t::value_type>>>,
+#if defined(JSON_HAS_CPP_17) && (defined(__GNUC__) || (defined(_MSC_VER) && _MSC_VER >= 1910 && _MSC_VER <= 1914))
+                                                detail::negation<std::is_same<ValueType, std::string_view>>,
+#endif
+#if defined(JSON_HAS_CPP_17) && JSON_HAS_STATIC_RTTI
+                                                detail::negation<std::is_same<ValueType, std::any>>,
+#endif
+                                                detail::is_detected_lazy<detail::get_template_function, const basic_json_t&, ValueType>
+                                                >::value, int >::type = 0 >
+                                        JSON_EXPLICIT operator ValueType() const
+    {
+        // delegate the call to get<>() const
+        return get<ValueType>();
+    }
+
+    /// @brief get a binary value
+    /// @sa https://json.nlohmann.me/api/basic_json/get_binary/
+    binary_t& get_binary()
+    {
+        if (!is_binary())
+        {
+            JSON_THROW(type_error::create(302, detail::concat("type must be binary, but is ", type_name()), this));
+        }
+
+        return *get_ptr<binary_t*>();
+    }
+
+    /// @brief get a binary value
+    /// @sa https://json.nlohmann.me/api/basic_json/get_binary/
+    const binary_t& get_binary() const
+    {
+        if (!is_binary())
+        {
+            JSON_THROW(type_error::create(302, detail::concat("type must be binary, but is ", type_name()), this));
+        }
+
+        return *get_ptr<const binary_t*>();
+    }
+
+    /// @}
+
+    ////////////////////
+    // element access //
+    ////////////////////
+
+    /// @name element access
+    /// Access to the JSON value.
+    /// @{
+
+    /// @brief access specified array element with bounds checking
+    /// @sa https://json.nlohmann.me/api/basic_json/at/
+    reference at(size_type idx)
