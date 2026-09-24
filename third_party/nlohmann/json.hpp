@@ -23008,3 +23008,593 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     bool operator!=(const_reference rhs) const noexcept
     {
         if (compares_unordered(rhs, true))
+        {
+            return false;
+        }
+        return !operator==(rhs);
+    }
+
+    /// @brief comparison: 3-way
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_spaceship/
+    std::partial_ordering operator<=>(const_reference rhs) const noexcept // *NOPAD*
+    {
+        const_reference lhs = *this;
+        // default_result is used if we cannot compare values. In that case,
+        // we compare types.
+        JSON_IMPLEMENT_OPERATOR(<=>, // *NOPAD*
+                                std::partial_ordering::equivalent,
+                                std::partial_ordering::unordered,
+                                lhs_type <=> rhs_type) // *NOPAD*
+    }
+
+    /// @brief comparison: 3-way
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_spaceship/
+    template<typename ScalarType>
+    requires std::is_scalar_v<ScalarType>
+    std::partial_ordering operator<=>(ScalarType rhs) const noexcept // *NOPAD*
+    {
+        return *this <=> basic_json(rhs); // *NOPAD*
+    }
+
+#if JSON_USE_LEGACY_DISCARDED_VALUE_COMPARISON
+    // all operators that are computed as an odd number of inverses of others
+    // need to be overloaded to emulate the legacy comparison behavior
+
+    /// @brief comparison: less than or equal
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_le/
+    JSON_HEDLEY_DEPRECATED_FOR(3.11.0, undef JSON_USE_LEGACY_DISCARDED_VALUE_COMPARISON)
+    bool operator<=(const_reference rhs) const noexcept
+    {
+        if (compares_unordered(rhs, true))
+        {
+            return false;
+        }
+        return !(rhs < *this);
+    }
+
+    /// @brief comparison: less than or equal
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_le/
+    template<typename ScalarType>
+    requires std::is_scalar_v<ScalarType>
+    bool operator<=(ScalarType rhs) const noexcept
+    {
+        return *this <= basic_json(rhs);
+    }
+
+    /// @brief comparison: greater than or equal
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_ge/
+    JSON_HEDLEY_DEPRECATED_FOR(3.11.0, undef JSON_USE_LEGACY_DISCARDED_VALUE_COMPARISON)
+    bool operator>=(const_reference rhs) const noexcept
+    {
+        if (compares_unordered(rhs, true))
+        {
+            return false;
+        }
+        return !(*this < rhs);
+    }
+
+    /// @brief comparison: greater than or equal
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_ge/
+    template<typename ScalarType>
+    requires std::is_scalar_v<ScalarType>
+    bool operator>=(ScalarType rhs) const noexcept
+    {
+        return *this >= basic_json(rhs);
+    }
+#endif
+#else
+    /// @brief comparison: equal
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_eq/
+    friend bool operator==(const_reference lhs, const_reference rhs) noexcept
+    {
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wfloat-equal"
+#endif
+        JSON_IMPLEMENT_OPERATOR( ==, true, false, false)
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#endif
+    }
+
+    /// @brief comparison: equal
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_eq/
+    template<typename ScalarType, typename std::enable_if<
+                 std::is_scalar<ScalarType>::value, int>::type = 0>
+    friend bool operator==(const_reference lhs, ScalarType rhs) noexcept
+    {
+        return lhs == basic_json(rhs);
+    }
+
+    /// @brief comparison: equal
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_eq/
+    template<typename ScalarType, typename std::enable_if<
+                 std::is_scalar<ScalarType>::value, int>::type = 0>
+    friend bool operator==(ScalarType lhs, const_reference rhs) noexcept
+    {
+        return basic_json(lhs) == rhs;
+    }
+
+    /// @brief comparison: not equal
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_ne/
+    friend bool operator!=(const_reference lhs, const_reference rhs) noexcept
+    {
+        if (compares_unordered(lhs, rhs, true))
+        {
+            return false;
+        }
+        return !(lhs == rhs);
+    }
+
+    /// @brief comparison: not equal
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_ne/
+    template<typename ScalarType, typename std::enable_if<
+                 std::is_scalar<ScalarType>::value, int>::type = 0>
+    friend bool operator!=(const_reference lhs, ScalarType rhs) noexcept
+    {
+        return lhs != basic_json(rhs);
+    }
+
+    /// @brief comparison: not equal
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_ne/
+    template<typename ScalarType, typename std::enable_if<
+                 std::is_scalar<ScalarType>::value, int>::type = 0>
+    friend bool operator!=(ScalarType lhs, const_reference rhs) noexcept
+    {
+        return basic_json(lhs) != rhs;
+    }
+
+    /// @brief comparison: less than
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_lt/
+    friend bool operator<(const_reference lhs, const_reference rhs) noexcept
+    {
+        // default_result is used if we cannot compare values. In that case,
+        // we compare types. Note we have to call the operator explicitly,
+        // because MSVC has problems otherwise.
+        JSON_IMPLEMENT_OPERATOR( <, false, false, operator<(lhs_type, rhs_type))
+    }
+
+    /// @brief comparison: less than
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_lt/
+    template<typename ScalarType, typename std::enable_if<
+                 std::is_scalar<ScalarType>::value, int>::type = 0>
+    friend bool operator<(const_reference lhs, ScalarType rhs) noexcept
+    {
+        return lhs < basic_json(rhs);
+    }
+
+    /// @brief comparison: less than
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_lt/
+    template<typename ScalarType, typename std::enable_if<
+                 std::is_scalar<ScalarType>::value, int>::type = 0>
+    friend bool operator<(ScalarType lhs, const_reference rhs) noexcept
+    {
+        return basic_json(lhs) < rhs;
+    }
+
+    /// @brief comparison: less than or equal
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_le/
+    friend bool operator<=(const_reference lhs, const_reference rhs) noexcept
+    {
+        if (compares_unordered(lhs, rhs, true))
+        {
+            return false;
+        }
+        return !(rhs < lhs);
+    }
+
+    /// @brief comparison: less than or equal
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_le/
+    template<typename ScalarType, typename std::enable_if<
+                 std::is_scalar<ScalarType>::value, int>::type = 0>
+    friend bool operator<=(const_reference lhs, ScalarType rhs) noexcept
+    {
+        return lhs <= basic_json(rhs);
+    }
+
+    /// @brief comparison: less than or equal
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_le/
+    template<typename ScalarType, typename std::enable_if<
+                 std::is_scalar<ScalarType>::value, int>::type = 0>
+    friend bool operator<=(ScalarType lhs, const_reference rhs) noexcept
+    {
+        return basic_json(lhs) <= rhs;
+    }
+
+    /// @brief comparison: greater than
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_gt/
+    friend bool operator>(const_reference lhs, const_reference rhs) noexcept
+    {
+        // double inverse
+        if (compares_unordered(lhs, rhs))
+        {
+            return false;
+        }
+        return !(lhs <= rhs);
+    }
+
+    /// @brief comparison: greater than
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_gt/
+    template<typename ScalarType, typename std::enable_if<
+                 std::is_scalar<ScalarType>::value, int>::type = 0>
+    friend bool operator>(const_reference lhs, ScalarType rhs) noexcept
+    {
+        return lhs > basic_json(rhs);
+    }
+
+    /// @brief comparison: greater than
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_gt/
+    template<typename ScalarType, typename std::enable_if<
+                 std::is_scalar<ScalarType>::value, int>::type = 0>
+    friend bool operator>(ScalarType lhs, const_reference rhs) noexcept
+    {
+        return basic_json(lhs) > rhs;
+    }
+
+    /// @brief comparison: greater than or equal
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_ge/
+    friend bool operator>=(const_reference lhs, const_reference rhs) noexcept
+    {
+        if (compares_unordered(lhs, rhs, true))
+        {
+            return false;
+        }
+        return !(lhs < rhs);
+    }
+
+    /// @brief comparison: greater than or equal
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_ge/
+    template<typename ScalarType, typename std::enable_if<
+                 std::is_scalar<ScalarType>::value, int>::type = 0>
+    friend bool operator>=(const_reference lhs, ScalarType rhs) noexcept
+    {
+        return lhs >= basic_json(rhs);
+    }
+
+    /// @brief comparison: greater than or equal
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_ge/
+    template<typename ScalarType, typename std::enable_if<
+                 std::is_scalar<ScalarType>::value, int>::type = 0>
+    friend bool operator>=(ScalarType lhs, const_reference rhs) noexcept
+    {
+        return basic_json(lhs) >= rhs;
+    }
+#endif
+
+#undef JSON_IMPLEMENT_OPERATOR
+
+    /// @}
+
+    ///////////////////
+    // serialization //
+    ///////////////////
+
+    /// @name serialization
+    /// @{
+#ifndef JSON_NO_IO
+    /// @brief serialize to stream
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_ltlt/
+    friend std::ostream& operator<<(std::ostream& o, const basic_json& j)
+    {
+        // read width member and use it as indentation parameter if nonzero
+        const bool pretty_print = o.width() > 0;
+        const auto indentation = pretty_print ? o.width() : 0;
+
+        // reset width to 0 for subsequent calls to this stream
+        o.width(0);
+
+        // do the actual serialization
+        serializer s(detail::output_adapter<char>(o), o.fill());
+        s.dump(j, pretty_print, false, static_cast<unsigned int>(indentation));
+        return o;
+    }
+
+    /// @brief serialize to stream
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_ltlt/
+    /// @deprecated This function is deprecated since 3.0.0 and will be removed in
+    ///             version 4.0.0 of the library. Please use
+    ///             operator<<(std::ostream&, const basic_json&) instead; that is,
+    ///             replace calls like `j >> o;` with `o << j;`.
+    JSON_HEDLEY_DEPRECATED_FOR(3.0.0, operator<<(std::ostream&, const basic_json&))
+    friend std::ostream& operator>>(const basic_json& j, std::ostream& o)
+    {
+        return o << j;
+    }
+#endif  // JSON_NO_IO
+    /// @}
+
+    /////////////////////
+    // deserialization //
+    /////////////////////
+
+    /// @name deserialization
+    /// @{
+
+    /// @brief deserialize from a compatible input
+    /// @sa https://json.nlohmann.me/api/basic_json/parse/
+    template<typename InputType>
+    JSON_HEDLEY_WARN_UNUSED_RESULT
+    static basic_json parse(InputType&& i,
+                            const parser_callback_t cb = nullptr,
+                            const bool allow_exceptions = true,
+                            const bool ignore_comments = false)
+    {
+        basic_json result;
+        parser(detail::input_adapter(std::forward<InputType>(i)), cb, allow_exceptions, ignore_comments).parse(true, result);
+        return result;
+    }
+
+    /// @brief deserialize from a pair of character iterators
+    /// @sa https://json.nlohmann.me/api/basic_json/parse/
+    template<typename IteratorType>
+    JSON_HEDLEY_WARN_UNUSED_RESULT
+    static basic_json parse(IteratorType first,
+                            IteratorType last,
+                            const parser_callback_t cb = nullptr,
+                            const bool allow_exceptions = true,
+                            const bool ignore_comments = false)
+    {
+        basic_json result;
+        parser(detail::input_adapter(std::move(first), std::move(last)), cb, allow_exceptions, ignore_comments).parse(true, result);
+        return result;
+    }
+
+    JSON_HEDLEY_WARN_UNUSED_RESULT
+    JSON_HEDLEY_DEPRECATED_FOR(3.8.0, parse(ptr, ptr + len))
+    static basic_json parse(detail::span_input_adapter&& i,
+                            const parser_callback_t cb = nullptr,
+                            const bool allow_exceptions = true,
+                            const bool ignore_comments = false)
+    {
+        basic_json result;
+        parser(i.get(), cb, allow_exceptions, ignore_comments).parse(true, result);
+        return result;
+    }
+
+    /// @brief check if the input is valid JSON
+    /// @sa https://json.nlohmann.me/api/basic_json/accept/
+    template<typename InputType>
+    static bool accept(InputType&& i,
+                       const bool ignore_comments = false)
+    {
+        return parser(detail::input_adapter(std::forward<InputType>(i)), nullptr, false, ignore_comments).accept(true);
+    }
+
+    /// @brief check if the input is valid JSON
+    /// @sa https://json.nlohmann.me/api/basic_json/accept/
+    template<typename IteratorType>
+    static bool accept(IteratorType first, IteratorType last,
+                       const bool ignore_comments = false)
+    {
+        return parser(detail::input_adapter(std::move(first), std::move(last)), nullptr, false, ignore_comments).accept(true);
+    }
+
+    JSON_HEDLEY_WARN_UNUSED_RESULT
+    JSON_HEDLEY_DEPRECATED_FOR(3.8.0, accept(ptr, ptr + len))
+    static bool accept(detail::span_input_adapter&& i,
+                       const bool ignore_comments = false)
+    {
+        return parser(i.get(), nullptr, false, ignore_comments).accept(true);
+    }
+
+    /// @brief generate SAX events
+    /// @sa https://json.nlohmann.me/api/basic_json/sax_parse/
+    template <typename InputType, typename SAX>
+    JSON_HEDLEY_NON_NULL(2)
+    static bool sax_parse(InputType&& i, SAX* sax,
+                          input_format_t format = input_format_t::json,
+                          const bool strict = true,
+                          const bool ignore_comments = false)
+    {
+        auto ia = detail::input_adapter(std::forward<InputType>(i));
+        return format == input_format_t::json
+               ? parser(std::move(ia), nullptr, true, ignore_comments).sax_parse(sax, strict)
+               : detail::binary_reader<basic_json, decltype(ia), SAX>(std::move(ia), format).sax_parse(format, sax, strict);
+    }
+
+    /// @brief generate SAX events
+    /// @sa https://json.nlohmann.me/api/basic_json/sax_parse/
+    template<class IteratorType, class SAX>
+    JSON_HEDLEY_NON_NULL(3)
+    static bool sax_parse(IteratorType first, IteratorType last, SAX* sax,
+                          input_format_t format = input_format_t::json,
+                          const bool strict = true,
+                          const bool ignore_comments = false)
+    {
+        auto ia = detail::input_adapter(std::move(first), std::move(last));
+        return format == input_format_t::json
+               ? parser(std::move(ia), nullptr, true, ignore_comments).sax_parse(sax, strict)
+               : detail::binary_reader<basic_json, decltype(ia), SAX>(std::move(ia), format).sax_parse(format, sax, strict);
+    }
+
+    /// @brief generate SAX events
+    /// @sa https://json.nlohmann.me/api/basic_json/sax_parse/
+    /// @deprecated This function is deprecated since 3.8.0 and will be removed in
+    ///             version 4.0.0 of the library. Please use
+    ///             sax_parse(ptr, ptr + len) instead.
+    template <typename SAX>
+    JSON_HEDLEY_DEPRECATED_FOR(3.8.0, sax_parse(ptr, ptr + len, ...))
+    JSON_HEDLEY_NON_NULL(2)
+    static bool sax_parse(detail::span_input_adapter&& i, SAX* sax,
+                          input_format_t format = input_format_t::json,
+                          const bool strict = true,
+                          const bool ignore_comments = false)
+    {
+        auto ia = i.get();
+        return format == input_format_t::json
+               // NOLINTNEXTLINE(hicpp-move-const-arg,performance-move-const-arg)
+               ? parser(std::move(ia), nullptr, true, ignore_comments).sax_parse(sax, strict)
+               // NOLINTNEXTLINE(hicpp-move-const-arg,performance-move-const-arg)
+               : detail::binary_reader<basic_json, decltype(ia), SAX>(std::move(ia), format).sax_parse(format, sax, strict);
+    }
+#ifndef JSON_NO_IO
+    /// @brief deserialize from stream
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_gtgt/
+    /// @deprecated This stream operator is deprecated since 3.0.0 and will be removed in
+    ///             version 4.0.0 of the library. Please use
+    ///             operator>>(std::istream&, basic_json&) instead; that is,
+    ///             replace calls like `j << i;` with `i >> j;`.
+    JSON_HEDLEY_DEPRECATED_FOR(3.0.0, operator>>(std::istream&, basic_json&))
+    friend std::istream& operator<<(basic_json& j, std::istream& i)
+    {
+        return operator>>(i, j);
+    }
+
+    /// @brief deserialize from stream
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_gtgt/
+    friend std::istream& operator>>(std::istream& i, basic_json& j)
+    {
+        parser(detail::input_adapter(i)).parse(false, j);
+        return i;
+    }
+#endif  // JSON_NO_IO
+    /// @}
+
+    ///////////////////////////
+    // convenience functions //
+    ///////////////////////////
+
+    /// @brief return the type as string
+    /// @sa https://json.nlohmann.me/api/basic_json/type_name/
+    JSON_HEDLEY_RETURNS_NON_NULL
+    const char* type_name() const noexcept
+    {
+        switch (m_data.m_type)
+        {
+            case value_t::null:
+                return "null";
+            case value_t::object:
+                return "object";
+            case value_t::array:
+                return "array";
+            case value_t::string:
+                return "string";
+            case value_t::boolean:
+                return "boolean";
+            case value_t::binary:
+                return "binary";
+            case value_t::discarded:
+                return "discarded";
+            case value_t::number_integer:
+            case value_t::number_unsigned:
+            case value_t::number_float:
+            default:
+                return "number";
+        }
+    }
+
+  JSON_PRIVATE_UNLESS_TESTED:
+    //////////////////////
+    // member variables //
+    //////////////////////
+
+    struct data
+    {
+        /// the type of the current element
+        value_t m_type = value_t::null;
+
+        /// the value of the current element
+        json_value m_value = {};
+
+        data(const value_t v)
+            : m_type(v), m_value(v)
+        {
+        }
+
+        data(size_type cnt, const basic_json& val)
+            : m_type(value_t::array)
+        {
+            m_value.array = create<array_t>(cnt, val);
+        }
+
+        data() noexcept = default;
+        data(data&&) noexcept = default;
+        data(const data&) noexcept = delete;
+        data& operator=(data&&) noexcept = delete;
+        data& operator=(const data&) noexcept = delete;
+
+        ~data() noexcept
+        {
+            m_value.destroy(m_type);
+        }
+    };
+
+    data m_data = {};
+
+#if JSON_DIAGNOSTICS
+    /// a pointer to a parent value (for debugging purposes)
+    basic_json* m_parent = nullptr;
+#endif
+
+    //////////////////////////////////////////
+    // binary serialization/deserialization //
+    //////////////////////////////////////////
+
+    /// @name binary serialization/deserialization support
+    /// @{
+
+  public:
+    /// @brief create a CBOR serialization of a given JSON value
+    /// @sa https://json.nlohmann.me/api/basic_json/to_cbor/
+    static std::vector<std::uint8_t> to_cbor(const basic_json& j)
+    {
+        std::vector<std::uint8_t> result;
+        to_cbor(j, result);
+        return result;
+    }
+
+    /// @brief create a CBOR serialization of a given JSON value
+    /// @sa https://json.nlohmann.me/api/basic_json/to_cbor/
+    static void to_cbor(const basic_json& j, detail::output_adapter<std::uint8_t> o)
+    {
+        binary_writer<std::uint8_t>(o).write_cbor(j);
+    }
+
+    /// @brief create a CBOR serialization of a given JSON value
+    /// @sa https://json.nlohmann.me/api/basic_json/to_cbor/
+    static void to_cbor(const basic_json& j, detail::output_adapter<char> o)
+    {
+        binary_writer<char>(o).write_cbor(j);
+    }
+
+    /// @brief create a MessagePack serialization of a given JSON value
+    /// @sa https://json.nlohmann.me/api/basic_json/to_msgpack/
+    static std::vector<std::uint8_t> to_msgpack(const basic_json& j)
+    {
+        std::vector<std::uint8_t> result;
+        to_msgpack(j, result);
+        return result;
+    }
+
+    /// @brief create a MessagePack serialization of a given JSON value
+    /// @sa https://json.nlohmann.me/api/basic_json/to_msgpack/
+    static void to_msgpack(const basic_json& j, detail::output_adapter<std::uint8_t> o)
+    {
+        binary_writer<std::uint8_t>(o).write_msgpack(j);
+    }
+
+    /// @brief create a MessagePack serialization of a given JSON value
+    /// @sa https://json.nlohmann.me/api/basic_json/to_msgpack/
+    static void to_msgpack(const basic_json& j, detail::output_adapter<char> o)
+    {
+        binary_writer<char>(o).write_msgpack(j);
+    }
+
+    /// @brief create a UBJSON serialization of a given JSON value
+    /// @sa https://json.nlohmann.me/api/basic_json/to_ubjson/
+    static std::vector<std::uint8_t> to_ubjson(const basic_json& j,
+            const bool use_size = false,
+            const bool use_type = false)
+    {
+        std::vector<std::uint8_t> result;
+        to_ubjson(j, result, use_size, use_type);
+        return result;
+    }
+
+    /// @brief create a UBJSON serialization of a given JSON value
+    /// @sa https://json.nlohmann.me/api/basic_json/to_ubjson/
+    static void to_ubjson(const basic_json& j, detail::output_adapter<std::uint8_t> o,
+                          const bool use_size = false, const bool use_type = false)
+    {
+        binary_writer<std::uint8_t>(o).write_ubjson(j, use_size, use_type);
+    }
