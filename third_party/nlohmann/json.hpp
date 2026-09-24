@@ -8258,3 +8258,593 @@ class lexer : public lexer_base<BasicJsonType>
                                     return true;
 
                                 default:
+                                {
+                                    unget();
+                                    continue;
+                                }
+                            }
+                        }
+
+                        default:
+                            continue;
+                    }
+                }
+            }
+
+            // unexpected character after reading '/'
+            default:
+            {
+                error_message = "invalid comment; expecting '/' or '*' after '/'";
+                return false;
+            }
+        }
+    }
+
+    JSON_HEDLEY_NON_NULL(2)
+    static void strtof(float& f, const char* str, char** endptr) noexcept
+    {
+        f = std::strtof(str, endptr);
+    }
+
+    JSON_HEDLEY_NON_NULL(2)
+    static void strtof(double& f, const char* str, char** endptr) noexcept
+    {
+        f = std::strtod(str, endptr);
+    }
+
+    JSON_HEDLEY_NON_NULL(2)
+    static void strtof(long double& f, const char* str, char** endptr) noexcept
+    {
+        f = std::strtold(str, endptr);
+    }
+
+    /*!
+    @brief scan a number literal
+
+    This function scans a string according to Sect. 6 of RFC 8259.
+
+    The function is realized with a deterministic finite state machine derived
+    from the grammar described in RFC 8259. Starting in state "init", the
+    input is read and used to determined the next state. Only state "done"
+    accepts the number. State "error" is a trap state to model errors. In the
+    table below, "anything" means any character but the ones listed before.
+
+    state    | 0        | 1-9      | e E      | +       | -       | .        | anything
+    ---------|----------|----------|----------|---------|---------|----------|-----------
+    init     | zero     | any1     | [error]  | [error] | minus   | [error]  | [error]
+    minus    | zero     | any1     | [error]  | [error] | [error] | [error]  | [error]
+    zero     | done     | done     | exponent | done    | done    | decimal1 | done
+    any1     | any1     | any1     | exponent | done    | done    | decimal1 | done
+    decimal1 | decimal2 | decimal2 | [error]  | [error] | [error] | [error]  | [error]
+    decimal2 | decimal2 | decimal2 | exponent | done    | done    | done     | done
+    exponent | any2     | any2     | [error]  | sign    | sign    | [error]  | [error]
+    sign     | any2     | any2     | [error]  | [error] | [error] | [error]  | [error]
+    any2     | any2     | any2     | done     | done    | done    | done     | done
+
+    The state machine is realized with one label per state (prefixed with
+    "scan_number_") and `goto` statements between them. The state machine
+    contains cycles, but any cycle can be left when EOF is read. Therefore,
+    the function is guaranteed to terminate.
+
+    During scanning, the read bytes are stored in token_buffer. This string is
+    then converted to a signed integer, an unsigned integer, or a
+    floating-point number.
+
+    @return token_type::value_unsigned, token_type::value_integer, or
+            token_type::value_float if number could be successfully scanned,
+            token_type::parse_error otherwise
+
+    @note The scanner is independent of the current locale. Internally, the
+          locale's decimal point is used instead of `.` to work with the
+          locale-dependent converters.
+    */
+    token_type scan_number()  // lgtm [cpp/use-of-goto]
+    {
+        // reset token_buffer to store the number's bytes
+        reset();
+
+        // the type of the parsed number; initially set to unsigned; will be
+        // changed if minus sign, decimal point or exponent is read
+        token_type number_type = token_type::value_unsigned;
+
+        // state (init): we just found out we need to scan a number
+        switch (current)
+        {
+            case '-':
+            {
+                add(current);
+                goto scan_number_minus;
+            }
+
+            case '0':
+            {
+                add(current);
+                goto scan_number_zero;
+            }
+
+            case '1':
+            case '2':
+            case '3':
+            case '4':
+            case '5':
+            case '6':
+            case '7':
+            case '8':
+            case '9':
+            {
+                add(current);
+                goto scan_number_any1;
+            }
+
+            // all other characters are rejected outside scan_number()
+            default:            // LCOV_EXCL_LINE
+                JSON_ASSERT(false); // NOLINT(cert-dcl03-c,hicpp-static-assert,misc-static-assert) LCOV_EXCL_LINE
+        }
+
+scan_number_minus:
+        // state: we just parsed a leading minus sign
+        number_type = token_type::value_integer;
+        switch (get())
+        {
+            case '0':
+            {
+                add(current);
+                goto scan_number_zero;
+            }
+
+            case '1':
+            case '2':
+            case '3':
+            case '4':
+            case '5':
+            case '6':
+            case '7':
+            case '8':
+            case '9':
+            {
+                add(current);
+                goto scan_number_any1;
+            }
+
+            default:
+            {
+                error_message = "invalid number; expected digit after '-'";
+                return token_type::parse_error;
+            }
+        }
+
+scan_number_zero:
+        // state: we just parse a zero (maybe with a leading minus sign)
+        switch (get())
+        {
+            case '.':
+            {
+                add(decimal_point_char);
+                goto scan_number_decimal1;
+            }
+
+            case 'e':
+            case 'E':
+            {
+                add(current);
+                goto scan_number_exponent;
+            }
+
+            default:
+                goto scan_number_done;
+        }
+
+scan_number_any1:
+        // state: we just parsed a number 0-9 (maybe with a leading minus sign)
+        switch (get())
+        {
+            case '0':
+            case '1':
+            case '2':
+            case '3':
+            case '4':
+            case '5':
+            case '6':
+            case '7':
+            case '8':
+            case '9':
+            {
+                add(current);
+                goto scan_number_any1;
+            }
+
+            case '.':
+            {
+                add(decimal_point_char);
+                goto scan_number_decimal1;
+            }
+
+            case 'e':
+            case 'E':
+            {
+                add(current);
+                goto scan_number_exponent;
+            }
+
+            default:
+                goto scan_number_done;
+        }
+
+scan_number_decimal1:
+        // state: we just parsed a decimal point
+        number_type = token_type::value_float;
+        switch (get())
+        {
+            case '0':
+            case '1':
+            case '2':
+            case '3':
+            case '4':
+            case '5':
+            case '6':
+            case '7':
+            case '8':
+            case '9':
+            {
+                add(current);
+                goto scan_number_decimal2;
+            }
+
+            default:
+            {
+                error_message = "invalid number; expected digit after '.'";
+                return token_type::parse_error;
+            }
+        }
+
+scan_number_decimal2:
+        // we just parsed at least one number after a decimal point
+        switch (get())
+        {
+            case '0':
+            case '1':
+            case '2':
+            case '3':
+            case '4':
+            case '5':
+            case '6':
+            case '7':
+            case '8':
+            case '9':
+            {
+                add(current);
+                goto scan_number_decimal2;
+            }
+
+            case 'e':
+            case 'E':
+            {
+                add(current);
+                goto scan_number_exponent;
+            }
+
+            default:
+                goto scan_number_done;
+        }
+
+scan_number_exponent:
+        // we just parsed an exponent
+        number_type = token_type::value_float;
+        switch (get())
+        {
+            case '+':
+            case '-':
+            {
+                add(current);
+                goto scan_number_sign;
+            }
+
+            case '0':
+            case '1':
+            case '2':
+            case '3':
+            case '4':
+            case '5':
+            case '6':
+            case '7':
+            case '8':
+            case '9':
+            {
+                add(current);
+                goto scan_number_any2;
+            }
+
+            default:
+            {
+                error_message =
+                    "invalid number; expected '+', '-', or digit after exponent";
+                return token_type::parse_error;
+            }
+        }
+
+scan_number_sign:
+        // we just parsed an exponent sign
+        switch (get())
+        {
+            case '0':
+            case '1':
+            case '2':
+            case '3':
+            case '4':
+            case '5':
+            case '6':
+            case '7':
+            case '8':
+            case '9':
+            {
+                add(current);
+                goto scan_number_any2;
+            }
+
+            default:
+            {
+                error_message = "invalid number; expected digit after exponent sign";
+                return token_type::parse_error;
+            }
+        }
+
+scan_number_any2:
+        // we just parsed a number after the exponent or exponent sign
+        switch (get())
+        {
+            case '0':
+            case '1':
+            case '2':
+            case '3':
+            case '4':
+            case '5':
+            case '6':
+            case '7':
+            case '8':
+            case '9':
+            {
+                add(current);
+                goto scan_number_any2;
+            }
+
+            default:
+                goto scan_number_done;
+        }
+
+scan_number_done:
+        // unget the character after the number (we only read it to know that
+        // we are done scanning a number)
+        unget();
+
+        char* endptr = nullptr; // NOLINT(cppcoreguidelines-pro-type-vararg,hicpp-vararg)
+        errno = 0;
+
+        // try to parse integers first and fall back to floats
+        if (number_type == token_type::value_unsigned)
+        {
+            const auto x = std::strtoull(token_buffer.data(), &endptr, 10);
+
+            // we checked the number format before
+            JSON_ASSERT(endptr == token_buffer.data() + token_buffer.size());
+
+            if (errno == 0)
+            {
+                value_unsigned = static_cast<number_unsigned_t>(x);
+                if (value_unsigned == x)
+                {
+                    return token_type::value_unsigned;
+                }
+            }
+        }
+        else if (number_type == token_type::value_integer)
+        {
+            const auto x = std::strtoll(token_buffer.data(), &endptr, 10);
+
+            // we checked the number format before
+            JSON_ASSERT(endptr == token_buffer.data() + token_buffer.size());
+
+            if (errno == 0)
+            {
+                value_integer = static_cast<number_integer_t>(x);
+                if (value_integer == x)
+                {
+                    return token_type::value_integer;
+                }
+            }
+        }
+
+        // this code is reached if we parse a floating-point number or if an
+        // integer conversion above failed
+        strtof(value_float, token_buffer.data(), &endptr);
+
+        // we checked the number format before
+        JSON_ASSERT(endptr == token_buffer.data() + token_buffer.size());
+
+        return token_type::value_float;
+    }
+
+    /*!
+    @param[in] literal_text  the literal text to expect
+    @param[in] length        the length of the passed literal text
+    @param[in] return_type   the token type to return on success
+    */
+    JSON_HEDLEY_NON_NULL(2)
+    token_type scan_literal(const char_type* literal_text, const std::size_t length,
+                            token_type return_type)
+    {
+        JSON_ASSERT(char_traits<char_type>::to_char_type(current) == literal_text[0]);
+        for (std::size_t i = 1; i < length; ++i)
+        {
+            if (JSON_HEDLEY_UNLIKELY(char_traits<char_type>::to_char_type(get()) != literal_text[i]))
+            {
+                error_message = "invalid literal";
+                return token_type::parse_error;
+            }
+        }
+        return return_type;
+    }
+
+    /////////////////////
+    // input management
+    /////////////////////
+
+    /// reset token_buffer; current character is beginning of token
+    void reset() noexcept
+    {
+        token_buffer.clear();
+        token_string.clear();
+        token_string.push_back(char_traits<char_type>::to_char_type(current));
+    }
+
+    /*
+    @brief get next character from the input
+
+    This function provides the interface to the used input adapter. It does
+    not throw in case the input reached EOF, but returns a
+    `char_traits<char>::eof()` in that case.  Stores the scanned characters
+    for use in error messages.
+
+    @return character read from the input
+    */
+    char_int_type get()
+    {
+        ++position.chars_read_total;
+        ++position.chars_read_current_line;
+
+        if (next_unget)
+        {
+            // just reset the next_unget variable and work with current
+            next_unget = false;
+        }
+        else
+        {
+            current = ia.get_character();
+        }
+
+        if (JSON_HEDLEY_LIKELY(current != char_traits<char_type>::eof()))
+        {
+            token_string.push_back(char_traits<char_type>::to_char_type(current));
+        }
+
+        if (current == '\n')
+        {
+            ++position.lines_read;
+            position.chars_read_current_line = 0;
+        }
+
+        return current;
+    }
+
+    /*!
+    @brief unget current character (read it again on next get)
+
+    We implement unget by setting variable next_unget to true. The input is not
+    changed - we just simulate ungetting by modifying chars_read_total,
+    chars_read_current_line, and token_string. The next call to get() will
+    behave as if the unget character is read again.
+    */
+    void unget()
+    {
+        next_unget = true;
+
+        --position.chars_read_total;
+
+        // in case we "unget" a newline, we have to also decrement the lines_read
+        if (position.chars_read_current_line == 0)
+        {
+            if (position.lines_read > 0)
+            {
+                --position.lines_read;
+            }
+        }
+        else
+        {
+            --position.chars_read_current_line;
+        }
+
+        if (JSON_HEDLEY_LIKELY(current != char_traits<char_type>::eof()))
+        {
+            JSON_ASSERT(!token_string.empty());
+            token_string.pop_back();
+        }
+    }
+
+    /// add a character to token_buffer
+    void add(char_int_type c)
+    {
+        token_buffer.push_back(static_cast<typename string_t::value_type>(c));
+    }
+
+  public:
+    /////////////////////
+    // value getters
+    /////////////////////
+
+    /// return integer value
+    constexpr number_integer_t get_number_integer() const noexcept
+    {
+        return value_integer;
+    }
+
+    /// return unsigned integer value
+    constexpr number_unsigned_t get_number_unsigned() const noexcept
+    {
+        return value_unsigned;
+    }
+
+    /// return floating-point value
+    constexpr number_float_t get_number_float() const noexcept
+    {
+        return value_float;
+    }
+
+    /// return current string value (implicitly resets the token; useful only once)
+    string_t& get_string()
+    {
+        return token_buffer;
+    }
+
+    /////////////////////
+    // diagnostics
+    /////////////////////
+
+    /// return position of last read token
+    constexpr position_t get_position() const noexcept
+    {
+        return position;
+    }
+
+    /// return the last read token (for errors only).  Will never contain EOF
+    /// (an arbitrary value that is not a valid char value, often -1), because
+    /// 255 may legitimately occur.  May contain NUL, which should be escaped.
+    std::string get_token_string() const
+    {
+        // escape control characters
+        std::string result;
+        for (const auto c : token_string)
+        {
+            if (static_cast<unsigned char>(c) <= '\x1F')
+            {
+                // escape control characters
+                std::array<char, 9> cs{{}};
+                static_cast<void>((std::snprintf)(cs.data(), cs.size(), "<U+%.4X>", static_cast<unsigned char>(c))); // NOLINT(cppcoreguidelines-pro-type-vararg,hicpp-vararg)
+                result += cs.data();
+            }
+            else
+            {
+                // add character as is
+                result.push_back(static_cast<std::string::value_type>(c));
+            }
+        }
+
+        return result;
+    }
+
+    /// return syntax error message
+    JSON_HEDLEY_RETURNS_NON_NULL
+    constexpr const char* get_error_message() const noexcept
+    {
+        return error_message;
+    }
+
+    /////////////////////
