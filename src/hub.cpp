@@ -15,6 +15,7 @@
 // atomically (tmp + rename), then link into snapshots/<sha>/.
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
@@ -77,6 +78,32 @@ bool matches_patterns(const std::string& rel,
   return false;
 }
 
+// SEC-02: relative path safety — hub-supplied repo paths go into the local
+// cache without traversal. Reject absolute paths, dotdot segments, Windows
+// separators/drives, control chars, overlong paths, and empty strings; then
+// verify the normalized join stays inside the cache root.
+bool safe_rel_path(const std::string& rel) {
+  if (rel.empty() || rel.size() > 4096) return false;
+  for (unsigned char c : rel) {
+    if (c < 0x20 || c == 0x7F) return false;      // control
+  }
+  if (rel.rfind("/", 0) == 0 || rel.find('\\') != std::string::npos) return false;
+  if (rel.size() > 1 && std::isalpha(static_cast<unsigned char>(rel[0])) && rel[1] == ':')
+    return false;  // drive letter
+  if (rel.find("..") != std::string::npos) return false;   // traversal
+  return true;
+}
+
+// After joining, the normalized path must live under `root`.
+bool path_within(const fs::path& root, const fs::path& joined) {
+  std::error_code ec;
+  fs::path n_root = fs::weakly_canonical(fs::absolute(root), ec);
+  fs::path n_join = fs::weakly_canonical(joined, ec);
+  std::string r = n_root.generic_string();
+  std::string j = n_join.generic_string();
+  return j.rfind(r + "/", 0) == 0 || j == r;
+}
+
 // ---- local cache resolution -------------------------------------------------
 std::string cached_snapshot(const std::string& base, const std::string& repo_id) {
   fs::path snap_dir = fs::path(base) / repo_cache_name(repo_id) / "snapshots";
@@ -107,6 +134,10 @@ class Curl {
     curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(h, CURLOPT_FAILONERROR, 0L);
     curl_easy_setopt(h, CURLOPT_USERAGENT, "snapjudge-cpp/0.1");
+    // SEC-04: follow at most 2 redirects and only on https
+    curl_easy_setopt(h, CURLOPT_MAXREDIRS, 2L);
+    curl_easy_setopt(h, CURLOPT_REDIR_PROTOCOLS,
+                     static_cast<long>(CURLPROTO_HTTPS));
   }
   ~Curl() { curl_easy_cleanup(h); }
 };
@@ -120,11 +151,27 @@ size_t write_to_file(char* ptr, size_t size, size_t nmemb, void* userdata) {
   return std::fwrite(ptr, size, nmemb, static_cast<FILE*>(userdata));
 }
 
+// SEC-04: the default hub endpoint is always huggingface.co. Set HF_ENDPOINT
+// only for a documented mirror over https. Anything else must go through
+// SNAPJUDGE_ALLOW_INSECURE_HF_ENDPOINT=1 explicitly.
 std::string hf_endpoint() {
   if (const char* p = std::getenv("HF_ENDPOINT"); p && *p) {
     std::string e = p;
     while (!e.empty() && e.back() == '/') e.pop_back();
-    return e;
+    bool https = e.rfind("https://", 0) == 0;
+    bool allowed =
+        e == "https://huggingface.co" || e.rfind("https://cdn-lfs.", 0) == 0;
+    if (https && allowed) return e;
+    const bool insecure = std::getenv("SNAPJUDGE_ALLOW_INSECURE_HF_ENDPOINT") &&
+                          std::string(std::getenv("SNAPJUDGE_ALLOW_INSECURE_HF_ENDPOINT")) == "1";
+    if (insecure) {
+      fprintf(stderr, "snapjudge: WARNING: non-default HF_ENDPOINT in use: %s\n", e.c_str());
+      return e;
+    }
+    fprintf(stderr,
+            "snapjudge: HF_ENDPOINT %s is not an allowed HF mirror; using the default. "
+            "Set SNAPJUDGE_ALLOW_INSECURE_HF_ENDPOINT=1 to override (air-gapped mirrors).\n",
+            e.c_str());
   }
   return "https://huggingface.co";
 }
@@ -263,8 +310,13 @@ std::string resolve_checkpoint(const std::string& repo_id,
   bool any = false;
   for (const auto& rel : info.files) {
     if (!matches_patterns(rel, allow_patterns)) continue;
-    any = true;
+    // SEC-02: hub-supplied rfilename is an on-disk path — must be safe AND stay
+    // inside the cache tree.
+    if (!safe_rel_path(rel))
+      throw std::runtime_error("snapjudge: refusing unsafe repo path: " + rel);
     fs::path final_blob = blobs / rel;  // readable name; unique via rel
+    if (!path_within(blobs, final_blob) || !path_within(snap, snap / rel))
+      throw std::runtime_error("snapjudge: repo path escapes cache root: " + rel);
     if (!fs::exists(final_blob)) {
       fs::path tmp = blobs / (rel + ".tmp");
       if (fs::exists(tmp)) fs::remove(tmp);
