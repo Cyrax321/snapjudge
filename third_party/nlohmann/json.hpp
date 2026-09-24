@@ -15928,3 +15928,593 @@ class binary_writer
                 {
                     if (!write_bjdata_ndarray(*j.m_data.m_value.object, use_count, use_type))  // decode bjdata ndarray in the JData format (https://github.com/NeuroJSON/jdata)
                     {
+                        break;
+                    }
+                }
+
+                if (add_prefix)
+                {
+                    oa->write_character(to_char_type('{'));
+                }
+
+                bool prefix_required = true;
+                if (use_type && !j.m_data.m_value.object->empty())
+                {
+                    JSON_ASSERT(use_count);
+                    const CharType first_prefix = ubjson_prefix(j.front(), use_bjdata);
+                    const bool same_prefix = std::all_of(j.begin(), j.end(),
+                                                         [this, first_prefix, use_bjdata](const BasicJsonType & v)
+                    {
+                        return ubjson_prefix(v, use_bjdata) == first_prefix;
+                    });
+
+                    std::vector<CharType> bjdx = {'[', '{', 'S', 'H', 'T', 'F', 'N', 'Z'}; // excluded markers in bjdata optimized type
+
+                    if (same_prefix && !(use_bjdata && std::find(bjdx.begin(), bjdx.end(), first_prefix) != bjdx.end()))
+                    {
+                        prefix_required = false;
+                        oa->write_character(to_char_type('$'));
+                        oa->write_character(first_prefix);
+                    }
+                }
+
+                if (use_count)
+                {
+                    oa->write_character(to_char_type('#'));
+                    write_number_with_ubjson_prefix(j.m_data.m_value.object->size(), true, use_bjdata);
+                }
+
+                for (const auto& el : *j.m_data.m_value.object)
+                {
+                    write_number_with_ubjson_prefix(el.first.size(), true, use_bjdata);
+                    oa->write_characters(
+                        reinterpret_cast<const CharType*>(el.first.c_str()),
+                        el.first.size());
+                    write_ubjson(el.second, use_count, use_type, prefix_required, use_bjdata);
+                }
+
+                if (!use_count)
+                {
+                    oa->write_character(to_char_type('}'));
+                }
+
+                break;
+            }
+
+            case value_t::discarded:
+            default:
+                break;
+        }
+    }
+
+  private:
+    //////////
+    // BSON //
+    //////////
+
+    /*!
+    @return The size of a BSON document entry header, including the id marker
+            and the entry name size (and its null-terminator).
+    */
+    static std::size_t calc_bson_entry_header_size(const string_t& name, const BasicJsonType& j)
+    {
+        const auto it = name.find(static_cast<typename string_t::value_type>(0));
+        if (JSON_HEDLEY_UNLIKELY(it != BasicJsonType::string_t::npos))
+        {
+            JSON_THROW(out_of_range::create(409, concat("BSON key cannot contain code point U+0000 (at byte ", std::to_string(it), ")"), &j));
+            static_cast<void>(j);
+        }
+
+        return /*id*/ 1ul + name.size() + /*zero-terminator*/1u;
+    }
+
+    /*!
+    @brief Writes the given @a element_type and @a name to the output adapter
+    */
+    void write_bson_entry_header(const string_t& name,
+                                 const std::uint8_t element_type)
+    {
+        oa->write_character(to_char_type(element_type)); // boolean
+        oa->write_characters(
+            reinterpret_cast<const CharType*>(name.c_str()),
+            name.size() + 1u);
+    }
+
+    /*!
+    @brief Writes a BSON element with key @a name and boolean value @a value
+    */
+    void write_bson_boolean(const string_t& name,
+                            const bool value)
+    {
+        write_bson_entry_header(name, 0x08);
+        oa->write_character(value ? to_char_type(0x01) : to_char_type(0x00));
+    }
+
+    /*!
+    @brief Writes a BSON element with key @a name and double value @a value
+    */
+    void write_bson_double(const string_t& name,
+                           const double value)
+    {
+        write_bson_entry_header(name, 0x01);
+        write_number<double>(value, true);
+    }
+
+    /*!
+    @return The size of the BSON-encoded string in @a value
+    */
+    static std::size_t calc_bson_string_size(const string_t& value)
+    {
+        return sizeof(std::int32_t) + value.size() + 1ul;
+    }
+
+    /*!
+    @brief Writes a BSON element with key @a name and string value @a value
+    */
+    void write_bson_string(const string_t& name,
+                           const string_t& value)
+    {
+        write_bson_entry_header(name, 0x02);
+
+        write_number<std::int32_t>(static_cast<std::int32_t>(value.size() + 1ul), true);
+        oa->write_characters(
+            reinterpret_cast<const CharType*>(value.c_str()),
+            value.size() + 1);
+    }
+
+    /*!
+    @brief Writes a BSON element with key @a name and null value
+    */
+    void write_bson_null(const string_t& name)
+    {
+        write_bson_entry_header(name, 0x0A);
+    }
+
+    /*!
+    @return The size of the BSON-encoded integer @a value
+    */
+    static std::size_t calc_bson_integer_size(const std::int64_t value)
+    {
+        return (std::numeric_limits<std::int32_t>::min)() <= value && value <= (std::numeric_limits<std::int32_t>::max)()
+               ? sizeof(std::int32_t)
+               : sizeof(std::int64_t);
+    }
+
+    /*!
+    @brief Writes a BSON element with key @a name and integer @a value
+    */
+    void write_bson_integer(const string_t& name,
+                            const std::int64_t value)
+    {
+        if ((std::numeric_limits<std::int32_t>::min)() <= value && value <= (std::numeric_limits<std::int32_t>::max)())
+        {
+            write_bson_entry_header(name, 0x10); // int32
+            write_number<std::int32_t>(static_cast<std::int32_t>(value), true);
+        }
+        else
+        {
+            write_bson_entry_header(name, 0x12); // int64
+            write_number<std::int64_t>(static_cast<std::int64_t>(value), true);
+        }
+    }
+
+    /*!
+    @return The size of the BSON-encoded unsigned integer in @a j
+    */
+    static constexpr std::size_t calc_bson_unsigned_size(const std::uint64_t value) noexcept
+    {
+        return (value <= static_cast<std::uint64_t>((std::numeric_limits<std::int32_t>::max)()))
+               ? sizeof(std::int32_t)
+               : sizeof(std::int64_t);
+    }
+
+    /*!
+    @brief Writes a BSON element with key @a name and unsigned @a value
+    */
+    void write_bson_unsigned(const string_t& name,
+                             const BasicJsonType& j)
+    {
+        if (j.m_data.m_value.number_unsigned <= static_cast<std::uint64_t>((std::numeric_limits<std::int32_t>::max)()))
+        {
+            write_bson_entry_header(name, 0x10 /* int32 */);
+            write_number<std::int32_t>(static_cast<std::int32_t>(j.m_data.m_value.number_unsigned), true);
+        }
+        else if (j.m_data.m_value.number_unsigned <= static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()))
+        {
+            write_bson_entry_header(name, 0x12 /* int64 */);
+            write_number<std::int64_t>(static_cast<std::int64_t>(j.m_data.m_value.number_unsigned), true);
+        }
+        else
+        {
+            JSON_THROW(out_of_range::create(407, concat("integer number ", std::to_string(j.m_data.m_value.number_unsigned), " cannot be represented by BSON as it does not fit int64"), &j));
+        }
+    }
+
+    /*!
+    @brief Writes a BSON element with key @a name and object @a value
+    */
+    void write_bson_object_entry(const string_t& name,
+                                 const typename BasicJsonType::object_t& value)
+    {
+        write_bson_entry_header(name, 0x03); // object
+        write_bson_object(value);
+    }
+
+    /*!
+    @return The size of the BSON-encoded array @a value
+    */
+    static std::size_t calc_bson_array_size(const typename BasicJsonType::array_t& value)
+    {
+        std::size_t array_index = 0ul;
+
+        const std::size_t embedded_document_size = std::accumulate(std::begin(value), std::end(value), static_cast<std::size_t>(0), [&array_index](std::size_t result, const typename BasicJsonType::array_t::value_type & el)
+        {
+            return result + calc_bson_element_size(std::to_string(array_index++), el);
+        });
+
+        return sizeof(std::int32_t) + embedded_document_size + 1ul;
+    }
+
+    /*!
+    @return The size of the BSON-encoded binary array @a value
+    */
+    static std::size_t calc_bson_binary_size(const typename BasicJsonType::binary_t& value)
+    {
+        return sizeof(std::int32_t) + value.size() + 1ul;
+    }
+
+    /*!
+    @brief Writes a BSON element with key @a name and array @a value
+    */
+    void write_bson_array(const string_t& name,
+                          const typename BasicJsonType::array_t& value)
+    {
+        write_bson_entry_header(name, 0x04); // array
+        write_number<std::int32_t>(static_cast<std::int32_t>(calc_bson_array_size(value)), true);
+
+        std::size_t array_index = 0ul;
+
+        for (const auto& el : value)
+        {
+            write_bson_element(std::to_string(array_index++), el);
+        }
+
+        oa->write_character(to_char_type(0x00));
+    }
+
+    /*!
+    @brief Writes a BSON element with key @a name and binary value @a value
+    */
+    void write_bson_binary(const string_t& name,
+                           const binary_t& value)
+    {
+        write_bson_entry_header(name, 0x05);
+
+        write_number<std::int32_t>(static_cast<std::int32_t>(value.size()), true);
+        write_number(value.has_subtype() ? static_cast<std::uint8_t>(value.subtype()) : static_cast<std::uint8_t>(0x00));
+
+        oa->write_characters(reinterpret_cast<const CharType*>(value.data()), value.size());
+    }
+
+    /*!
+    @brief Calculates the size necessary to serialize the JSON value @a j with its @a name
+    @return The calculated size for the BSON document entry for @a j with the given @a name.
+    */
+    static std::size_t calc_bson_element_size(const string_t& name,
+            const BasicJsonType& j)
+    {
+        const auto header_size = calc_bson_entry_header_size(name, j);
+        switch (j.type())
+        {
+            case value_t::object:
+                return header_size + calc_bson_object_size(*j.m_data.m_value.object);
+
+            case value_t::array:
+                return header_size + calc_bson_array_size(*j.m_data.m_value.array);
+
+            case value_t::binary:
+                return header_size + calc_bson_binary_size(*j.m_data.m_value.binary);
+
+            case value_t::boolean:
+                return header_size + 1ul;
+
+            case value_t::number_float:
+                return header_size + 8ul;
+
+            case value_t::number_integer:
+                return header_size + calc_bson_integer_size(j.m_data.m_value.number_integer);
+
+            case value_t::number_unsigned:
+                return header_size + calc_bson_unsigned_size(j.m_data.m_value.number_unsigned);
+
+            case value_t::string:
+                return header_size + calc_bson_string_size(*j.m_data.m_value.string);
+
+            case value_t::null:
+                return header_size + 0ul;
+
+            // LCOV_EXCL_START
+            case value_t::discarded:
+            default:
+                JSON_ASSERT(false); // NOLINT(cert-dcl03-c,hicpp-static-assert,misc-static-assert)
+                return 0ul;
+                // LCOV_EXCL_STOP
+        }
+    }
+
+    /*!
+    @brief Serializes the JSON value @a j to BSON and associates it with the
+           key @a name.
+    @param name The name to associate with the JSON entity @a j within the
+                current BSON document
+    */
+    void write_bson_element(const string_t& name,
+                            const BasicJsonType& j)
+    {
+        switch (j.type())
+        {
+            case value_t::object:
+                return write_bson_object_entry(name, *j.m_data.m_value.object);
+
+            case value_t::array:
+                return write_bson_array(name, *j.m_data.m_value.array);
+
+            case value_t::binary:
+                return write_bson_binary(name, *j.m_data.m_value.binary);
+
+            case value_t::boolean:
+                return write_bson_boolean(name, j.m_data.m_value.boolean);
+
+            case value_t::number_float:
+                return write_bson_double(name, j.m_data.m_value.number_float);
+
+            case value_t::number_integer:
+                return write_bson_integer(name, j.m_data.m_value.number_integer);
+
+            case value_t::number_unsigned:
+                return write_bson_unsigned(name, j);
+
+            case value_t::string:
+                return write_bson_string(name, *j.m_data.m_value.string);
+
+            case value_t::null:
+                return write_bson_null(name);
+
+            // LCOV_EXCL_START
+            case value_t::discarded:
+            default:
+                JSON_ASSERT(false); // NOLINT(cert-dcl03-c,hicpp-static-assert,misc-static-assert)
+                return;
+                // LCOV_EXCL_STOP
+        }
+    }
+
+    /*!
+    @brief Calculates the size of the BSON serialization of the given
+           JSON-object @a j.
+    @param[in] value  JSON value to serialize
+    @pre       value.type() == value_t::object
+    */
+    static std::size_t calc_bson_object_size(const typename BasicJsonType::object_t& value)
+    {
+        const std::size_t document_size = std::accumulate(value.begin(), value.end(), static_cast<std::size_t>(0),
+                                          [](size_t result, const typename BasicJsonType::object_t::value_type & el)
+        {
+            return result += calc_bson_element_size(el.first, el.second);
+        });
+
+        return sizeof(std::int32_t) + document_size + 1ul;
+    }
+
+    /*!
+    @param[in] value  JSON value to serialize
+    @pre       value.type() == value_t::object
+    */
+    void write_bson_object(const typename BasicJsonType::object_t& value)
+    {
+        write_number<std::int32_t>(static_cast<std::int32_t>(calc_bson_object_size(value)), true);
+
+        for (const auto& el : value)
+        {
+            write_bson_element(el.first, el.second);
+        }
+
+        oa->write_character(to_char_type(0x00));
+    }
+
+    //////////
+    // CBOR //
+    //////////
+
+    static constexpr CharType get_cbor_float_prefix(float /*unused*/)
+    {
+        return to_char_type(0xFA);  // Single-Precision Float
+    }
+
+    static constexpr CharType get_cbor_float_prefix(double /*unused*/)
+    {
+        return to_char_type(0xFB);  // Double-Precision Float
+    }
+
+    /////////////
+    // MsgPack //
+    /////////////
+
+    static constexpr CharType get_msgpack_float_prefix(float /*unused*/)
+    {
+        return to_char_type(0xCA);  // float 32
+    }
+
+    static constexpr CharType get_msgpack_float_prefix(double /*unused*/)
+    {
+        return to_char_type(0xCB);  // float 64
+    }
+
+    ////////////
+    // UBJSON //
+    ////////////
+
+    // UBJSON: write number (floating point)
+    template<typename NumberType, typename std::enable_if<
+                 std::is_floating_point<NumberType>::value, int>::type = 0>
+    void write_number_with_ubjson_prefix(const NumberType n,
+                                         const bool add_prefix,
+                                         const bool use_bjdata)
+    {
+        if (add_prefix)
+        {
+            oa->write_character(get_ubjson_float_prefix(n));
+        }
+        write_number(n, use_bjdata);
+    }
+
+    // UBJSON: write number (unsigned integer)
+    template<typename NumberType, typename std::enable_if<
+                 std::is_unsigned<NumberType>::value, int>::type = 0>
+    void write_number_with_ubjson_prefix(const NumberType n,
+                                         const bool add_prefix,
+                                         const bool use_bjdata)
+    {
+        if (n <= static_cast<std::uint64_t>((std::numeric_limits<std::int8_t>::max)()))
+        {
+            if (add_prefix)
+            {
+                oa->write_character(to_char_type('i'));  // int8
+            }
+            write_number(static_cast<std::uint8_t>(n), use_bjdata);
+        }
+        else if (n <= (std::numeric_limits<std::uint8_t>::max)())
+        {
+            if (add_prefix)
+            {
+                oa->write_character(to_char_type('U'));  // uint8
+            }
+            write_number(static_cast<std::uint8_t>(n), use_bjdata);
+        }
+        else if (n <= static_cast<std::uint64_t>((std::numeric_limits<std::int16_t>::max)()))
+        {
+            if (add_prefix)
+            {
+                oa->write_character(to_char_type('I'));  // int16
+            }
+            write_number(static_cast<std::int16_t>(n), use_bjdata);
+        }
+        else if (use_bjdata && n <= static_cast<uint64_t>((std::numeric_limits<uint16_t>::max)()))
+        {
+            if (add_prefix)
+            {
+                oa->write_character(to_char_type('u'));  // uint16 - bjdata only
+            }
+            write_number(static_cast<std::uint16_t>(n), use_bjdata);
+        }
+        else if (n <= static_cast<std::uint64_t>((std::numeric_limits<std::int32_t>::max)()))
+        {
+            if (add_prefix)
+            {
+                oa->write_character(to_char_type('l'));  // int32
+            }
+            write_number(static_cast<std::int32_t>(n), use_bjdata);
+        }
+        else if (use_bjdata && n <= static_cast<uint64_t>((std::numeric_limits<uint32_t>::max)()))
+        {
+            if (add_prefix)
+            {
+                oa->write_character(to_char_type('m'));  // uint32 - bjdata only
+            }
+            write_number(static_cast<std::uint32_t>(n), use_bjdata);
+        }
+        else if (n <= static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()))
+        {
+            if (add_prefix)
+            {
+                oa->write_character(to_char_type('L'));  // int64
+            }
+            write_number(static_cast<std::int64_t>(n), use_bjdata);
+        }
+        else if (use_bjdata && n <= (std::numeric_limits<uint64_t>::max)())
+        {
+            if (add_prefix)
+            {
+                oa->write_character(to_char_type('M'));  // uint64 - bjdata only
+            }
+            write_number(static_cast<std::uint64_t>(n), use_bjdata);
+        }
+        else
+        {
+            if (add_prefix)
+            {
+                oa->write_character(to_char_type('H'));  // high-precision number
+            }
+
+            const auto number = BasicJsonType(n).dump();
+            write_number_with_ubjson_prefix(number.size(), true, use_bjdata);
+            for (std::size_t i = 0; i < number.size(); ++i)
+            {
+                oa->write_character(to_char_type(static_cast<std::uint8_t>(number[i])));
+            }
+        }
+    }
+
+    // UBJSON: write number (signed integer)
+    template < typename NumberType, typename std::enable_if <
+                   std::is_signed<NumberType>::value&&
+                   !std::is_floating_point<NumberType>::value, int >::type = 0 >
+    void write_number_with_ubjson_prefix(const NumberType n,
+                                         const bool add_prefix,
+                                         const bool use_bjdata)
+    {
+        if ((std::numeric_limits<std::int8_t>::min)() <= n && n <= (std::numeric_limits<std::int8_t>::max)())
+        {
+            if (add_prefix)
+            {
+                oa->write_character(to_char_type('i'));  // int8
+            }
+            write_number(static_cast<std::int8_t>(n), use_bjdata);
+        }
+        else if (static_cast<std::int64_t>((std::numeric_limits<std::uint8_t>::min)()) <= n && n <= static_cast<std::int64_t>((std::numeric_limits<std::uint8_t>::max)()))
+        {
+            if (add_prefix)
+            {
+                oa->write_character(to_char_type('U'));  // uint8
+            }
+            write_number(static_cast<std::uint8_t>(n), use_bjdata);
+        }
+        else if ((std::numeric_limits<std::int16_t>::min)() <= n && n <= (std::numeric_limits<std::int16_t>::max)())
+        {
+            if (add_prefix)
+            {
+                oa->write_character(to_char_type('I'));  // int16
+            }
+            write_number(static_cast<std::int16_t>(n), use_bjdata);
+        }
+        else if (use_bjdata && (static_cast<std::int64_t>((std::numeric_limits<std::uint16_t>::min)()) <= n && n <= static_cast<std::int64_t>((std::numeric_limits<std::uint16_t>::max)())))
+        {
+            if (add_prefix)
+            {
+                oa->write_character(to_char_type('u'));  // uint16 - bjdata only
+            }
+            write_number(static_cast<uint16_t>(n), use_bjdata);
+        }
+        else if ((std::numeric_limits<std::int32_t>::min)() <= n && n <= (std::numeric_limits<std::int32_t>::max)())
+        {
+            if (add_prefix)
+            {
+                oa->write_character(to_char_type('l'));  // int32
+            }
+            write_number(static_cast<std::int32_t>(n), use_bjdata);
+        }
+        else if (use_bjdata && (static_cast<std::int64_t>((std::numeric_limits<std::uint32_t>::min)()) <= n && n <= static_cast<std::int64_t>((std::numeric_limits<std::uint32_t>::max)())))
+        {
+            if (add_prefix)
+            {
+                oa->write_character(to_char_type('m'));  // uint32 - bjdata only
+            }
+            write_number(static_cast<uint32_t>(n), use_bjdata);
+        }
+        else if ((std::numeric_limits<std::int64_t>::min)() <= n && n <= (std::numeric_limits<std::int64_t>::max)())
+        {
+            if (add_prefix)
+            {
+                oa->write_character(to_char_type('L'));  // int64
+            }
+            write_number(static_cast<std::int64_t>(n), use_bjdata);
