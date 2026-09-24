@@ -8398,3 +8398,603 @@ inline Result ClientImpl::Put(const std::string &path, const Headers &headers,
 inline Result ClientImpl::Put(const std::string &path,
                               const MultipartFormDataItems &items) {
   return Put(path, Headers(), items);
+}
+
+inline Result ClientImpl::Put(const std::string &path, const Headers &headers,
+                              const MultipartFormDataItems &items) {
+  const auto &boundary = detail::make_multipart_data_boundary();
+  const auto &content_type =
+      detail::serialize_multipart_formdata_get_content_type(boundary);
+  const auto &body = detail::serialize_multipart_formdata(items, boundary);
+  return Put(path, headers, body, content_type);
+}
+
+inline Result ClientImpl::Put(const std::string &path, const Headers &headers,
+                              const MultipartFormDataItems &items,
+                              const std::string &boundary) {
+  if (!detail::is_multipart_boundary_chars_valid(boundary)) {
+    return Result{nullptr, Error::UnsupportedMultipartBoundaryChars};
+  }
+
+  const auto &content_type =
+      detail::serialize_multipart_formdata_get_content_type(boundary);
+  const auto &body = detail::serialize_multipart_formdata(items, boundary);
+  return Put(path, headers, body, content_type);
+}
+
+inline Result
+ClientImpl::Put(const std::string &path, const Headers &headers,
+                const MultipartFormDataItems &items,
+                const MultipartFormDataProviderItems &provider_items) {
+  const auto &boundary = detail::make_multipart_data_boundary();
+  const auto &content_type =
+      detail::serialize_multipart_formdata_get_content_type(boundary);
+  return send_with_content_provider(
+      "PUT", path, headers, nullptr, 0, nullptr,
+      get_multipart_content_provider(boundary, items, provider_items),
+      content_type, nullptr);
+}
+inline Result ClientImpl::Patch(const std::string &path) {
+  return Patch(path, std::string(), std::string());
+}
+
+inline Result ClientImpl::Patch(const std::string &path, const char *body,
+                                size_t content_length,
+                                const std::string &content_type) {
+  return Patch(path, Headers(), body, content_length, content_type);
+}
+
+inline Result ClientImpl::Patch(const std::string &path, const char *body,
+                                size_t content_length,
+                                const std::string &content_type,
+                                Progress progress) {
+  return Patch(path, Headers(), body, content_length, content_type, progress);
+}
+
+inline Result ClientImpl::Patch(const std::string &path, const Headers &headers,
+                                const char *body, size_t content_length,
+                                const std::string &content_type) {
+  return Patch(path, headers, body, content_length, content_type, nullptr);
+}
+
+inline Result ClientImpl::Patch(const std::string &path, const Headers &headers,
+                                const char *body, size_t content_length,
+                                const std::string &content_type,
+                                Progress progress) {
+  return send_with_content_provider("PATCH", path, headers, body,
+                                    content_length, nullptr, nullptr,
+                                    content_type, progress);
+}
+
+inline Result ClientImpl::Patch(const std::string &path,
+                                const std::string &body,
+                                const std::string &content_type) {
+  return Patch(path, Headers(), body, content_type);
+}
+
+inline Result ClientImpl::Patch(const std::string &path,
+                                const std::string &body,
+                                const std::string &content_type,
+                                Progress progress) {
+  return Patch(path, Headers(), body, content_type, progress);
+}
+
+inline Result ClientImpl::Patch(const std::string &path, const Headers &headers,
+                                const std::string &body,
+                                const std::string &content_type) {
+  return Patch(path, headers, body, content_type, nullptr);
+}
+
+inline Result ClientImpl::Patch(const std::string &path, const Headers &headers,
+                                const std::string &body,
+                                const std::string &content_type,
+                                Progress progress) {
+  return send_with_content_provider("PATCH", path, headers, body.data(),
+                                    body.size(), nullptr, nullptr, content_type,
+                                    progress);
+}
+
+inline Result ClientImpl::Patch(const std::string &path, size_t content_length,
+                                ContentProvider content_provider,
+                                const std::string &content_type) {
+  return Patch(path, Headers(), content_length, std::move(content_provider),
+               content_type);
+}
+
+inline Result ClientImpl::Patch(const std::string &path,
+                                ContentProviderWithoutLength content_provider,
+                                const std::string &content_type) {
+  return Patch(path, Headers(), std::move(content_provider), content_type);
+}
+
+inline Result ClientImpl::Patch(const std::string &path, const Headers &headers,
+                                size_t content_length,
+                                ContentProvider content_provider,
+                                const std::string &content_type) {
+  return send_with_content_provider("PATCH", path, headers, nullptr,
+                                    content_length, std::move(content_provider),
+                                    nullptr, content_type, nullptr);
+}
+
+inline Result ClientImpl::Patch(const std::string &path, const Headers &headers,
+                                ContentProviderWithoutLength content_provider,
+                                const std::string &content_type) {
+  return send_with_content_provider("PATCH", path, headers, nullptr, 0, nullptr,
+                                    std::move(content_provider), content_type,
+                                    nullptr);
+}
+
+inline Result ClientImpl::Delete(const std::string &path) {
+  return Delete(path, Headers(), std::string(), std::string());
+}
+
+inline Result ClientImpl::Delete(const std::string &path,
+                                 const Headers &headers) {
+  return Delete(path, headers, std::string(), std::string());
+}
+
+inline Result ClientImpl::Delete(const std::string &path, const char *body,
+                                 size_t content_length,
+                                 const std::string &content_type) {
+  return Delete(path, Headers(), body, content_length, content_type);
+}
+
+inline Result ClientImpl::Delete(const std::string &path, const char *body,
+                                 size_t content_length,
+                                 const std::string &content_type,
+                                 Progress progress) {
+  return Delete(path, Headers(), body, content_length, content_type, progress);
+}
+
+inline Result ClientImpl::Delete(const std::string &path,
+                                 const Headers &headers, const char *body,
+                                 size_t content_length,
+                                 const std::string &content_type) {
+  return Delete(path, headers, body, content_length, content_type, nullptr);
+}
+
+inline Result ClientImpl::Delete(const std::string &path,
+                                 const Headers &headers, const char *body,
+                                 size_t content_length,
+                                 const std::string &content_type,
+                                 Progress progress) {
+  Request req;
+  req.method = "DELETE";
+  req.headers = headers;
+  req.path = path;
+  req.progress = progress;
+
+  if (!content_type.empty()) { req.set_header("Content-Type", content_type); }
+  req.body.assign(body, content_length);
+
+  return send_(std::move(req));
+}
+
+inline Result ClientImpl::Delete(const std::string &path,
+                                 const std::string &body,
+                                 const std::string &content_type) {
+  return Delete(path, Headers(), body.data(), body.size(), content_type);
+}
+
+inline Result ClientImpl::Delete(const std::string &path,
+                                 const std::string &body,
+                                 const std::string &content_type,
+                                 Progress progress) {
+  return Delete(path, Headers(), body.data(), body.size(), content_type,
+                progress);
+}
+
+inline Result ClientImpl::Delete(const std::string &path,
+                                 const Headers &headers,
+                                 const std::string &body,
+                                 const std::string &content_type) {
+  return Delete(path, headers, body.data(), body.size(), content_type);
+}
+
+inline Result ClientImpl::Delete(const std::string &path,
+                                 const Headers &headers,
+                                 const std::string &body,
+                                 const std::string &content_type,
+                                 Progress progress) {
+  return Delete(path, headers, body.data(), body.size(), content_type,
+                progress);
+}
+
+inline Result ClientImpl::Options(const std::string &path) {
+  return Options(path, Headers());
+}
+
+inline Result ClientImpl::Options(const std::string &path,
+                                  const Headers &headers) {
+  Request req;
+  req.method = "OPTIONS";
+  req.headers = headers;
+  req.path = path;
+
+  return send_(std::move(req));
+}
+
+inline void ClientImpl::stop() {
+  std::lock_guard<std::mutex> guard(socket_mutex_);
+
+  // If there is anything ongoing right now, the ONLY thread-safe thing we can
+  // do is to shutdown_socket, so that threads using this socket suddenly
+  // discover they can't read/write any more and error out. Everything else
+  // (closing the socket, shutting ssl down) is unsafe because these actions are
+  // not thread-safe.
+  if (socket_requests_in_flight_ > 0) {
+    shutdown_socket(socket_);
+
+    // Aside from that, we set a flag for the socket to be closed when we're
+    // done.
+    socket_should_be_closed_when_request_is_done_ = true;
+    return;
+  }
+
+  // Otherwise, still holding the mutex, we can shut everything down ourselves
+  shutdown_ssl(socket_, true);
+  shutdown_socket(socket_);
+  close_socket(socket_);
+}
+
+inline std::string ClientImpl::host() const { return host_; }
+
+inline int ClientImpl::port() const { return port_; }
+
+inline size_t ClientImpl::is_socket_open() const {
+  std::lock_guard<std::mutex> guard(socket_mutex_);
+  return socket_.is_open();
+}
+
+inline socket_t ClientImpl::socket() const { return socket_.sock; }
+
+inline void ClientImpl::set_connection_timeout(time_t sec, time_t usec) {
+  connection_timeout_sec_ = sec;
+  connection_timeout_usec_ = usec;
+}
+
+inline void ClientImpl::set_read_timeout(time_t sec, time_t usec) {
+  read_timeout_sec_ = sec;
+  read_timeout_usec_ = usec;
+}
+
+inline void ClientImpl::set_write_timeout(time_t sec, time_t usec) {
+  write_timeout_sec_ = sec;
+  write_timeout_usec_ = usec;
+}
+
+inline void ClientImpl::set_basic_auth(const std::string &username,
+                                       const std::string &password) {
+  basic_auth_username_ = username;
+  basic_auth_password_ = password;
+}
+
+inline void ClientImpl::set_bearer_token_auth(const std::string &token) {
+  bearer_token_auth_token_ = token;
+}
+
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+inline void ClientImpl::set_digest_auth(const std::string &username,
+                                        const std::string &password) {
+  digest_auth_username_ = username;
+  digest_auth_password_ = password;
+}
+#endif
+
+inline void ClientImpl::set_keep_alive(bool on) { keep_alive_ = on; }
+
+inline void ClientImpl::set_follow_location(bool on) { follow_location_ = on; }
+
+inline void ClientImpl::set_url_encode(bool on) { url_encode_ = on; }
+
+inline void
+ClientImpl::set_hostname_addr_map(std::map<std::string, std::string> addr_map) {
+  addr_map_ = std::move(addr_map);
+}
+
+inline void ClientImpl::set_default_headers(Headers headers) {
+  default_headers_ = std::move(headers);
+}
+
+inline void ClientImpl::set_header_writer(
+    std::function<ssize_t(Stream &, Headers &)> const &writer) {
+  header_writer_ = writer;
+}
+
+inline void ClientImpl::set_address_family(int family) {
+  address_family_ = family;
+}
+
+inline void ClientImpl::set_tcp_nodelay(bool on) { tcp_nodelay_ = on; }
+
+inline void ClientImpl::set_ipv6_v6only(bool on) { ipv6_v6only_ = on; }
+
+inline void ClientImpl::set_socket_options(SocketOptions socket_options) {
+  socket_options_ = std::move(socket_options);
+}
+
+inline void ClientImpl::set_compress(bool on) { compress_ = on; }
+
+inline void ClientImpl::set_decompress(bool on) { decompress_ = on; }
+
+inline void ClientImpl::set_interface(const std::string &intf) {
+  interface_ = intf;
+}
+
+inline void ClientImpl::set_proxy(const std::string &host, int port) {
+  proxy_host_ = host;
+  proxy_port_ = port;
+}
+
+inline void ClientImpl::set_proxy_basic_auth(const std::string &username,
+                                             const std::string &password) {
+  proxy_basic_auth_username_ = username;
+  proxy_basic_auth_password_ = password;
+}
+
+inline void ClientImpl::set_proxy_bearer_token_auth(const std::string &token) {
+  proxy_bearer_token_auth_token_ = token;
+}
+
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+inline void ClientImpl::set_proxy_digest_auth(const std::string &username,
+                                              const std::string &password) {
+  proxy_digest_auth_username_ = username;
+  proxy_digest_auth_password_ = password;
+}
+
+inline void ClientImpl::set_ca_cert_path(const std::string &ca_cert_file_path,
+                                         const std::string &ca_cert_dir_path) {
+  ca_cert_file_path_ = ca_cert_file_path;
+  ca_cert_dir_path_ = ca_cert_dir_path;
+}
+
+inline void ClientImpl::set_ca_cert_store(X509_STORE *ca_cert_store) {
+  if (ca_cert_store && ca_cert_store != ca_cert_store_) {
+    ca_cert_store_ = ca_cert_store;
+  }
+}
+
+inline X509_STORE *ClientImpl::create_ca_cert_store(const char *ca_cert,
+                                                    std::size_t size) const {
+  auto mem = BIO_new_mem_buf(ca_cert, static_cast<int>(size));
+  auto se = detail::scope_exit([&] { BIO_free_all(mem); });
+  if (!mem) { return nullptr; }
+
+  auto inf = PEM_X509_INFO_read_bio(mem, nullptr, nullptr, nullptr);
+  if (!inf) { return nullptr; }
+
+  auto cts = X509_STORE_new();
+  if (cts) {
+    for (auto i = 0; i < static_cast<int>(sk_X509_INFO_num(inf)); i++) {
+      auto itmp = sk_X509_INFO_value(inf, i);
+      if (!itmp) { continue; }
+
+      if (itmp->x509) { X509_STORE_add_cert(cts, itmp->x509); }
+      if (itmp->crl) { X509_STORE_add_crl(cts, itmp->crl); }
+    }
+  }
+
+  sk_X509_INFO_pop_free(inf, X509_INFO_free);
+  return cts;
+}
+
+inline void ClientImpl::enable_server_certificate_verification(bool enabled) {
+  server_certificate_verification_ = enabled;
+}
+
+inline void ClientImpl::enable_server_hostname_verification(bool enabled) {
+  server_hostname_verification_ = enabled;
+}
+
+inline void ClientImpl::set_server_certificate_verifier(
+    std::function<bool(SSL *ssl)> verifier) {
+  server_certificate_verifier_ = verifier;
+}
+#endif
+
+inline void ClientImpl::set_logger(Logger logger) {
+  logger_ = std::move(logger);
+}
+
+/*
+ * SSL Implementation
+ */
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+namespace detail {
+
+template <typename U, typename V>
+inline SSL *ssl_new(socket_t sock, SSL_CTX *ctx, std::mutex &ctx_mutex,
+                    U SSL_connect_or_accept, V setup) {
+  SSL *ssl = nullptr;
+  {
+    std::lock_guard<std::mutex> guard(ctx_mutex);
+    ssl = SSL_new(ctx);
+  }
+
+  if (ssl) {
+    set_nonblocking(sock, true);
+    auto bio = BIO_new_socket(static_cast<int>(sock), BIO_NOCLOSE);
+    BIO_set_nbio(bio, 1);
+    SSL_set_bio(ssl, bio, bio);
+
+    if (!setup(ssl) || SSL_connect_or_accept(ssl) != 1) {
+      SSL_shutdown(ssl);
+      {
+        std::lock_guard<std::mutex> guard(ctx_mutex);
+        SSL_free(ssl);
+      }
+      set_nonblocking(sock, false);
+      return nullptr;
+    }
+    BIO_set_nbio(bio, 0);
+    set_nonblocking(sock, false);
+  }
+
+  return ssl;
+}
+
+inline void ssl_delete(std::mutex &ctx_mutex, SSL *ssl, socket_t sock,
+                       bool shutdown_gracefully) {
+  // sometimes we may want to skip this to try to avoid SIGPIPE if we know
+  // the remote has closed the network connection
+  // Note that it is not always possible to avoid SIGPIPE, this is merely a
+  // best-efforts.
+  if (shutdown_gracefully) {
+#ifdef _WIN32
+    SSL_shutdown(ssl);
+#else
+    timeval tv;
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
+               reinterpret_cast<const void *>(&tv), sizeof(tv));
+
+    auto ret = SSL_shutdown(ssl);
+    while (ret == 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds{100});
+      ret = SSL_shutdown(ssl);
+    }
+#endif
+  }
+
+  std::lock_guard<std::mutex> guard(ctx_mutex);
+  SSL_free(ssl);
+}
+
+template <typename U>
+bool ssl_connect_or_accept_nonblocking(socket_t sock, SSL *ssl,
+                                       U ssl_connect_or_accept,
+                                       time_t timeout_sec,
+                                       time_t timeout_usec) {
+  auto res = 0;
+  while ((res = ssl_connect_or_accept(ssl)) != 1) {
+    auto err = SSL_get_error(ssl, res);
+    switch (err) {
+    case SSL_ERROR_WANT_READ:
+      if (select_read(sock, timeout_sec, timeout_usec) > 0) { continue; }
+      break;
+    case SSL_ERROR_WANT_WRITE:
+      if (select_write(sock, timeout_sec, timeout_usec) > 0) { continue; }
+      break;
+    default: break;
+    }
+    return false;
+  }
+  return true;
+}
+
+template <typename T>
+inline bool process_server_socket_ssl(
+    const std::atomic<socket_t> &svr_sock, SSL *ssl, socket_t sock,
+    size_t keep_alive_max_count, time_t keep_alive_timeout_sec,
+    time_t read_timeout_sec, time_t read_timeout_usec, time_t write_timeout_sec,
+    time_t write_timeout_usec, T callback) {
+  return process_server_socket_core(
+      svr_sock, sock, keep_alive_max_count, keep_alive_timeout_sec,
+      [&](bool close_connection, bool &connection_closed) {
+        SSLSocketStream strm(sock, ssl, read_timeout_sec, read_timeout_usec,
+                             write_timeout_sec, write_timeout_usec);
+        return callback(strm, close_connection, connection_closed);
+      });
+}
+
+template <typename T>
+inline bool
+process_client_socket_ssl(SSL *ssl, socket_t sock, time_t read_timeout_sec,
+                          time_t read_timeout_usec, time_t write_timeout_sec,
+                          time_t write_timeout_usec, T callback) {
+  SSLSocketStream strm(sock, ssl, read_timeout_sec, read_timeout_usec,
+                       write_timeout_sec, write_timeout_usec);
+  return callback(strm);
+}
+
+class SSLInit {
+public:
+  SSLInit() {
+    OPENSSL_init_ssl(
+        OPENSSL_INIT_LOAD_SSL_STRINGS | OPENSSL_INIT_LOAD_CRYPTO_STRINGS, NULL);
+  }
+};
+
+// SSL socket stream implementation
+inline SSLSocketStream::SSLSocketStream(socket_t sock, SSL *ssl,
+                                        time_t read_timeout_sec,
+                                        time_t read_timeout_usec,
+                                        time_t write_timeout_sec,
+                                        time_t write_timeout_usec)
+    : sock_(sock), ssl_(ssl), read_timeout_sec_(read_timeout_sec),
+      read_timeout_usec_(read_timeout_usec),
+      write_timeout_sec_(write_timeout_sec),
+      write_timeout_usec_(write_timeout_usec) {
+  SSL_clear_mode(ssl, SSL_MODE_AUTO_RETRY);
+}
+
+inline SSLSocketStream::~SSLSocketStream() = default;
+
+inline bool SSLSocketStream::is_readable() const {
+  return detail::select_read(sock_, read_timeout_sec_, read_timeout_usec_) > 0;
+}
+
+inline bool SSLSocketStream::is_writable() const {
+  return select_write(sock_, write_timeout_sec_, write_timeout_usec_) > 0 &&
+         is_socket_alive(sock_);
+}
+
+inline ssize_t SSLSocketStream::read(char *ptr, size_t size) {
+  if (SSL_pending(ssl_) > 0) {
+    return SSL_read(ssl_, ptr, static_cast<int>(size));
+  } else if (is_readable()) {
+    auto ret = SSL_read(ssl_, ptr, static_cast<int>(size));
+    if (ret < 0) {
+      auto err = SSL_get_error(ssl_, ret);
+      auto n = 1000;
+#ifdef _WIN32
+      while (--n >= 0 && (err == SSL_ERROR_WANT_READ ||
+                          (err == SSL_ERROR_SYSCALL &&
+                           WSAGetLastError() == WSAETIMEDOUT))) {
+#else
+      while (--n >= 0 && err == SSL_ERROR_WANT_READ) {
+#endif
+        if (SSL_pending(ssl_) > 0) {
+          return SSL_read(ssl_, ptr, static_cast<int>(size));
+        } else if (is_readable()) {
+          std::this_thread::sleep_for(std::chrono::microseconds{10});
+          ret = SSL_read(ssl_, ptr, static_cast<int>(size));
+          if (ret >= 0) { return ret; }
+          err = SSL_get_error(ssl_, ret);
+        } else {
+          return -1;
+        }
+      }
+    }
+    return ret;
+  }
+  return -1;
+}
+
+inline ssize_t SSLSocketStream::write(const char *ptr, size_t size) {
+  if (is_writable()) {
+    auto handle_size = static_cast<int>(
+        std::min<size_t>(size, (std::numeric_limits<int>::max)()));
+
+    auto ret = SSL_write(ssl_, ptr, static_cast<int>(handle_size));
+    if (ret < 0) {
+      auto err = SSL_get_error(ssl_, ret);
+      auto n = 1000;
+#ifdef _WIN32
+      while (--n >= 0 && (err == SSL_ERROR_WANT_WRITE ||
+                          (err == SSL_ERROR_SYSCALL &&
+                           WSAGetLastError() == WSAETIMEDOUT))) {
+#else
+      while (--n >= 0 && err == SSL_ERROR_WANT_WRITE) {
+#endif
+        if (is_writable()) {
+          std::this_thread::sleep_for(std::chrono::microseconds{10});
+          ret = SSL_write(ssl_, ptr, static_cast<int>(handle_size));
+          if (ret >= 0) { return ret; }
+          err = SSL_get_error(ssl_, ret);
+        } else {
+          return -1;
+        }
+      }
