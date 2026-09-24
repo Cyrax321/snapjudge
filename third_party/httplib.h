@@ -4198,3 +4198,603 @@ inline bool read_content_with_length(Stream &strm, uint64_t len,
       if (!progress(r, len)) { return false; }
     }
   }
+
+  return true;
+}
+
+inline void skip_content_with_length(Stream &strm, uint64_t len) {
+  char buf[CPPHTTPLIB_RECV_BUFSIZ];
+  uint64_t r = 0;
+  while (r < len) {
+    auto read_len = static_cast<size_t>(len - r);
+    auto n = strm.read(buf, (std::min)(read_len, CPPHTTPLIB_RECV_BUFSIZ));
+    if (n <= 0) { return; }
+    r += static_cast<uint64_t>(n);
+  }
+}
+
+inline bool read_content_without_length(Stream &strm,
+                                        ContentReceiverWithProgress out) {
+  char buf[CPPHTTPLIB_RECV_BUFSIZ];
+  uint64_t r = 0;
+  for (;;) {
+    auto n = strm.read(buf, CPPHTTPLIB_RECV_BUFSIZ);
+    if (n <= 0) { return true; }
+
+    if (!out(buf, static_cast<size_t>(n), r, 0)) { return false; }
+    r += static_cast<uint64_t>(n);
+  }
+
+  return true;
+}
+
+template <typename T>
+inline bool read_content_chunked(Stream &strm, T &x,
+                                 ContentReceiverWithProgress out) {
+  const auto bufsiz = 16;
+  char buf[bufsiz];
+
+  stream_line_reader line_reader(strm, buf, bufsiz);
+
+  if (!line_reader.getline()) { return false; }
+
+  unsigned long chunk_len;
+  while (true) {
+    char *end_ptr;
+
+    chunk_len = std::strtoul(line_reader.ptr(), &end_ptr, 16);
+
+    if (end_ptr == line_reader.ptr()) { return false; }
+    if (chunk_len == ULONG_MAX) { return false; }
+
+    if (chunk_len == 0) { break; }
+
+    if (!read_content_with_length(strm, chunk_len, nullptr, out)) {
+      return false;
+    }
+
+    if (!line_reader.getline()) { return false; }
+
+    if (strcmp(line_reader.ptr(), "\r\n") != 0) { return false; }
+
+    if (!line_reader.getline()) { return false; }
+  }
+
+  assert(chunk_len == 0);
+
+  // NOTE: In RFC 9112, '7.1 Chunked Transfer Coding' mentiones "The chunked
+  // transfer coding is complete when a chunk with a chunk-size of zero is
+  // received, possibly followed by a trailer section, and finally terminated by
+  // an empty line". https://www.rfc-editor.org/rfc/rfc9112.html#section-7.1
+  //
+  // In '7.1.3. Decoding Chunked', however, the pseudo-code in the section
+  // does't care for the existence of the final CRLF. In other words, it seems
+  // to be ok whether the final CRLF exists or not in the chunked data.
+  // https://www.rfc-editor.org/rfc/rfc9112.html#section-7.1.3
+  //
+  // According to the reference code in RFC 9112, cpp-htpplib now allows
+  // chuncked transfer coding data without the final CRLF.
+  if (!line_reader.getline()) { return true; }
+
+  while (strcmp(line_reader.ptr(), "\r\n") != 0) {
+    if (line_reader.size() > CPPHTTPLIB_HEADER_MAX_LENGTH) { return false; }
+
+    // Exclude line terminator
+    constexpr auto line_terminator_len = 2;
+    auto end = line_reader.ptr() + line_reader.size() - line_terminator_len;
+
+    parse_header(line_reader.ptr(), end,
+                 [&](const std::string &key, const std::string &val) {
+                   x.headers.emplace(key, val);
+                 });
+
+    if (!line_reader.getline()) { return false; }
+  }
+
+  return true;
+}
+
+inline bool is_chunked_transfer_encoding(const Headers &headers) {
+  return case_ignore::equal(
+      get_header_value(headers, "Transfer-Encoding", "", 0), "chunked");
+}
+
+template <typename T, typename U>
+bool prepare_content_receiver(T &x, int &status,
+                              ContentReceiverWithProgress receiver,
+                              bool decompress, U callback) {
+  if (decompress) {
+    std::string encoding = x.get_header_value("Content-Encoding");
+    std::unique_ptr<decompressor> decompressor;
+
+    if (encoding == "gzip" || encoding == "deflate") {
+#ifdef CPPHTTPLIB_ZLIB_SUPPORT
+      decompressor = detail::make_unique<gzip_decompressor>();
+#else
+      status = StatusCode::UnsupportedMediaType_415;
+      return false;
+#endif
+    } else if (encoding.find("br") != std::string::npos) {
+#ifdef CPPHTTPLIB_BROTLI_SUPPORT
+      decompressor = detail::make_unique<brotli_decompressor>();
+#else
+      status = StatusCode::UnsupportedMediaType_415;
+      return false;
+#endif
+    }
+
+    if (decompressor) {
+      if (decompressor->is_valid()) {
+        ContentReceiverWithProgress out = [&](const char *buf, size_t n,
+                                              uint64_t off, uint64_t len) {
+          return decompressor->decompress(buf, n,
+                                          [&](const char *buf2, size_t n2) {
+                                            return receiver(buf2, n2, off, len);
+                                          });
+        };
+        return callback(std::move(out));
+      } else {
+        status = StatusCode::InternalServerError_500;
+        return false;
+      }
+    }
+  }
+
+  ContentReceiverWithProgress out = [&](const char *buf, size_t n, uint64_t off,
+                                        uint64_t len) {
+    return receiver(buf, n, off, len);
+  };
+  return callback(std::move(out));
+}
+
+template <typename T>
+bool read_content(Stream &strm, T &x, size_t payload_max_length, int &status,
+                  Progress progress, ContentReceiverWithProgress receiver,
+                  bool decompress) {
+  return prepare_content_receiver(
+      x, status, std::move(receiver), decompress,
+      [&](const ContentReceiverWithProgress &out) {
+        auto ret = true;
+        auto exceed_payload_max_length = false;
+
+        if (is_chunked_transfer_encoding(x.headers)) {
+          ret = read_content_chunked(strm, x, out);
+        } else if (!has_header(x.headers, "Content-Length")) {
+          ret = read_content_without_length(strm, out);
+        } else {
+          auto len = get_header_value_u64(x.headers, "Content-Length", 0, 0);
+          if (len > payload_max_length) {
+            exceed_payload_max_length = true;
+            skip_content_with_length(strm, len);
+            ret = false;
+          } else if (len > 0) {
+            ret = read_content_with_length(strm, len, std::move(progress), out);
+          }
+        }
+
+        if (!ret) {
+          status = exceed_payload_max_length ? StatusCode::PayloadTooLarge_413
+                                             : StatusCode::BadRequest_400;
+        }
+        return ret;
+      });
+}
+
+inline ssize_t write_request_line(Stream &strm, const std::string &method,
+                                  const std::string &path) {
+  std::string s = method;
+  s += " ";
+  s += path;
+  s += " HTTP/1.1\r\n";
+  return strm.write(s.data(), s.size());
+}
+
+inline ssize_t write_response_line(Stream &strm, int status) {
+  std::string s = "HTTP/1.1 ";
+  s += std::to_string(status);
+  s += " ";
+  s += httplib::status_message(status);
+  s += "\r\n";
+  return strm.write(s.data(), s.size());
+}
+
+inline ssize_t write_headers(Stream &strm, const Headers &headers) {
+  ssize_t write_len = 0;
+  for (const auto &x : headers) {
+    std::string s;
+    s = x.first;
+    s += ": ";
+    s += x.second;
+    s += "\r\n";
+
+    auto len = strm.write(s.data(), s.size());
+    if (len < 0) { return len; }
+    write_len += len;
+  }
+  auto len = strm.write("\r\n");
+  if (len < 0) { return len; }
+  write_len += len;
+  return write_len;
+}
+
+inline bool write_data(Stream &strm, const char *d, size_t l) {
+  size_t offset = 0;
+  while (offset < l) {
+    auto length = strm.write(d + offset, l - offset);
+    if (length < 0) { return false; }
+    offset += static_cast<size_t>(length);
+  }
+  return true;
+}
+
+template <typename T>
+inline bool write_content(Stream &strm, const ContentProvider &content_provider,
+                          size_t offset, size_t length, T is_shutting_down,
+                          Error &error) {
+  size_t end_offset = offset + length;
+  auto ok = true;
+  DataSink data_sink;
+
+  data_sink.write = [&](const char *d, size_t l) -> bool {
+    if (ok) {
+      if (strm.is_writable() && write_data(strm, d, l)) {
+        offset += l;
+      } else {
+        ok = false;
+      }
+    }
+    return ok;
+  };
+
+  data_sink.is_writable = [&]() -> bool { return strm.is_writable(); };
+
+  while (offset < end_offset && !is_shutting_down()) {
+    if (!strm.is_writable()) {
+      error = Error::Write;
+      return false;
+    } else if (!content_provider(offset, end_offset - offset, data_sink)) {
+      error = Error::Canceled;
+      return false;
+    } else if (!ok) {
+      error = Error::Write;
+      return false;
+    }
+  }
+
+  error = Error::Success;
+  return true;
+}
+
+template <typename T>
+inline bool write_content(Stream &strm, const ContentProvider &content_provider,
+                          size_t offset, size_t length,
+                          const T &is_shutting_down) {
+  auto error = Error::Success;
+  return write_content(strm, content_provider, offset, length, is_shutting_down,
+                       error);
+}
+
+template <typename T>
+inline bool
+write_content_without_length(Stream &strm,
+                             const ContentProvider &content_provider,
+                             const T &is_shutting_down) {
+  size_t offset = 0;
+  auto data_available = true;
+  auto ok = true;
+  DataSink data_sink;
+
+  data_sink.write = [&](const char *d, size_t l) -> bool {
+    if (ok) {
+      offset += l;
+      if (!strm.is_writable() || !write_data(strm, d, l)) { ok = false; }
+    }
+    return ok;
+  };
+
+  data_sink.is_writable = [&]() -> bool { return strm.is_writable(); };
+
+  data_sink.done = [&](void) { data_available = false; };
+
+  while (data_available && !is_shutting_down()) {
+    if (!strm.is_writable()) {
+      return false;
+    } else if (!content_provider(offset, 0, data_sink)) {
+      return false;
+    } else if (!ok) {
+      return false;
+    }
+  }
+  return true;
+}
+
+template <typename T, typename U>
+inline bool
+write_content_chunked(Stream &strm, const ContentProvider &content_provider,
+                      const T &is_shutting_down, U &compressor, Error &error) {
+  size_t offset = 0;
+  auto data_available = true;
+  auto ok = true;
+  DataSink data_sink;
+
+  data_sink.write = [&](const char *d, size_t l) -> bool {
+    if (ok) {
+      data_available = l > 0;
+      offset += l;
+
+      std::string payload;
+      if (compressor.compress(d, l, false,
+                              [&](const char *data, size_t data_len) {
+                                payload.append(data, data_len);
+                                return true;
+                              })) {
+        if (!payload.empty()) {
+          // Emit chunked response header and footer for each chunk
+          auto chunk =
+              from_i_to_hex(payload.size()) + "\r\n" + payload + "\r\n";
+          if (!strm.is_writable() ||
+              !write_data(strm, chunk.data(), chunk.size())) {
+            ok = false;
+          }
+        }
+      } else {
+        ok = false;
+      }
+    }
+    return ok;
+  };
+
+  data_sink.is_writable = [&]() -> bool { return strm.is_writable(); };
+
+  auto done_with_trailer = [&](const Headers *trailer) {
+    if (!ok) { return; }
+
+    data_available = false;
+
+    std::string payload;
+    if (!compressor.compress(nullptr, 0, true,
+                             [&](const char *data, size_t data_len) {
+                               payload.append(data, data_len);
+                               return true;
+                             })) {
+      ok = false;
+      return;
+    }
+
+    if (!payload.empty()) {
+      // Emit chunked response header and footer for each chunk
+      auto chunk = from_i_to_hex(payload.size()) + "\r\n" + payload + "\r\n";
+      if (!strm.is_writable() ||
+          !write_data(strm, chunk.data(), chunk.size())) {
+        ok = false;
+        return;
+      }
+    }
+
+    static const std::string done_marker("0\r\n");
+    if (!write_data(strm, done_marker.data(), done_marker.size())) {
+      ok = false;
+    }
+
+    // Trailer
+    if (trailer) {
+      for (const auto &kv : *trailer) {
+        std::string field_line = kv.first + ": " + kv.second + "\r\n";
+        if (!write_data(strm, field_line.data(), field_line.size())) {
+          ok = false;
+        }
+      }
+    }
+
+    static const std::string crlf("\r\n");
+    if (!write_data(strm, crlf.data(), crlf.size())) { ok = false; }
+  };
+
+  data_sink.done = [&](void) { done_with_trailer(nullptr); };
+
+  data_sink.done_with_trailer = [&](const Headers &trailer) {
+    done_with_trailer(&trailer);
+  };
+
+  while (data_available && !is_shutting_down()) {
+    if (!strm.is_writable()) {
+      error = Error::Write;
+      return false;
+    } else if (!content_provider(offset, 0, data_sink)) {
+      error = Error::Canceled;
+      return false;
+    } else if (!ok) {
+      error = Error::Write;
+      return false;
+    }
+  }
+
+  error = Error::Success;
+  return true;
+}
+
+template <typename T, typename U>
+inline bool write_content_chunked(Stream &strm,
+                                  const ContentProvider &content_provider,
+                                  const T &is_shutting_down, U &compressor) {
+  auto error = Error::Success;
+  return write_content_chunked(strm, content_provider, is_shutting_down,
+                               compressor, error);
+}
+
+template <typename T>
+inline bool redirect(T &cli, Request &req, Response &res,
+                     const std::string &path, const std::string &location,
+                     Error &error) {
+  Request new_req = req;
+  new_req.path = path;
+  new_req.redirect_count_ -= 1;
+
+  if (res.status == StatusCode::SeeOther_303 &&
+      (req.method != "GET" && req.method != "HEAD")) {
+    new_req.method = "GET";
+    new_req.body.clear();
+    new_req.headers.clear();
+  }
+
+  Response new_res;
+
+  auto ret = cli.send(new_req, new_res, error);
+  if (ret) {
+    req = new_req;
+    res = new_res;
+
+    if (res.location.empty()) { res.location = location; }
+  }
+  return ret;
+}
+
+inline std::string params_to_query_str(const Params &params) {
+  std::string query;
+
+  for (auto it = params.begin(); it != params.end(); ++it) {
+    if (it != params.begin()) { query += "&"; }
+    query += it->first;
+    query += "=";
+    query += encode_query_param(it->second);
+  }
+  return query;
+}
+
+inline void parse_query_text(const char *data, std::size_t size,
+                             Params &params) {
+  std::set<std::string> cache;
+  split(data, data + size, '&', [&](const char *b, const char *e) {
+    std::string kv(b, e);
+    if (cache.find(kv) != cache.end()) { return; }
+    cache.insert(std::move(kv));
+
+    std::string key;
+    std::string val;
+    divide(b, static_cast<std::size_t>(e - b), '=',
+           [&](const char *lhs_data, std::size_t lhs_size, const char *rhs_data,
+               std::size_t rhs_size) {
+             key.assign(lhs_data, lhs_size);
+             val.assign(rhs_data, rhs_size);
+           });
+
+    if (!key.empty()) {
+      params.emplace(decode_url(key, true), decode_url(val, true));
+    }
+  });
+}
+
+inline void parse_query_text(const std::string &s, Params &params) {
+  parse_query_text(s.data(), s.size(), params);
+}
+
+inline bool parse_multipart_boundary(const std::string &content_type,
+                                     std::string &boundary) {
+  auto boundary_keyword = "boundary=";
+  auto pos = content_type.find(boundary_keyword);
+  if (pos == std::string::npos) { return false; }
+  auto end = content_type.find(';', pos);
+  auto beg = pos + strlen(boundary_keyword);
+  boundary = trim_double_quotes_copy(content_type.substr(beg, end - beg));
+  return !boundary.empty();
+}
+
+inline void parse_disposition_params(const std::string &s, Params &params) {
+  std::set<std::string> cache;
+  split(s.data(), s.data() + s.size(), ';', [&](const char *b, const char *e) {
+    std::string kv(b, e);
+    if (cache.find(kv) != cache.end()) { return; }
+    cache.insert(kv);
+
+    std::string key;
+    std::string val;
+    split(b, e, '=', [&](const char *b2, const char *e2) {
+      if (key.empty()) {
+        key.assign(b2, e2);
+      } else {
+        val.assign(b2, e2);
+      }
+    });
+
+    if (!key.empty()) {
+      params.emplace(trim_double_quotes_copy((key)),
+                     trim_double_quotes_copy((val)));
+    }
+  });
+}
+
+#ifdef CPPHTTPLIB_NO_EXCEPTIONS
+inline bool parse_range_header(const std::string &s, Ranges &ranges) {
+#else
+inline bool parse_range_header(const std::string &s, Ranges &ranges) try {
+#endif
+  auto is_valid = [](const std::string &str) {
+    return std::all_of(str.cbegin(), str.cend(),
+                       [](unsigned char c) { return std::isdigit(c); });
+  };
+
+  if (s.size() > 7 && s.compare(0, 6, "bytes=") == 0) {
+    const auto pos = static_cast<size_t>(6);
+    const auto len = static_cast<size_t>(s.size() - 6);
+    auto all_valid_ranges = true;
+    split(&s[pos], &s[pos + len], ',', [&](const char *b, const char *e) {
+      if (!all_valid_ranges) { return; }
+
+      const auto it = std::find(b, e, '-');
+      if (it == e) {
+        all_valid_ranges = false;
+        return;
+      }
+
+      const auto lhs = std::string(b, it);
+      const auto rhs = std::string(it + 1, e);
+      if (!is_valid(lhs) || !is_valid(rhs)) {
+        all_valid_ranges = false;
+        return;
+      }
+
+      const auto first =
+          static_cast<ssize_t>(lhs.empty() ? -1 : std::stoll(lhs));
+      const auto last =
+          static_cast<ssize_t>(rhs.empty() ? -1 : std::stoll(rhs));
+      if ((first == -1 && last == -1) ||
+          (first != -1 && last != -1 && first > last)) {
+        all_valid_ranges = false;
+        return;
+      }
+
+      ranges.emplace_back(first, last);
+    });
+    return all_valid_ranges && !ranges.empty();
+  }
+  return false;
+#ifdef CPPHTTPLIB_NO_EXCEPTIONS
+}
+#else
+} catch (...) { return false; }
+#endif
+
+class MultipartFormDataParser {
+public:
+  MultipartFormDataParser() = default;
+
+  void set_boundary(std::string &&boundary) {
+    boundary_ = boundary;
+    dash_boundary_crlf_ = dash_ + boundary_ + crlf_;
+    crlf_dash_boundary_ = crlf_ + dash_ + boundary_;
+  }
+
+  bool is_valid() const { return is_valid_; }
+
+  bool parse(const char *buf, size_t n, const ContentReceiver &content_callback,
+             const MultipartContentHeader &header_callback) {
+
+    buf_append(buf, n);
+
+    while (buf_size() > 0) {
+      switch (state_) {
+      case 0: { // Initial boundary
+        buf_erase(buf_find(dash_boundary_crlf_));
+        if (dash_boundary_crlf_.size() > buf_size()) { return true; }
+        if (!buf_start_with(dash_boundary_crlf_)) { return false; }
+        buf_erase(dash_boundary_crlf_.size());
