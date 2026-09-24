@@ -4128,3 +4128,593 @@ template<typename OfType, typename T,
          typename = detail::enable_if_t<all_integral<OfType, T>::value>>
 struct value_in_range_of_impl1;
 
+template<typename OfType, typename T>
+struct value_in_range_of_impl1<OfType, T, false>
+{
+    static constexpr bool test(T val)
+    {
+        return value_in_range_of_impl2<OfType, T>::test(val);
+    }
+};
+
+template<typename OfType, typename T>
+struct value_in_range_of_impl1<OfType, T, true>
+{
+    static constexpr bool test(T /*val*/)
+    {
+        return true;
+    }
+};
+
+template<typename OfType, typename T>
+inline constexpr bool value_in_range_of(T val)
+{
+    return value_in_range_of_impl1<OfType, T>::test(val);
+}
+
+template<bool Value>
+using bool_constant = std::integral_constant<bool, Value>;
+
+///////////////////////////////////////////////////////////////////////////////
+// is_c_string
+///////////////////////////////////////////////////////////////////////////////
+
+namespace impl
+{
+
+template<typename T>
+inline constexpr bool is_c_string()
+{
+    using TUnExt = typename std::remove_extent<T>::type;
+    using TUnCVExt = typename std::remove_cv<TUnExt>::type;
+    using TUnPtr = typename std::remove_pointer<T>::type;
+    using TUnCVPtr = typename std::remove_cv<TUnPtr>::type;
+    return
+        (std::is_array<T>::value && std::is_same<TUnCVExt, char>::value)
+        || (std::is_pointer<T>::value && std::is_same<TUnCVPtr, char>::value);
+}
+
+}  // namespace impl
+
+// checks whether T is a [cv] char */[cv] char[] C string
+template<typename T>
+struct is_c_string : bool_constant<impl::is_c_string<T>()> {};
+
+template<typename T>
+using is_c_string_uncvref = is_c_string<uncvref_t<T>>;
+
+///////////////////////////////////////////////////////////////////////////////
+// is_transparent
+///////////////////////////////////////////////////////////////////////////////
+
+namespace impl
+{
+
+template<typename T>
+inline constexpr bool is_transparent()
+{
+    return is_detected<detect_is_transparent, T>::value;
+}
+
+}  // namespace impl
+
+// checks whether T has a member named is_transparent
+template<typename T>
+struct is_transparent : bool_constant<impl::is_transparent<T>()> {};
+
+///////////////////////////////////////////////////////////////////////////////
+
+}  // namespace detail
+NLOHMANN_JSON_NAMESPACE_END
+
+// #include <nlohmann/detail/string_concat.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
+
+
+#include <cstring> // strlen
+#include <string> // string
+#include <utility> // forward
+
+// #include <nlohmann/detail/meta/cpp_future.hpp>
+
+// #include <nlohmann/detail/meta/detected.hpp>
+
+
+NLOHMANN_JSON_NAMESPACE_BEGIN
+namespace detail
+{
+
+inline std::size_t concat_length()
+{
+    return 0;
+}
+
+template<typename... Args>
+inline std::size_t concat_length(const char* cstr, const Args& ... rest);
+
+template<typename StringType, typename... Args>
+inline std::size_t concat_length(const StringType& str, const Args& ... rest);
+
+template<typename... Args>
+inline std::size_t concat_length(const char /*c*/, const Args& ... rest)
+{
+    return 1 + concat_length(rest...);
+}
+
+template<typename... Args>
+inline std::size_t concat_length(const char* cstr, const Args& ... rest)
+{
+    // cppcheck-suppress ignoredReturnValue
+    return ::strlen(cstr) + concat_length(rest...);
+}
+
+template<typename StringType, typename... Args>
+inline std::size_t concat_length(const StringType& str, const Args& ... rest)
+{
+    return str.size() + concat_length(rest...);
+}
+
+template<typename OutStringType>
+inline void concat_into(OutStringType& /*out*/)
+{}
+
+template<typename StringType, typename Arg>
+using string_can_append = decltype(std::declval<StringType&>().append(std::declval < Arg && > ()));
+
+template<typename StringType, typename Arg>
+using detect_string_can_append = is_detected<string_can_append, StringType, Arg>;
+
+template<typename StringType, typename Arg>
+using string_can_append_op = decltype(std::declval<StringType&>() += std::declval < Arg && > ());
+
+template<typename StringType, typename Arg>
+using detect_string_can_append_op = is_detected<string_can_append_op, StringType, Arg>;
+
+template<typename StringType, typename Arg>
+using string_can_append_iter = decltype(std::declval<StringType&>().append(std::declval<const Arg&>().begin(), std::declval<const Arg&>().end()));
+
+template<typename StringType, typename Arg>
+using detect_string_can_append_iter = is_detected<string_can_append_iter, StringType, Arg>;
+
+template<typename StringType, typename Arg>
+using string_can_append_data = decltype(std::declval<StringType&>().append(std::declval<const Arg&>().data(), std::declval<const Arg&>().size()));
+
+template<typename StringType, typename Arg>
+using detect_string_can_append_data = is_detected<string_can_append_data, StringType, Arg>;
+
+template < typename OutStringType, typename Arg, typename... Args,
+           enable_if_t < !detect_string_can_append<OutStringType, Arg>::value
+                         && detect_string_can_append_op<OutStringType, Arg>::value, int > = 0 >
+inline void concat_into(OutStringType& out, Arg && arg, Args && ... rest);
+
+template < typename OutStringType, typename Arg, typename... Args,
+           enable_if_t < !detect_string_can_append<OutStringType, Arg>::value
+                         && !detect_string_can_append_op<OutStringType, Arg>::value
+                         && detect_string_can_append_iter<OutStringType, Arg>::value, int > = 0 >
+inline void concat_into(OutStringType& out, const Arg& arg, Args && ... rest);
+
+template < typename OutStringType, typename Arg, typename... Args,
+           enable_if_t < !detect_string_can_append<OutStringType, Arg>::value
+                         && !detect_string_can_append_op<OutStringType, Arg>::value
+                         && !detect_string_can_append_iter<OutStringType, Arg>::value
+                         && detect_string_can_append_data<OutStringType, Arg>::value, int > = 0 >
+inline void concat_into(OutStringType& out, const Arg& arg, Args && ... rest);
+
+template<typename OutStringType, typename Arg, typename... Args,
+         enable_if_t<detect_string_can_append<OutStringType, Arg>::value, int> = 0>
+inline void concat_into(OutStringType& out, Arg && arg, Args && ... rest)
+{
+    out.append(std::forward<Arg>(arg));
+    concat_into(out, std::forward<Args>(rest)...);
+}
+
+template < typename OutStringType, typename Arg, typename... Args,
+           enable_if_t < !detect_string_can_append<OutStringType, Arg>::value
+                         && detect_string_can_append_op<OutStringType, Arg>::value, int > >
+inline void concat_into(OutStringType& out, Arg&& arg, Args&& ... rest)
+{
+    out += std::forward<Arg>(arg);
+    concat_into(out, std::forward<Args>(rest)...);
+}
+
+template < typename OutStringType, typename Arg, typename... Args,
+           enable_if_t < !detect_string_can_append<OutStringType, Arg>::value
+                         && !detect_string_can_append_op<OutStringType, Arg>::value
+                         && detect_string_can_append_iter<OutStringType, Arg>::value, int > >
+inline void concat_into(OutStringType& out, const Arg& arg, Args&& ... rest)
+{
+    out.append(arg.begin(), arg.end());
+    concat_into(out, std::forward<Args>(rest)...);
+}
+
+template < typename OutStringType, typename Arg, typename... Args,
+           enable_if_t < !detect_string_can_append<OutStringType, Arg>::value
+                         && !detect_string_can_append_op<OutStringType, Arg>::value
+                         && !detect_string_can_append_iter<OutStringType, Arg>::value
+                         && detect_string_can_append_data<OutStringType, Arg>::value, int > >
+inline void concat_into(OutStringType& out, const Arg& arg, Args&& ... rest)
+{
+    out.append(arg.data(), arg.size());
+    concat_into(out, std::forward<Args>(rest)...);
+}
+
+template<typename OutStringType = std::string, typename... Args>
+inline OutStringType concat(Args && ... args)
+{
+    OutStringType str;
+    str.reserve(concat_length(args...));
+    concat_into(str, std::forward<Args>(args)...);
+    return str;
+}
+
+}  // namespace detail
+NLOHMANN_JSON_NAMESPACE_END
+
+
+NLOHMANN_JSON_NAMESPACE_BEGIN
+namespace detail
+{
+
+////////////////
+// exceptions //
+////////////////
+
+/// @brief general exception of the @ref basic_json class
+/// @sa https://json.nlohmann.me/api/basic_json/exception/
+class exception : public std::exception
+{
+  public:
+    /// returns the explanatory string
+    const char* what() const noexcept override
+    {
+        return m.what();
+    }
+
+    /// the id of the exception
+    const int id; // NOLINT(cppcoreguidelines-non-private-member-variables-in-classes)
+
+  protected:
+    JSON_HEDLEY_NON_NULL(3)
+    exception(int id_, const char* what_arg) : id(id_), m(what_arg) {} // NOLINT(bugprone-throw-keyword-missing)
+
+    static std::string name(const std::string& ename, int id_)
+    {
+        return concat("[json.exception.", ename, '.', std::to_string(id_), "] ");
+    }
+
+    static std::string diagnostics(std::nullptr_t /*leaf_element*/)
+    {
+        return "";
+    }
+
+    template<typename BasicJsonType>
+    static std::string diagnostics(const BasicJsonType* leaf_element)
+    {
+#if JSON_DIAGNOSTICS
+        std::vector<std::string> tokens;
+        for (const auto* current = leaf_element; current != nullptr && current->m_parent != nullptr; current = current->m_parent)
+        {
+            switch (current->m_parent->type())
+            {
+                case value_t::array:
+                {
+                    for (std::size_t i = 0; i < current->m_parent->m_data.m_value.array->size(); ++i)
+                    {
+                        if (&current->m_parent->m_data.m_value.array->operator[](i) == current)
+                        {
+                            tokens.emplace_back(std::to_string(i));
+                            break;
+                        }
+                    }
+                    break;
+                }
+
+                case value_t::object:
+                {
+                    for (const auto& element : *current->m_parent->m_data.m_value.object)
+                    {
+                        if (&element.second == current)
+                        {
+                            tokens.emplace_back(element.first.c_str());
+                            break;
+                        }
+                    }
+                    break;
+                }
+
+                case value_t::null: // LCOV_EXCL_LINE
+                case value_t::string: // LCOV_EXCL_LINE
+                case value_t::boolean: // LCOV_EXCL_LINE
+                case value_t::number_integer: // LCOV_EXCL_LINE
+                case value_t::number_unsigned: // LCOV_EXCL_LINE
+                case value_t::number_float: // LCOV_EXCL_LINE
+                case value_t::binary: // LCOV_EXCL_LINE
+                case value_t::discarded: // LCOV_EXCL_LINE
+                default:   // LCOV_EXCL_LINE
+                    break; // LCOV_EXCL_LINE
+            }
+        }
+
+        if (tokens.empty())
+        {
+            return "";
+        }
+
+        auto str = std::accumulate(tokens.rbegin(), tokens.rend(), std::string{},
+                                   [](const std::string & a, const std::string & b)
+        {
+            return concat(a, '/', detail::escape(b));
+        });
+        return concat('(', str, ") ");
+#else
+        static_cast<void>(leaf_element);
+        return "";
+#endif
+    }
+
+  private:
+    /// an exception object as storage for error messages
+    std::runtime_error m;
+};
+
+/// @brief exception indicating a parse error
+/// @sa https://json.nlohmann.me/api/basic_json/parse_error/
+class parse_error : public exception
+{
+  public:
+    /*!
+    @brief create a parse error exception
+    @param[in] id_       the id of the exception
+    @param[in] pos       the position where the error occurred (or with
+                         chars_read_total=0 if the position cannot be
+                         determined)
+    @param[in] what_arg  the explanatory string
+    @return parse_error object
+    */
+    template<typename BasicJsonContext, enable_if_t<is_basic_json_context<BasicJsonContext>::value, int> = 0>
+    static parse_error create(int id_, const position_t& pos, const std::string& what_arg, BasicJsonContext context)
+    {
+        const std::string w = concat(exception::name("parse_error", id_), "parse error",
+                                     position_string(pos), ": ", exception::diagnostics(context), what_arg);
+        return {id_, pos.chars_read_total, w.c_str()};
+    }
+
+    template<typename BasicJsonContext, enable_if_t<is_basic_json_context<BasicJsonContext>::value, int> = 0>
+    static parse_error create(int id_, std::size_t byte_, const std::string& what_arg, BasicJsonContext context)
+    {
+        const std::string w = concat(exception::name("parse_error", id_), "parse error",
+                                     (byte_ != 0 ? (concat(" at byte ", std::to_string(byte_))) : ""),
+                                     ": ", exception::diagnostics(context), what_arg);
+        return {id_, byte_, w.c_str()};
+    }
+
+    /*!
+    @brief byte index of the parse error
+
+    The byte index of the last read character in the input file.
+
+    @note For an input with n bytes, 1 is the index of the first character and
+          n+1 is the index of the terminating null byte or the end of file.
+          This also holds true when reading a byte vector (CBOR or MessagePack).
+    */
+    const std::size_t byte;
+
+  private:
+    parse_error(int id_, std::size_t byte_, const char* what_arg)
+        : exception(id_, what_arg), byte(byte_) {}
+
+    static std::string position_string(const position_t& pos)
+    {
+        return concat(" at line ", std::to_string(pos.lines_read + 1),
+                      ", column ", std::to_string(pos.chars_read_current_line));
+    }
+};
+
+/// @brief exception indicating errors with iterators
+/// @sa https://json.nlohmann.me/api/basic_json/invalid_iterator/
+class invalid_iterator : public exception
+{
+  public:
+    template<typename BasicJsonContext, enable_if_t<is_basic_json_context<BasicJsonContext>::value, int> = 0>
+    static invalid_iterator create(int id_, const std::string& what_arg, BasicJsonContext context)
+    {
+        const std::string w = concat(exception::name("invalid_iterator", id_), exception::diagnostics(context), what_arg);
+        return {id_, w.c_str()};
+    }
+
+  private:
+    JSON_HEDLEY_NON_NULL(3)
+    invalid_iterator(int id_, const char* what_arg)
+        : exception(id_, what_arg) {}
+};
+
+/// @brief exception indicating executing a member function with a wrong type
+/// @sa https://json.nlohmann.me/api/basic_json/type_error/
+class type_error : public exception
+{
+  public:
+    template<typename BasicJsonContext, enable_if_t<is_basic_json_context<BasicJsonContext>::value, int> = 0>
+    static type_error create(int id_, const std::string& what_arg, BasicJsonContext context)
+    {
+        const std::string w = concat(exception::name("type_error", id_), exception::diagnostics(context), what_arg);
+        return {id_, w.c_str()};
+    }
+
+  private:
+    JSON_HEDLEY_NON_NULL(3)
+    type_error(int id_, const char* what_arg) : exception(id_, what_arg) {}
+};
+
+/// @brief exception indicating access out of the defined range
+/// @sa https://json.nlohmann.me/api/basic_json/out_of_range/
+class out_of_range : public exception
+{
+  public:
+    template<typename BasicJsonContext, enable_if_t<is_basic_json_context<BasicJsonContext>::value, int> = 0>
+    static out_of_range create(int id_, const std::string& what_arg, BasicJsonContext context)
+    {
+        const std::string w = concat(exception::name("out_of_range", id_), exception::diagnostics(context), what_arg);
+        return {id_, w.c_str()};
+    }
+
+  private:
+    JSON_HEDLEY_NON_NULL(3)
+    out_of_range(int id_, const char* what_arg) : exception(id_, what_arg) {}
+};
+
+/// @brief exception indicating other library errors
+/// @sa https://json.nlohmann.me/api/basic_json/other_error/
+class other_error : public exception
+{
+  public:
+    template<typename BasicJsonContext, enable_if_t<is_basic_json_context<BasicJsonContext>::value, int> = 0>
+    static other_error create(int id_, const std::string& what_arg, BasicJsonContext context)
+    {
+        const std::string w = concat(exception::name("other_error", id_), exception::diagnostics(context), what_arg);
+        return {id_, w.c_str()};
+    }
+
+  private:
+    JSON_HEDLEY_NON_NULL(3)
+    other_error(int id_, const char* what_arg) : exception(id_, what_arg) {}
+};
+
+}  // namespace detail
+NLOHMANN_JSON_NAMESPACE_END
+
+// #include <nlohmann/detail/macro_scope.hpp>
+
+// #include <nlohmann/detail/meta/cpp_future.hpp>
+
+// #include <nlohmann/detail/meta/identity_tag.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
+
+
+// #include <nlohmann/detail/abi_macros.hpp>
+
+
+NLOHMANN_JSON_NAMESPACE_BEGIN
+namespace detail
+{
+
+// dispatching helper struct
+template <class T> struct identity_tag {};
+
+}  // namespace detail
+NLOHMANN_JSON_NAMESPACE_END
+
+// #include <nlohmann/detail/meta/std_fs.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
+
+
+// #include <nlohmann/detail/macro_scope.hpp>
+
+
+#if JSON_HAS_EXPERIMENTAL_FILESYSTEM
+#include <experimental/filesystem>
+NLOHMANN_JSON_NAMESPACE_BEGIN
+namespace detail
+{
+namespace std_fs = std::experimental::filesystem;
+}  // namespace detail
+NLOHMANN_JSON_NAMESPACE_END
+#elif JSON_HAS_FILESYSTEM
+#include <filesystem>
+NLOHMANN_JSON_NAMESPACE_BEGIN
+namespace detail
+{
+namespace std_fs = std::filesystem;
+}  // namespace detail
+NLOHMANN_JSON_NAMESPACE_END
+#endif
+
+// #include <nlohmann/detail/meta/type_traits.hpp>
+
+// #include <nlohmann/detail/string_concat.hpp>
+
+// #include <nlohmann/detail/value_t.hpp>
+
+
+NLOHMANN_JSON_NAMESPACE_BEGIN
+namespace detail
+{
+
+template<typename BasicJsonType>
+inline void from_json(const BasicJsonType& j, typename std::nullptr_t& n)
+{
+    if (JSON_HEDLEY_UNLIKELY(!j.is_null()))
+    {
+        JSON_THROW(type_error::create(302, concat("type must be null, but is ", j.type_name()), &j));
+    }
+    n = nullptr;
+}
+
+// overloads for basic_json template parameters
+template < typename BasicJsonType, typename ArithmeticType,
+           enable_if_t < std::is_arithmetic<ArithmeticType>::value&&
+                         !std::is_same<ArithmeticType, typename BasicJsonType::boolean_t>::value,
+                         int > = 0 >
+void get_arithmetic_value(const BasicJsonType& j, ArithmeticType& val)
+{
+    switch (static_cast<value_t>(j))
+    {
+        case value_t::number_unsigned:
+        {
+            val = static_cast<ArithmeticType>(*j.template get_ptr<const typename BasicJsonType::number_unsigned_t*>());
+            break;
+        }
+        case value_t::number_integer:
+        {
+            val = static_cast<ArithmeticType>(*j.template get_ptr<const typename BasicJsonType::number_integer_t*>());
+            break;
+        }
+        case value_t::number_float:
+        {
+            val = static_cast<ArithmeticType>(*j.template get_ptr<const typename BasicJsonType::number_float_t*>());
+            break;
+        }
+
+        case value_t::null:
+        case value_t::object:
+        case value_t::array:
+        case value_t::string:
+        case value_t::boolean:
+        case value_t::binary:
+        case value_t::discarded:
+        default:
+            JSON_THROW(type_error::create(302, concat("type must be number, but is ", j.type_name()), &j));
+    }
+}
+
+template<typename BasicJsonType>
+inline void from_json(const BasicJsonType& j, typename BasicJsonType::boolean_t& b)
+{
+    if (JSON_HEDLEY_UNLIKELY(!j.is_boolean()))
+    {
+        JSON_THROW(type_error::create(302, concat("type must be boolean, but is ", j.type_name()), &j));
+    }
+    b = *j.template get_ptr<const typename BasicJsonType::boolean_t*>();
+}
+
+template<typename BasicJsonType>
