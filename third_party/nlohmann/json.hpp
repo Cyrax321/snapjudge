@@ -7078,3 +7078,593 @@ class json_sax_dom_callback_parser
         {
             object_element = &(ref_stack.back()->m_data.m_value.object->operator[](val) = discarded);
         }
+
+        return true;
+    }
+
+    bool end_object()
+    {
+        if (ref_stack.back())
+        {
+            if (!callback(static_cast<int>(ref_stack.size()) - 1, parse_event_t::object_end, *ref_stack.back()))
+            {
+                // discard object
+                *ref_stack.back() = discarded;
+            }
+            else
+            {
+                ref_stack.back()->set_parents();
+            }
+        }
+
+        JSON_ASSERT(!ref_stack.empty());
+        JSON_ASSERT(!keep_stack.empty());
+        ref_stack.pop_back();
+        keep_stack.pop_back();
+
+        if (!ref_stack.empty() && ref_stack.back() && ref_stack.back()->is_structured())
+        {
+            // remove discarded value
+            for (auto it = ref_stack.back()->begin(); it != ref_stack.back()->end(); ++it)
+            {
+                if (it->is_discarded())
+                {
+                    ref_stack.back()->erase(it);
+                    break;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    bool start_array(std::size_t len)
+    {
+        const bool keep = callback(static_cast<int>(ref_stack.size()), parse_event_t::array_start, discarded);
+        keep_stack.push_back(keep);
+
+        auto val = handle_value(BasicJsonType::value_t::array, true);
+        ref_stack.push_back(val.second);
+
+        // check array limit
+        if (ref_stack.back() && JSON_HEDLEY_UNLIKELY(len != static_cast<std::size_t>(-1) && len > ref_stack.back()->max_size()))
+        {
+            JSON_THROW(out_of_range::create(408, concat("excessive array size: ", std::to_string(len)), ref_stack.back()));
+        }
+
+        return true;
+    }
+
+    bool end_array()
+    {
+        bool keep = true;
+
+        if (ref_stack.back())
+        {
+            keep = callback(static_cast<int>(ref_stack.size()) - 1, parse_event_t::array_end, *ref_stack.back());
+            if (keep)
+            {
+                ref_stack.back()->set_parents();
+            }
+            else
+            {
+                // discard array
+                *ref_stack.back() = discarded;
+            }
+        }
+
+        JSON_ASSERT(!ref_stack.empty());
+        JSON_ASSERT(!keep_stack.empty());
+        ref_stack.pop_back();
+        keep_stack.pop_back();
+
+        // remove discarded value
+        if (!keep && !ref_stack.empty() && ref_stack.back()->is_array())
+        {
+            ref_stack.back()->m_data.m_value.array->pop_back();
+        }
+
+        return true;
+    }
+
+    template<class Exception>
+    bool parse_error(std::size_t /*unused*/, const std::string& /*unused*/,
+                     const Exception& ex)
+    {
+        errored = true;
+        static_cast<void>(ex);
+        if (allow_exceptions)
+        {
+            JSON_THROW(ex);
+        }
+        return false;
+    }
+
+    constexpr bool is_errored() const
+    {
+        return errored;
+    }
+
+  private:
+    /*!
+    @param[in] v  value to add to the JSON value we build during parsing
+    @param[in] skip_callback  whether we should skip calling the callback
+               function; this is required after start_array() and
+               start_object() SAX events, because otherwise we would call the
+               callback function with an empty array or object, respectively.
+
+    @invariant If the ref stack is empty, then the passed value will be the new
+               root.
+    @invariant If the ref stack contains a value, then it is an array or an
+               object to which we can add elements
+
+    @return pair of boolean (whether value should be kept) and pointer (to the
+            passed value in the ref_stack hierarchy; nullptr if not kept)
+    */
+    template<typename Value>
+    std::pair<bool, BasicJsonType*> handle_value(Value&& v, const bool skip_callback = false)
+    {
+        JSON_ASSERT(!keep_stack.empty());
+
+        // do not handle this value if we know it would be added to a discarded
+        // container
+        if (!keep_stack.back())
+        {
+            return {false, nullptr};
+        }
+
+        // create value
+        auto value = BasicJsonType(std::forward<Value>(v));
+
+        // check callback
+        const bool keep = skip_callback || callback(static_cast<int>(ref_stack.size()), parse_event_t::value, value);
+
+        // do not handle this value if we just learnt it shall be discarded
+        if (!keep)
+        {
+            return {false, nullptr};
+        }
+
+        if (ref_stack.empty())
+        {
+            root = std::move(value);
+            return {true, & root};
+        }
+
+        // skip this value if we already decided to skip the parent
+        // (https://github.com/nlohmann/json/issues/971#issuecomment-413678360)
+        if (!ref_stack.back())
+        {
+            return {false, nullptr};
+        }
+
+        // we now only expect arrays and objects
+        JSON_ASSERT(ref_stack.back()->is_array() || ref_stack.back()->is_object());
+
+        // array
+        if (ref_stack.back()->is_array())
+        {
+            ref_stack.back()->m_data.m_value.array->emplace_back(std::move(value));
+            return {true, & (ref_stack.back()->m_data.m_value.array->back())};
+        }
+
+        // object
+        JSON_ASSERT(ref_stack.back()->is_object());
+        // check if we should store an element for the current key
+        JSON_ASSERT(!key_keep_stack.empty());
+        const bool store_element = key_keep_stack.back();
+        key_keep_stack.pop_back();
+
+        if (!store_element)
+        {
+            return {false, nullptr};
+        }
+
+        JSON_ASSERT(object_element);
+        *object_element = std::move(value);
+        return {true, object_element};
+    }
+
+    /// the parsed JSON value
+    BasicJsonType& root;
+    /// stack to model hierarchy of values
+    std::vector<BasicJsonType*> ref_stack {};
+    /// stack to manage which values to keep
+    std::vector<bool> keep_stack {};
+    /// stack to manage which object keys to keep
+    std::vector<bool> key_keep_stack {};
+    /// helper to hold the reference for the next object element
+    BasicJsonType* object_element = nullptr;
+    /// whether a syntax error occurred
+    bool errored = false;
+    /// callback function
+    const parser_callback_t callback = nullptr;
+    /// whether to throw exceptions in case of errors
+    const bool allow_exceptions = true;
+    /// a discarded value for the callback
+    BasicJsonType discarded = BasicJsonType::value_t::discarded;
+};
+
+template<typename BasicJsonType>
+class json_sax_acceptor
+{
+  public:
+    using number_integer_t = typename BasicJsonType::number_integer_t;
+    using number_unsigned_t = typename BasicJsonType::number_unsigned_t;
+    using number_float_t = typename BasicJsonType::number_float_t;
+    using string_t = typename BasicJsonType::string_t;
+    using binary_t = typename BasicJsonType::binary_t;
+
+    bool null()
+    {
+        return true;
+    }
+
+    bool boolean(bool /*unused*/)
+    {
+        return true;
+    }
+
+    bool number_integer(number_integer_t /*unused*/)
+    {
+        return true;
+    }
+
+    bool number_unsigned(number_unsigned_t /*unused*/)
+    {
+        return true;
+    }
+
+    bool number_float(number_float_t /*unused*/, const string_t& /*unused*/)
+    {
+        return true;
+    }
+
+    bool string(string_t& /*unused*/)
+    {
+        return true;
+    }
+
+    bool binary(binary_t& /*unused*/)
+    {
+        return true;
+    }
+
+    bool start_object(std::size_t /*unused*/ = static_cast<std::size_t>(-1))
+    {
+        return true;
+    }
+
+    bool key(string_t& /*unused*/)
+    {
+        return true;
+    }
+
+    bool end_object()
+    {
+        return true;
+    }
+
+    bool start_array(std::size_t /*unused*/ = static_cast<std::size_t>(-1))
+    {
+        return true;
+    }
+
+    bool end_array()
+    {
+        return true;
+    }
+
+    bool parse_error(std::size_t /*unused*/, const std::string& /*unused*/, const detail::exception& /*unused*/)
+    {
+        return false;
+    }
+};
+
+}  // namespace detail
+NLOHMANN_JSON_NAMESPACE_END
+
+// #include <nlohmann/detail/input/lexer.hpp>
+//     __ _____ _____ _____
+//  __|  |   __|     |   | |  JSON for Modern C++
+// |  |  |__   |  |  | | | |  version 3.11.3
+// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+//
+// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+// SPDX-License-Identifier: MIT
+
+
+
+#include <array> // array
+#include <clocale> // localeconv
+#include <cstddef> // size_t
+#include <cstdio> // snprintf
+#include <cstdlib> // strtof, strtod, strtold, strtoll, strtoull
+#include <initializer_list> // initializer_list
+#include <string> // char_traits, string
+#include <utility> // move
+#include <vector> // vector
+
+// #include <nlohmann/detail/input/input_adapters.hpp>
+
+// #include <nlohmann/detail/input/position_t.hpp>
+
+// #include <nlohmann/detail/macro_scope.hpp>
+
+// #include <nlohmann/detail/meta/type_traits.hpp>
+
+
+NLOHMANN_JSON_NAMESPACE_BEGIN
+namespace detail
+{
+
+///////////
+// lexer //
+///////////
+
+template<typename BasicJsonType>
+class lexer_base
+{
+  public:
+    /// token types for the parser
+    enum class token_type
+    {
+        uninitialized,    ///< indicating the scanner is uninitialized
+        literal_true,     ///< the `true` literal
+        literal_false,    ///< the `false` literal
+        literal_null,     ///< the `null` literal
+        value_string,     ///< a string -- use get_string() for actual value
+        value_unsigned,   ///< an unsigned integer -- use get_number_unsigned() for actual value
+        value_integer,    ///< a signed integer -- use get_number_integer() for actual value
+        value_float,      ///< an floating point number -- use get_number_float() for actual value
+        begin_array,      ///< the character for array begin `[`
+        begin_object,     ///< the character for object begin `{`
+        end_array,        ///< the character for array end `]`
+        end_object,       ///< the character for object end `}`
+        name_separator,   ///< the name separator `:`
+        value_separator,  ///< the value separator `,`
+        parse_error,      ///< indicating a parse error
+        end_of_input,     ///< indicating the end of the input buffer
+        literal_or_value  ///< a literal or the begin of a value (only for diagnostics)
+    };
+
+    /// return name of values of type token_type (only used for errors)
+    JSON_HEDLEY_RETURNS_NON_NULL
+    JSON_HEDLEY_CONST
+    static const char* token_type_name(const token_type t) noexcept
+    {
+        switch (t)
+        {
+            case token_type::uninitialized:
+                return "<uninitialized>";
+            case token_type::literal_true:
+                return "true literal";
+            case token_type::literal_false:
+                return "false literal";
+            case token_type::literal_null:
+                return "null literal";
+            case token_type::value_string:
+                return "string literal";
+            case token_type::value_unsigned:
+            case token_type::value_integer:
+            case token_type::value_float:
+                return "number literal";
+            case token_type::begin_array:
+                return "'['";
+            case token_type::begin_object:
+                return "'{'";
+            case token_type::end_array:
+                return "']'";
+            case token_type::end_object:
+                return "'}'";
+            case token_type::name_separator:
+                return "':'";
+            case token_type::value_separator:
+                return "','";
+            case token_type::parse_error:
+                return "<parse error>";
+            case token_type::end_of_input:
+                return "end of input";
+            case token_type::literal_or_value:
+                return "'[', '{', or a literal";
+            // LCOV_EXCL_START
+            default: // catch non-enum values
+                return "unknown token";
+                // LCOV_EXCL_STOP
+        }
+    }
+};
+/*!
+@brief lexical analysis
+
+This class organizes the lexical analysis during JSON deserialization.
+*/
+template<typename BasicJsonType, typename InputAdapterType>
+class lexer : public lexer_base<BasicJsonType>
+{
+    using number_integer_t = typename BasicJsonType::number_integer_t;
+    using number_unsigned_t = typename BasicJsonType::number_unsigned_t;
+    using number_float_t = typename BasicJsonType::number_float_t;
+    using string_t = typename BasicJsonType::string_t;
+    using char_type = typename InputAdapterType::char_type;
+    using char_int_type = typename char_traits<char_type>::int_type;
+
+  public:
+    using token_type = typename lexer_base<BasicJsonType>::token_type;
+
+    explicit lexer(InputAdapterType&& adapter, bool ignore_comments_ = false) noexcept
+        : ia(std::move(adapter))
+        , ignore_comments(ignore_comments_)
+        , decimal_point_char(static_cast<char_int_type>(get_decimal_point()))
+    {}
+
+    // delete because of pointer members
+    lexer(const lexer&) = delete;
+    lexer(lexer&&) = default; // NOLINT(hicpp-noexcept-move,performance-noexcept-move-constructor)
+    lexer& operator=(lexer&) = delete;
+    lexer& operator=(lexer&&) = default; // NOLINT(hicpp-noexcept-move,performance-noexcept-move-constructor)
+    ~lexer() = default;
+
+  private:
+    /////////////////////
+    // locales
+    /////////////////////
+
+    /// return the locale-dependent decimal point
+    JSON_HEDLEY_PURE
+    static char get_decimal_point() noexcept
+    {
+        const auto* loc = localeconv();
+        JSON_ASSERT(loc != nullptr);
+        return (loc->decimal_point == nullptr) ? '.' : *(loc->decimal_point);
+    }
+
+    /////////////////////
+    // scan functions
+    /////////////////////
+
+    /*!
+    @brief get codepoint from 4 hex characters following `\u`
+
+    For input "\u c1 c2 c3 c4" the codepoint is:
+      (c1 * 0x1000) + (c2 * 0x0100) + (c3 * 0x0010) + c4
+    = (c1 << 12) + (c2 << 8) + (c3 << 4) + (c4 << 0)
+
+    Furthermore, the possible characters '0'..'9', 'A'..'F', and 'a'..'f'
+    must be converted to the integers 0x0..0x9, 0xA..0xF, 0xA..0xF, resp. The
+    conversion is done by subtracting the offset (0x30, 0x37, and 0x57)
+    between the ASCII value of the character and the desired integer value.
+
+    @return codepoint (0x0000..0xFFFF) or -1 in case of an error (e.g. EOF or
+            non-hex character)
+    */
+    int get_codepoint()
+    {
+        // this function only makes sense after reading `\u`
+        JSON_ASSERT(current == 'u');
+        int codepoint = 0;
+
+        const auto factors = { 12u, 8u, 4u, 0u };
+        for (const auto factor : factors)
+        {
+            get();
+
+            if (current >= '0' && current <= '9')
+            {
+                codepoint += static_cast<int>((static_cast<unsigned int>(current) - 0x30u) << factor);
+            }
+            else if (current >= 'A' && current <= 'F')
+            {
+                codepoint += static_cast<int>((static_cast<unsigned int>(current) - 0x37u) << factor);
+            }
+            else if (current >= 'a' && current <= 'f')
+            {
+                codepoint += static_cast<int>((static_cast<unsigned int>(current) - 0x57u) << factor);
+            }
+            else
+            {
+                return -1;
+            }
+        }
+
+        JSON_ASSERT(0x0000 <= codepoint && codepoint <= 0xFFFF);
+        return codepoint;
+    }
+
+    /*!
+    @brief check if the next byte(s) are inside a given range
+
+    Adds the current byte and, for each passed range, reads a new byte and
+    checks if it is inside the range. If a violation was detected, set up an
+    error message and return false. Otherwise, return true.
+
+    @param[in] ranges  list of integers; interpreted as list of pairs of
+                       inclusive lower and upper bound, respectively
+
+    @pre The passed list @a ranges must have 2, 4, or 6 elements; that is,
+         1, 2, or 3 pairs. This precondition is enforced by an assertion.
+
+    @return true if and only if no range violation was detected
+    */
+    bool next_byte_in_range(std::initializer_list<char_int_type> ranges)
+    {
+        JSON_ASSERT(ranges.size() == 2 || ranges.size() == 4 || ranges.size() == 6);
+        add(current);
+
+        for (auto range = ranges.begin(); range != ranges.end(); ++range)
+        {
+            get();
+            if (JSON_HEDLEY_LIKELY(*range <= current && current <= *(++range))) // NOLINT(bugprone-inc-dec-in-conditions)
+            {
+                add(current);
+            }
+            else
+            {
+                error_message = "invalid string: ill-formed UTF-8 byte";
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /*!
+    @brief scan a string literal
+
+    This function scans a string according to Sect. 7 of RFC 8259. While
+    scanning, bytes are escaped and copied into buffer token_buffer. Then the
+    function returns successfully, token_buffer is *not* null-terminated (as it
+    may contain \0 bytes), and token_buffer.size() is the number of bytes in the
+    string.
+
+    @return token_type::value_string if string could be successfully scanned,
+            token_type::parse_error otherwise
+
+    @note In case of errors, variable error_message contains a textual
+          description.
+    */
+    token_type scan_string()
+    {
+        // reset token_buffer (ignore opening quote)
+        reset();
+
+        // we entered the function by reading an open quote
+        JSON_ASSERT(current == '\"');
+
+        while (true)
+        {
+            // get next character
+            switch (get())
+            {
+                // end of file while parsing string
+                case char_traits<char_type>::eof():
+                {
+                    error_message = "invalid string: missing closing quote";
+                    return token_type::parse_error;
+                }
+
+                // closing quote
+                case '\"':
+                {
+                    return token_type::value_string;
+                }
+
+                // escapes
+                case '\\':
+                {
+                    switch (get())
+                    {
+                        // quotation mark
+                        case '\"':
+                            add('\"');
+                            break;
+                        // reverse solidus
+                        case '\\':
+                            add('\\');
+                            break;
+                        // solidus
+                        case '/':
+                            add('/');
+                            break;
+                        // backspace
+                        case 'b':
