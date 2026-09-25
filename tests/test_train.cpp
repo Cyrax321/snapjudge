@@ -96,6 +96,38 @@ TEST_CASE("finite-difference gradient check") {
   }
 }
 
+TEST_CASE("finite-difference gradient check: distillation + smoothing") {
+  // Non-default loss config (raised cross-entropy weight, label smoothing)
+  // must still be gradient-consistent on the score (RPS) primitive too.
+  TrainModel tm(CKPT);
+  tm.set_loss(2.0, 0.2, 1.5, 0.1);
+  TrainRow row = make_score_row();
+  for (const auto& name : tm.param_names()) {
+    int64_t n = tm.param_numel(name);
+    tm.zero_grad();
+    tm.step(row, true);
+    std::vector<float> analytic = tm.grad_of(name);
+    int ncheck = std::min<int64_t>(n, 24);
+    double worst = 0;
+    for (int c = 0; c < ncheck; ++c) {
+      int64_t i = (n * 40503ULL + c * 131) % n;
+      double orig = tm.param_get(name, i);
+      const double eps = 1e-4 * std::max(1.0, std::fabs(orig));
+      tm.param_set(name, i, (float)(orig + eps));
+      double lp = tm.forward_loss_double(row);
+      tm.param_set(name, i, (float)(orig - eps));
+      double lm = tm.forward_loss_double(row);
+      tm.param_set(name, i, (float)orig);
+      double num = (lp - lm) / (2 * eps);
+      double rel = std::fabs(num - analytic[i]) /
+                   std::max(1e-3, std::max(std::fabs(num), (double)std::fabs(analytic[i])));
+      worst = std::max(worst, rel);
+    }
+    fprintf(stderr, "distill-gradcheck %s worst_rel=%.4g\n", name.c_str(), worst);
+    CHECK(worst <= 5e-2);
+  }
+}
+
 TEST_CASE("overfit one row: loss drops, argmax becomes gold") {
   TrainModel tm(CKPT);
   TrainRow row = make_row();
