@@ -99,3 +99,47 @@ TEST_CASE("shortlist_choice: cosine ranking, stable ties, passthrough") {
   auto all = shortlist_choice("query", criteria, embed, 10);
   CHECK(all.size() == 4);
 }
+
+TEST_CASE("predict_shortlist_above: threshold gates high-cardinality choice") {
+  std::unordered_map<std::string, std::vector<double>> embs;
+  embs["query"] = {1.0, 0.0};
+  embs["a"] = {0.9, 0.1};
+  embs["b"] = {0.7, 0.3};
+  embs["c"] = {0.1, 0.9};
+  embs["d"] = {-0.5, 0.5};
+  EmbedFn embed = [&](const std::vector<std::string>& ts) {
+    std::vector<std::vector<double>> out;
+    for (const auto& t : ts) out.push_back(embs.at(t));
+    return out;
+  };
+  ordered_json big_criteria = {{"a", nullptr}, {"b", nullptr},
+                               {"c", nullptr}, {"d", nullptr}};
+  ordered_json questions = {
+      {"big", {{"type", "choice"}, {"instructions", ""},
+               {"criteria", big_criteria}}},
+      {"small", {{"type", "choice"}, {"instructions", ""},
+                 {"criteria", ordered_json{{"x", nullptr}, {"y", nullptr}}}}}};
+
+  auto runner = [](const ordered_json& s, const ordered_json& q) {
+    ordered_json answers = ordered_json::object();
+    for (auto it = q.begin(); it != q.end(); ++it) {
+      const auto& c = it.value()["criteria"];
+      std::string first = c.begin().key();
+      answers[it.key()] = {{"type", "choice"}, {"choice", first}};
+    }
+    return ordered_json{{"answers", answers}};
+  };
+
+  // threshold 2: only the 4-option question is shortlisted to k=2
+  auto r = predict_shortlist_above(runner, "query", questions, embed, 2, 2);
+  CHECK(r.contains("shortlist"));
+  CHECK(r["shortlist"].contains("big"));
+  CHECK(!r["shortlist"].contains("small"));
+  CHECK(r["shortlist"]["big"]["labels"].size() == 2);
+
+  // threshold 10: nothing exceeds it -> no shortlist key at all
+  auto r2 = predict_shortlist_above(runner, "query", questions, embed, 2, 10);
+  CHECK(!r2.contains("shortlist"));
+  CHECK(r2["answers"]["big"]["choice"] == "a");
+  CHECK(r2["answers"]["small"]["choice"] == "x");
+}
