@@ -128,6 +128,39 @@ TEST_CASE("finite-difference gradient check: distillation + smoothing") {
   }
 }
 
+TEST_CASE("finite-difference gradient check: temperature-scaled loss") {
+  // Loss softmax over logits/T must be gradient-consistent through the 1/T
+  // chain rule (annealing path).
+  TrainModel tm(CKPT);
+  tm.set_loss(1.0, 0.5, 1.0, 0.0);
+  tm.set_loss_temperature(2.5);
+  TrainRow row = make_row();
+  for (const auto& name : tm.param_names()) {
+    int64_t n = tm.param_numel(name);
+    tm.zero_grad();
+    tm.step(row, true);
+    std::vector<float> analytic = tm.grad_of(name);
+    int ncheck = std::min<int64_t>(n, 24);
+    double worst = 0;
+    for (int c = 0; c < ncheck; ++c) {
+      int64_t i = (n * 31415ULL + c * 47) % n;
+      double orig = tm.param_get(name, i);
+      const double eps = 1e-4 * std::max(1.0, std::fabs(orig));
+      tm.param_set(name, i, (float)(orig + eps));
+      double lp = tm.forward_loss_double(row);
+      tm.param_set(name, i, (float)(orig - eps));
+      double lm = tm.forward_loss_double(row);
+      tm.param_set(name, i, (float)orig);
+      double num = (lp - lm) / (2 * eps);
+      double rel = std::fabs(num - analytic[i]) /
+                   std::max(1e-3, std::max(std::fabs(num), (double)std::fabs(analytic[i])));
+      worst = std::max(worst, rel);
+    }
+    fprintf(stderr, "temp-gradcheck %s worst_rel=%.4g\n", name.c_str(), worst);
+    CHECK(worst <= 5e-2);
+  }
+}
+
 TEST_CASE("overfit one row: loss drops, argmax becomes gold") {
   TrainModel tm(CKPT);
   TrainRow row = make_row();
