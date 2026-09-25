@@ -26,6 +26,7 @@
 
 #include "snapjudge/backward.hpp"
 #include "snapjudge/common.hpp"
+#include "snapjudge/hub.hpp"
 #include "snapjudge/model.hpp"
 #include "snapjudge/safetensors.hpp"
 #include "snapjudge/safewrite.hpp"
@@ -229,22 +230,33 @@ struct TrainModel::Impl {
 
 // ------------------------------ ctor ----------------------------------------------
 TrainModel::TrainModel(const std::string& ckpt_dir) : impl_(std::make_unique<Impl>()) {
-  base_dir_ = ckpt_dir;
+  // Resolve a hub id (org/repo) to a local snapshot; existing dirs pass through.
+  std::string dir = ckpt_dir;
+  if (!fs::exists(dir)) {
+    std::vector<std::string> patterns;
+    for (const char* n :
+         {"rl_agent_config.json", "model.safetensors", "tokenizer/*", "encoder/*"}) {
+      patterns.push_back(n);
+    }
+    const char* tok = std::getenv("HF_TOKEN");
+    dir = resolve_checkpoint(ckpt_dir, patterns, tok ? tok : "");
+  }
+  base_dir_ = dir;
   {
-    std::ifstream f(fs::path(ckpt_dir) / "rl_agent_config.json");
+    std::ifstream f(fs::path(dir) / "rl_agent_config.json");
     if (!f) throw std::runtime_error("TrainModel: missing rl_agent_config.json in " + ckpt_dir);
     f >> cfg_;
   }
   nlohmann::json enc_cfg;
   {
-    std::ifstream f(fs::path(ckpt_dir) / "encoder" / "config.json");
+    std::ifstream f(fs::path(dir) / "encoder" / "config.json");
     if (!f) throw std::runtime_error("TrainModel: missing encoder/config.json");
     f >> enc_cfg;
   }
-  tok_ = Tokenizer::cached_from_dir((fs::path(ckpt_dir) / "tokenizer").string());
+  tok_ = Tokenizer::cached_from_dir((fs::path(dir) / "tokenizer").string());
 
-  auto w = SafeTensors::load((fs::path(ckpt_dir) / "model.safetensors").string());
-  impl_->frozen = DecisionModel::load(cfg_, enc_cfg, w, ckpt_dir);
+  auto w = SafeTensors::load((fs::path(dir) / "model.safetensors").string());
+  impl_->frozen = DecisionModel::load(cfg_, enc_cfg, w, dir);
 
   Impl& im = *impl_;
   auto& mc = impl_->frozen->cfg();
