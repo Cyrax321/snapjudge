@@ -63,6 +63,11 @@ class TrainModel {
   // label_smoothing ∈ [0,1) mixes the gold distribution toward uniform.
   void set_loss(double w_nll, double w_sph, double w_rps, double label_smoothing);
 
+  // Softmax temperature for the training loss (anneal T>1 -> 1 for smoother
+  // early updates; the saved checkpoint's inference temperatures are fitted
+  // separately). Default 1.0 = no change.
+  void set_loss_temperature(double T);
+
   // Enable/disable the rank-r encoder-output LoRA adapter. r=0 disables it
   // (trainable set = head + type_emb + scorer only, the frozen-encoder default).
   void set_lora_r(int r);

@@ -137,6 +137,7 @@ std::vector<float> ln_c(const float* x, int64_t M, int64_t D, const float* w,
 struct LossParams {
   double w_nll = 1.0, w_sph = 0.5, w_rps = 1.0;
   double label_smoothing = 0.0;
+  double temperature = 1.0;   // softmax computed over logits/T; anneal T>1 -> 1
 };
 
 static void smoothed_target(const std::vector<double>& target, double eps,
@@ -154,11 +155,12 @@ static void loss_grad(const float* logits, const std::vector<double>& target,
   const int64_t k = (int64_t)target.size();
   std::vector<double> ts;
   smoothed_target(target, lp.label_smoothing, ts);
+  const double invT = 1.0 / lp.temperature;
   std::vector<double> q((size_t)k);
-  double mx = logits[0];
-  for (int64_t i = 1; i < k; ++i) mx = std::max(mx, (double)logits[i]);
+  double mx = logits[0] * invT;
+  for (int64_t i = 1; i < k; ++i) mx = std::max(mx, (double)logits[i] * invT);
   double s = 0;
-  for (int64_t i = 0; i < k; ++i) { q[(size_t)i] = std::exp((double)logits[i] - mx); s += q[(size_t)i]; }
+  for (int64_t i = 0; i < k; ++i) { q[(size_t)i] = std::exp((double)logits[i] * invT - mx); s += q[(size_t)i]; }
   for (auto& v : q) v /= s;
 
   std::vector<double> gq((size_t)k, 0.0);
@@ -185,8 +187,9 @@ static void loss_grad(const float* logits, const std::vector<double>& target,
   }
   double dot = 0;
   for (int64_t i = 0; i < k; ++i) dot += gq[(size_t)i] * q[(size_t)i];
+  // chain rule through the 1/T logit scaling
   for (int64_t i = 0; i < k; ++i)
-    dz[i] = (float)(q[(size_t)i] * (gq[(size_t)i] - dot));
+    dz[i] = (float)(invT * q[(size_t)i] * (gq[(size_t)i] - dot));
 }
 
 static double loss_fwd(const float* logits, const std::vector<double>& target,
@@ -194,11 +197,12 @@ static double loss_fwd(const float* logits, const std::vector<double>& target,
   const int64_t k = (int64_t)target.size();
   std::vector<double> ts;
   smoothed_target(target, lp.label_smoothing, ts);
+  const double invT = 1.0 / lp.temperature;
   std::vector<double> q((size_t)k);
-  double mx = logits[0];
-  for (int64_t i = 1; i < k; ++i) mx = std::max(mx, (double)logits[i]);
+  double mx = logits[0] * invT;
+  for (int64_t i = 1; i < k; ++i) mx = std::max(mx, (double)logits[i] * invT);
   double s = 0;
-  for (int64_t i = 0; i < k; ++i) { q[(size_t)i] = std::exp((double)logits[i] - mx); s += q[(size_t)i]; }
+  for (int64_t i = 0; i < k; ++i) { q[(size_t)i] = std::exp((double)logits[i] * invT - mx); s += q[(size_t)i]; }
   for (auto& v : q) v /= s;
   const double log_floor = -9.21;
   double log_score = 0, tq = 0, qn2 = 0;
@@ -740,6 +744,10 @@ void TrainModel::set_loss(double w_nll, double w_sph, double w_rps,
   impl_->lp.w_sph = w_sph;
   impl_->lp.w_rps = w_rps;
   impl_->lp.label_smoothing = label_smoothing;
+}
+
+void TrainModel::set_loss_temperature(double T) {
+  impl_->lp.temperature = std::max(0.01, T);
 }
 
 void TrainModel::set_lora_r(int r) {
