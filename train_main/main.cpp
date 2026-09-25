@@ -33,6 +33,7 @@ struct Args {
   double lr = 2e-5;
   double warmup = 0.03;
   double w_nll = 1.0, w_sph = 0.5, w_rps = 1.0, label_smoothing = 0.0;
+  int lora_r = 0;
   int seed = 17;
   bool fit_temperature = true;
   bool help = false;
@@ -64,6 +65,7 @@ Args parse(int argc, char** argv) {
     else if (t == "--w-sph") taked(a.w_sph);
     else if (t == "--w-rps") taked(a.w_rps);
     else if (t == "--label-smoothing") taked(a.label_smoothing);
+    else if (t == "--lora-r") takei(a.lora_r);
     else if (t == "--seed") takei(a.seed);
     else if (t == "--no-fit-temperature") a.fit_temperature = false;
     else if (t == "--help" || t == "-h") a.help = true;
@@ -81,6 +83,7 @@ void help() {
       "  --epochs N  --lr R  --rows-per-step N  --accum N  --warmup F  --seed N\n"
       "  --w-nll R --w-sph R --w-rps R   loss term weights (default 1.0 0.5 1.0)\n"
       "  --label-smoothing F             mix gold toward uniform (default 0)\n"
+      "  --lora-r N                     rank of the encoder-output LoRA adapter (default 0 = off)\n"
       "  --no-fit-temperature     skip post-hoc temperature fitting\n");
 }
 
@@ -119,6 +122,7 @@ int main(int argc, char** argv) {
 
   TrainModel tm(a.base);
   tm.set_loss(a.w_nll, a.w_sph, a.w_rps, a.label_smoothing);
+  tm.set_lora_r(a.lora_r);
   std::fprintf(stderr, "trainable: %lld params across %zd tensors\n",
                (long long)tm.param_count(), tm.training_param_names().size());
 

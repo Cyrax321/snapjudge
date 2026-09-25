@@ -63,6 +63,10 @@ class TrainModel {
   // label_smoothing ∈ [0,1) mixes the gold distribution toward uniform.
   void set_loss(double w_nll, double w_sph, double w_rps, double label_smoothing);
 
+  // Enable/disable the rank-r encoder-output LoRA adapter. r=0 disables it
+  // (trainable set = head + type_emb + scorer only, the frozen-encoder default).
+  void set_lora_r(int r);
+
   // Eval forward over rows through the trained head: per-train-question logits,
   // target and qtype. Used by temperature fitting.
   void eval_logits(const std::vector<TrainRow>& rows,

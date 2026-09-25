@@ -242,6 +242,8 @@ struct RowCtx {
   std::vector<float> logits;          // [K]
   std::vector<float> h_encoder;       // [L, D] frozen encoder output (input to head)
   std::vector<double> probs;          // cached softmax
+  std::vector<float> lora_z;          // [L, r] z = h @ A^T (cached for backward)
+  std::vector<float> lora_h;          // [L, D] pre-LoRA h (frozen enc output)
 };
 
 }  // namespace
@@ -255,6 +257,7 @@ struct TrainModel::Impl {
   int D = 0, H = 0, Dh = 0, head_layers = 0;
   float norm_eps = 1e-5f;
   int max_len = 512, head_max_len = 192;
+  int lora_r = 0;   // 0 = LoRA disabled; >0 = rank of the encoder-output adapter
   LossParams lp;   // loss weighting + label smoothing (defaults = reference score)
 };
 
@@ -297,7 +300,6 @@ TrainModel::TrainModel(const std::string& ckpt_dir) : impl_(std::make_unique<Imp
   im.norm_eps = mc.norm_eps;
   im.max_len = cfg_.value("max_len", 512);
   im.head_max_len = cfg_.value("head_max_len", 192);
-  const int D = im.D;
 
   // seed trainable copies from the checkpoint
   auto pull = [&](const std::string& name) {
@@ -324,6 +326,11 @@ TrainModel::TrainModel(const std::string& ckpt_dir) : impl_(std::make_unique<Imp
   pull("scorer.3.weight");
   if (w.has("scorer.3.bias")) pull("scorer.3.bias");
 
+  // optional LoRA adapter params (rank r). A ~ N(0, 1/r), B = 0 so the
+  // checkpoint is unchanged at init (delta starts at zero). Registered lazily
+  // via set_lora_r so the CLI can enable it after construction.
+  im.lora_r = 0;
+
   n_params_ = 0;
   for (const auto& n : im.P.names) n_params_ += im.P.numel(n);
 }
@@ -338,6 +345,19 @@ namespace {
 void forward_row(TrainModel::Impl& im, RowCtx& ctx) {
   const int64_t L = ctx.L, K = ctx.K, D = im.D;
   std::vector<float>& X = ctx.h_encoder;   // [L, D] — owned by ctx, mutated
+  if (im.lora_r > 0) {
+    // z = X @ A^T [L, r]; X += z @ B^T [L, D]
+    const int r = im.lora_r;
+    ctx.lora_h.assign(X.begin(), X.end());
+    std::vector<float> z((size_t)(L * r));
+    cblas_sgemm(RM, NO_T, TR, (int)L, (int)r, (int)D, 1.0f, X.data(), (int)D,
+                im.P.at("lora_A.weight"), (int)D, 0.0f, z.data(), (int)r);
+    std::vector<float> delta((size_t)(L * D));
+    cblas_sgemm(RM, NO_T, TR, (int)L, (int)D, (int)r, 1.0f, z.data(), (int)r,
+                im.P.at("lora_B.weight"), (int)r, 0.0f, delta.data(), (int)D);
+    ctx.lora_z = std::move(z);
+    for (int64_t i = 0; i < L * D; ++i) X[i] += delta[i];
+  }
   for (int64_t i = 0; i < L; ++i) {
     float* xr = X.data() + i * D;
     const float* te = im.P.at("type_emb.weight") + ctx.qtype * D;
@@ -625,6 +645,26 @@ void backward_row(TrainModel::Impl& im, RowCtx& ctx, const std::vector<double>& 
       float* dst = gte.data() + (int64_t)ctx.qtype * D;
       for (int64_t j = 0; j < D; ++j) dst[j] += src[j];
     }
+    // LoRA add (X = h_enc + z@B^T, z = h_enc@A^T): dX flows back through B then A.
+    if (im.lora_r > 0) {
+      const int r = im.lora_r;
+      // B is [D, r] row-major: dB[d,i] = Σ_l dX[l,d]·z[l,i] = (dX^T @ z)
+      std::vector<float> dB((size_t)(D * r), 0.f);
+      cblas_sgemm(RM, TR, NO_T, (int)D, (int)r, (int)L, 1.0f, dX.data(), (int)D,
+                  ctx.lora_z.data(), (int)r, 0.0f, dB.data(), (int)r);
+      auto& gB = im.P.g["lora_B.weight"];
+      for (int64_t i = 0; i < D * r; ++i) gB[i] += dB[i];
+      // dz = dX @ B  [L, r]
+      std::vector<float> dz((size_t)(L * r), 0.f);
+      cblas_sgemm(RM, NO_T, NO_T, (int)L, (int)r, (int)D, 1.0f, dX.data(), (int)D,
+                  im.P.at("lora_B.weight"), (int)r, 0.0f, dz.data(), (int)r);
+      // dA += dz^T @ h_enc  [r, D]
+      std::vector<float> dA((size_t)(r * D), 0.f);
+      cblas_sgemm(RM, TR, NO_T, (int)r, (int)D, (int)L, 1.0f, dz.data(), (int)r,
+                  ctx.lora_h.data(), (int)D, 0.0f, dA.data(), (int)D);
+      auto& gA = im.P.g["lora_A.weight"];
+      for (int64_t i = 0; i < r * D; ++i) gA[i] += dA[i];
+    }
   }
 }
 
@@ -702,6 +742,36 @@ void TrainModel::set_loss(double w_nll, double w_sph, double w_rps,
   impl_->lp.label_smoothing = label_smoothing;
 }
 
+void TrainModel::set_lora_r(int r) {
+  Impl& im = *impl_;
+  if (r == im.lora_r) return;
+  if (im.lora_r > 0) {
+    // drop previous adapters (only legal before any step)
+    im.P.names.erase(std::remove_if(im.P.names.begin(), im.P.names.end(),
+                                    [&](const std::string& n) {
+                                      return n == "lora_A.weight" || n == "lora_B.weight";
+                                    }),
+                     im.P.names.end());
+    im.P.w.erase("lora_A.weight"); im.P.w.erase("lora_B.weight");
+    im.P.shape.erase("lora_A.weight"); im.P.shape.erase("lora_B.weight");
+    im.P.m1.erase("lora_A.weight"); im.P.m1.erase("lora_B.weight");
+    im.P.m2.erase("lora_A.weight"); im.P.m2.erase("lora_B.weight");
+    im.P.g.erase("lora_A.weight"); im.P.g.erase("lora_B.weight");
+  }
+  im.lora_r = r;
+  if (r > 0) {
+    const int D = im.D;
+    std::mt19937 g(17);
+    std::normal_distribution<float> nd(0.f, 1.f / std::sqrt((float)r));
+    std::vector<float> A((size_t)(r * D), 0.f);
+    for (auto& v : A) v = nd(g);
+    im.P.add("lora_A.weight", std::move(A), {r, D});
+    im.P.add("lora_B.weight", std::vector<float>((size_t)(D * r), 0.f), {D, r});
+  }
+  n_params_ = 0;
+  for (const auto& n : im.P.names) n_params_ += im.P.numel(n);
+}
+
 void TrainModel::optimizer_step(double lr) {
   Impl& im = *impl_;
   im.adam_t++;
@@ -746,10 +816,21 @@ void TrainModel::save_checkpoint(const std::string& out_dir,
       out.push_back({name, sh, buf, !is_fp32});
     }
   }
+  // append trainable tensors absent from the base (LoRA adapters)
+  for (const auto& name : im.P.names) {
+    if (w.has(name)) continue;
+    auto sh = im.P.shape.at(name);
+    int64_t n = 1;
+    for (auto d : sh) n *= d;
+    std::shared_ptr<float[]> buf(new float[(size_t)n]);
+    std::memcpy(buf.get(), im.P.at(name), sizeof(float) * n);
+    out.push_back({name, sh, buf, true});
+  }
   save_safetensors((fs::path(out_dir) / "model.safetensors").string(), out);
 
   ordered_json cfg = cfg_;
   cfg["temperature"] = temperature;
+  if (im.lora_r > 0) cfg["lora_r"] = im.lora_r;
   ordered_json tbo = ordered_json::object();
   for (const auto& [k, v] : temp_by_options) tbo[k] = v;
   cfg["temperature_by_options"] = tbo;
