@@ -34,6 +34,8 @@ struct Args {
   double warmup = 0.03;
   double w_nll = 1.0, w_sph = 0.5, w_rps = 1.0, label_smoothing = 0.0;
   int lora_r = 0;
+  double temp_start = 1.0;      // loss softmax temperature at the first step
+  double temp_end = 1.0;        // loss softmax temperature at the last step
   int seed = 17;
   bool fit_temperature = true;
   bool help = false;
@@ -66,6 +68,8 @@ Args parse(int argc, char** argv) {
     else if (t == "--w-rps") taked(a.w_rps);
     else if (t == "--label-smoothing") taked(a.label_smoothing);
     else if (t == "--lora-r") takei(a.lora_r);
+    else if (t == "--temp-start") taked(a.temp_start);
+    else if (t == "--temp-end") taked(a.temp_end);
     else if (t == "--seed") takei(a.seed);
     else if (t == "--no-fit-temperature") a.fit_temperature = false;
     else if (t == "--help" || t == "-h") a.help = true;
@@ -84,6 +88,7 @@ void help() {
       "  --w-nll R --w-sph R --w-rps R   loss term weights (default 1.0 0.5 1.0)\n"
       "  --label-smoothing F             mix gold toward uniform (default 0)\n"
       "  --lora-r N                     rank of the encoder-output LoRA adapter (default 0 = off)\n"
+      "  --temp-start F --temp-end F   anneal loss softmax temperature T_start -> T_end\n"
       "  --no-fit-temperature     skip post-hoc temperature fitting\n");
 }
 
@@ -134,6 +139,11 @@ int main(int argc, char** argv) {
   for (int epoch = 0; epoch < (int)std::ceil(a.epochs); ++epoch) {
     std::shuffle(rows.begin(), rows.end(), rng);
     for (size_t start = 0; start < rows.size(); start += (size_t)a.rows_per_step) {
+      // anneal the loss temperature across the run (T_start -> T_end)
+      double frac = total_micro > 1 ? (double)micro / (double)(total_micro - 1) : 0.0;
+      double temp = a.temp_start + (a.temp_end - a.temp_start) * frac;
+      tm.set_loss_temperature(temp);
+
       tm.zero_grad();
       int64_t nrows = 0;
       double loss = 0, acc = 0;
