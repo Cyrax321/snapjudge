@@ -123,10 +123,37 @@ std::vector<float> ln_c(const float* x, int64_t M, int64_t D, const float* w,
 }
 
 // ----------------------- proper-score loss ----------------------------------------
-// reward = Σ t·logq + 0.5·(t·q)/|q| (+ RPS on score rows); loss = -reward.
+// reward = w_nll·Σ t·logq + w_sph·(t·q)/|q| (+ w_rps·RPS on score rows);
+// loss = -reward. Label smoothing softens `t` toward uniform before scoring.
+//
+// The three weights give direct control over what the head optimises:
+//   w_nll  — teacher cross-entropy. Cross-entropy is minimised exactly at q=t,
+//            so raising it (or lowering w_sph) sharpens predictions and raises
+//            soft-accuracy against the teacher distribution.
+//   w_sph  — spherical term; more robust to label noise but flattens q (costs
+//            soft-accuracy in exchange for robustness/calibration).
+//   w_rps  — ranked-probability score on ordinal rows (monotone structure).
+// Defaults (1.0, 0.5, 1.0) reproduce the reference RLCD proper score exactly.
+struct LossParams {
+  double w_nll = 1.0, w_sph = 0.5, w_rps = 1.0;
+  double label_smoothing = 0.0;
+};
+
+static void smoothed_target(const std::vector<double>& target, double eps,
+                            std::vector<double>& ts) {
+  const size_t k = target.size();
+  ts.assign(target.begin(), target.end());
+  if (eps > 0) {
+    for (size_t i = 0; i < k; ++i)
+      ts[i] = (1.0 - eps) * target[i] + eps / (double)k;
+  }
+}
+
 static void loss_grad(const float* logits, const std::vector<double>& target,
-                      int qtype_int, float* dz) {
+                      int qtype_int, const LossParams& lp, float* dz) {
   const int64_t k = (int64_t)target.size();
+  std::vector<double> ts;
+  smoothed_target(target, lp.label_smoothing, ts);
   std::vector<double> q((size_t)k);
   double mx = logits[0];
   for (int64_t i = 1; i < k; ++i) mx = std::max(mx, (double)logits[i]);
@@ -139,21 +166,21 @@ static void loss_grad(const float* logits, const std::vector<double>& target,
   for (int64_t i = 0; i < k; ++i) {
     double qc = std::max(q[(size_t)i], 1e-12);
     if (std::log(qc) > log_floor)
-      gq[(size_t)i] -= target[(size_t)i] / qc;
+      gq[(size_t)i] -= lp.w_nll * ts[(size_t)i] / qc;
   }
   double tq = 0, qn2 = 0;
-  for (int64_t i = 0; i < k; ++i) { tq += target[(size_t)i] * q[(size_t)i]; qn2 += q[(size_t)i] * q[(size_t)i]; }
+  for (int64_t i = 0; i < k; ++i) { tq += ts[(size_t)i] * q[(size_t)i]; qn2 += q[(size_t)i] * q[(size_t)i]; }
   double qn = std::sqrt(std::max(qn2, 1e-18));
   for (int64_t i = 0; i < k; ++i)
-    gq[(size_t)i] += -0.5 * (target[(size_t)i] * qn - tq * q[(size_t)i]) / (qn * qn);
+    gq[(size_t)i] += -lp.w_sph * (ts[(size_t)i] * qn - tq * q[(size_t)i]) / (qn * qn);
   if (qtype_int == 1 && k >= 2) {
     double cq = 0, ct = 0;
     std::vector<double> cdiff((size_t)k);
-    for (int64_t j = 0; j < k; ++j) { cq += q[(size_t)j]; ct += target[(size_t)j]; cdiff[(size_t)j] = cq - ct; }
+    for (int64_t j = 0; j < k; ++j) { cq += q[(size_t)j]; ct += ts[(size_t)j]; cdiff[(size_t)j] = cq - ct; }
     for (int64_t i = 0; i < k; ++i) {
       double acc = 0;
       for (int64_t j = i; j < k; ++j) acc += cdiff[(size_t)j];
-      gq[(size_t)i] += (2.0 / (k - 1)) * acc;
+      gq[(size_t)i] += lp.w_rps * (2.0 / (k - 1)) * acc;
     }
   }
   double dot = 0;
@@ -163,8 +190,10 @@ static void loss_grad(const float* logits, const std::vector<double>& target,
 }
 
 static double loss_fwd(const float* logits, const std::vector<double>& target,
-                       int qtype_int) {
+                       int qtype_int, const LossParams& lp) {
   const int64_t k = (int64_t)target.size();
+  std::vector<double> ts;
+  smoothed_target(target, lp.label_smoothing, ts);
   std::vector<double> q((size_t)k);
   double mx = logits[0];
   for (int64_t i = 1; i < k; ++i) mx = std::max(mx, (double)logits[i]);
@@ -177,20 +206,20 @@ static double loss_fwd(const float* logits, const std::vector<double>& target,
     double qc = std::max(q[(size_t)i], 1e-12);
     double lq = std::log(qc);
     if (lq < log_floor) lq = log_floor;
-    log_score += target[(size_t)i] * lq;
-    tq += target[(size_t)i] * q[(size_t)i];
+    log_score += ts[(size_t)i] * lq;
+    tq += ts[(size_t)i] * q[(size_t)i];
     qn2 += q[(size_t)i] * q[(size_t)i];
   }
   double sph = tq / std::sqrt(std::max(qn2, 1e-18));
-  double r = log_score + 0.5 * sph;
+  double r = lp.w_nll * log_score + lp.w_sph * sph;
   if (qtype_int == 1 && k >= 2) {
     double cq = 0, ct = 0, rps = 0;
     for (int64_t j = 0; j < k; ++j) {
-      cq += q[(size_t)j]; ct += target[(size_t)j];
+      cq += q[(size_t)j]; ct += ts[(size_t)j];
       double d = cq - ct;
       rps += d * d;
     }
-    r -= rps / (k - 1);
+    r -= lp.w_rps * rps / (k - 1);
   }
   return -r;
 }
@@ -226,6 +255,7 @@ struct TrainModel::Impl {
   int D = 0, H = 0, Dh = 0, head_layers = 0;
   float norm_eps = 1e-5f;
   int max_len = 512, head_max_len = 192;
+  LossParams lp;   // loss weighting + label smoothing (defaults = reference score)
 };
 
 // ------------------------------ ctor ----------------------------------------------
@@ -416,7 +446,7 @@ void backward_row(TrainModel::Impl& im, RowCtx& ctx, const std::vector<double>& 
   const int64_t HxDh = (int64_t)im.H * im.Dh;
 
   std::vector<float> dz((size_t)K);
-  loss_grad(ctx.logits.data(), target, qtype_int, dz.data());
+  loss_grad(ctx.logits.data(), target, qtype_int, im.lp, dz.data());
   for (auto& v : dz) v = (float)(v * scale);   // mean over rows
 
   // scorer L2: logits = s2 @ w2^T (+b2), w2 [1, D]
@@ -649,7 +679,7 @@ TrainModel::StepStats TrainModel::step(const TrainRow& row, bool accumulate_only
     RowCtx& ctx = rows[i];
     forward_row(im, ctx);
     const std::vector<double>& target = row.targets[i];
-    loss_sum += loss_fwd(ctx.logits.data(), target, ctx.qtype);
+    loss_sum += loss_fwd(ctx.logits.data(), target, ctx.qtype, im.lp);
     int argmax = 0, gold = 0;
     for (int j = 0; j < (int)ctx.K; ++j) {
       if (ctx.logits[j] > ctx.logits[argmax]) argmax = j;
@@ -663,6 +693,14 @@ TrainModel::StepStats TrainModel::step(const TrainRow& row, bool accumulate_only
 }
 
 void TrainModel::zero_grad() { impl_->P.zero_grad(); }
+
+void TrainModel::set_loss(double w_nll, double w_sph, double w_rps,
+                          double label_smoothing) {
+  impl_->lp.w_nll = w_nll;
+  impl_->lp.w_sph = w_sph;
+  impl_->lp.w_rps = w_rps;
+  impl_->lp.label_smoothing = label_smoothing;
+}
 
 void TrainModel::optimizer_step(double lr) {
   Impl& im = *impl_;
@@ -753,7 +791,7 @@ double TrainModel::forward_loss_double(const TrainRow& row) {
   for (size_t i = 0; i < rows.size(); ++i) {
     RowCtx& ctx = rows[i];
     forward_row(im, ctx);
-    total += loss_fwd(ctx.logits.data(), row.targets[i], ctx.qtype);
+    total += loss_fwd(ctx.logits.data(), row.targets[i], ctx.qtype, im.lp);
   }
   return total / std::max<size_t>(1, rows.size());
 }
