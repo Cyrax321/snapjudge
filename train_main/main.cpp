@@ -32,6 +32,7 @@ struct Args {
   int accum = 8;
   double lr = 2e-5;
   double warmup = 0.03;
+  double w_nll = 1.0, w_sph = 0.5, w_rps = 1.0, label_smoothing = 0.0;
   int seed = 17;
   bool fit_temperature = true;
   bool help = false;
@@ -59,6 +60,10 @@ Args parse(int argc, char** argv) {
     else if (t == "--accum") takei(a.accum);
     else if (t == "--lr") taked(a.lr);
     else if (t == "--warmup") taked(a.warmup);
+    else if (t == "--w-nll") taked(a.w_nll);
+    else if (t == "--w-sph") taked(a.w_sph);
+    else if (t == "--w-rps") taked(a.w_rps);
+    else if (t == "--label-smoothing") taked(a.label_smoothing);
     else if (t == "--seed") takei(a.seed);
     else if (t == "--no-fit-temperature") a.fit_temperature = false;
     else if (t == "--help" || t == "-h") a.help = true;
@@ -74,6 +79,8 @@ void help() {
       "  --val <val.jsonl>        validation data (default: data with val.jsonl suffix swap)\n"
       "  --out <dir>              output checkpoint dir (default out/checkpoint-ft)\n"
       "  --epochs N  --lr R  --rows-per-step N  --accum N  --warmup F  --seed N\n"
+      "  --w-nll R --w-sph R --w-rps R   loss term weights (default 1.0 0.5 1.0)\n"
+      "  --label-smoothing F             mix gold toward uniform (default 0)\n"
       "  --no-fit-temperature     skip post-hoc temperature fitting\n");
 }
 
@@ -111,6 +118,7 @@ int main(int argc, char** argv) {
                rows.size(), val_rows.size());
 
   TrainModel tm(a.base);
+  tm.set_loss(a.w_nll, a.w_sph, a.w_rps, a.label_smoothing);
   std::fprintf(stderr, "trainable: %lld params across %zd tensors\n",
                (long long)tm.param_count(), tm.training_param_names().size());
 
