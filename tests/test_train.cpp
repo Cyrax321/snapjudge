@@ -167,3 +167,67 @@ TEST_CASE("save_checkpoint roundtrip loads into Agent") {
   CHECK(r["answers"]["route"]["choice"] == "billing");
   CHECK(r["answers"]["urgent"]["noul"].get<double>() > 0.5);
 }
+
+TEST_CASE("LoRA adapter: gradient check + roundtrip") {
+  TrainModel tm(CKPT);
+  tm.set_lora_r(4);
+  CHECK(tm.param_numel("lora_A.weight") > 0);
+  CHECK(tm.param_numel("lora_B.weight") > 0);
+
+  // B=0 at init -> loss identical to the no-LoRA baseline, and A's grad is
+  // exactly zero (the LoRA delta contributes nothing before any update).
+  TrainModel base(CKPT);
+  TrainRow row = make_row();
+  double l0 = base.forward_loss_double(row);
+  double l1 = tm.forward_loss_double(row);
+  CHECK(std::fabs(l0 - l1) < 1e-4);
+
+  // warm up a few steps so B is non-zero and both adapter gradients are live
+  for (int i = 0; i < 5; ++i) {
+    tm.zero_grad();
+    tm.step(row, true);
+    tm.optimizer_step(2e-2);
+  }
+
+  // finite-difference the LoRA tensors (B now non-zero -> A grad non-zero too)
+  for (const char* name : {"lora_A.weight", "lora_B.weight"}) {
+    int64_t n = tm.param_numel(name);
+    tm.zero_grad();
+    tm.step(row, true);
+    std::vector<float> analytic = tm.grad_of(name);
+    int ncheck = std::min<int64_t>(n, 24);
+    double worst = 0;
+    for (int c = 0; c < ncheck; ++c) {
+      int64_t i = (n * 76543ULL + c * 71) % n;
+      double orig = tm.param_get(name, i);
+      const double eps = 1e-3 * std::max(1.0, std::fabs(orig));
+      tm.param_set(name, i, (float)(orig + eps));
+      double lp = tm.forward_loss_double(row);
+      tm.param_set(name, i, (float)(orig - eps));
+      double lm = tm.forward_loss_double(row);
+      tm.param_set(name, i, (float)orig);
+      double num = (lp - lm) / (2 * eps);
+      double rel = std::fabs(num - analytic[i]) /
+                   std::max(1e-3, std::max(std::fabs(num), (double)std::fabs(analytic[i])));
+      worst = std::max(worst, rel);
+    }
+    fprintf(stderr, "lora-gradcheck %s worst_rel=%.4g\n", name, worst);
+    CHECK(worst <= 5e-2);
+  }
+
+  // train more and confirm the adapter roundtrips through save + Agent
+  for (int i = 0; i < 45; ++i) {
+    tm.zero_grad();
+    tm.step(row, true);
+    tm.optimizer_step(2e-2);
+  }
+  tm.save_checkpoint(CKPT_FT, {1.0, 1.0, 1.0}, {},
+                     ordered_json{{"updates", 50}, {"dataset", "tiny-synthetic"}});
+  snapjudge::Agent a(CKPT_FT, "cpu");
+  ordered_json state = ordered_json{{"text", "the invoice was charged twice please fix"}};
+  ordered_json qs = ordered_json{
+      {"urgent", {{"type", "noul"}, {"instructions", "Is this time-sensitive?"}}}};
+  auto r = a.system_one(state, qs);
+  CHECK(r["answers"]["urgent"]["noul"].get<double>() >= 0.0);
+  CHECK(r["answers"]["urgent"]["noul"].get<double>() <= 1.0);
+}
