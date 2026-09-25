@@ -72,6 +72,21 @@ class DecisionModel {
 
   const ModelConfig& cfg() const { return cfg_; }
 
+  // ---- read-only encoder accessors (trainer LoRA path references frozen
+  // weights + rope tables without copying them) ----
+  const std::shared_ptr<float[]>& emb_w() const { return emb_w_; }
+  const std::shared_ptr<float[]>& emb_norm() const { return emb_norm_; }
+  const std::shared_ptr<float[]>& final_norm() const { return final_norm_; }
+  const std::vector<LayerWeights>& layers() const { return layers_; }
+  const std::shared_ptr<float[]>& rope_cos_full() const { return rope_cos_full_; }
+  const std::shared_ptr<float[]>& rope_sin_full() const { return rope_sin_full_; }
+  const std::shared_ptr<float[]>& rope_cos_slide() const { return rope_cos_slide_; }
+  const std::shared_ptr<float[]>& rope_sin_slide() const { return rope_sin_slide_; }
+  int D() const { return D_; }
+  int H() const { return H_; }
+  int Dh() const { return Dh_; }
+  int F() const { return F_; }
+
  private:
   ModelConfig cfg_;
   // encoder
@@ -82,6 +97,11 @@ class DecisionModel {
   // rope tables per layer type, [max_len, Dh/2]
   std::shared_ptr<float[]> rope_cos_full_, rope_sin_full_;
   std::shared_ptr<float[]> rope_cos_slide_, rope_sin_slide_;
+  // optional encoder-output LoRA adapter: h += (h @ A^T) @ B^T, A [r, D], B [D, r]
+  // (rank-r linear perturbation of the frozen encoder's final hidden states).
+  int lora_r_ = 0;
+  std::shared_ptr<float[]> lora_a_;   // [r, D]
+  std::shared_ptr<float[]> lora_b_;   // [D, r]
   // type embedding [3, D]
   std::shared_ptr<float[]> type_emb_;
   // head layers (nn.TransformerEncoderLayer, norm_first, relu ffn, biases)

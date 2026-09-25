@@ -188,6 +188,19 @@ std::unique_ptr<DecisionModel> DecisionModel::load(const json& rl_cfg, const jso
   };
   build_table(c.rope_theta_full, m->rope_cos_full_, m->rope_sin_full_);
   build_table(c.rope_theta_sliding, m->rope_cos_slide_, m->rope_sin_slide_);
+
+  // optional encoder-output LoRA adapter (rank r): A [r, D], B [D, r]
+  if (w.has("lora_A.weight") && w.has("lora_B.weight")) {
+    // shapes: A [r, D], B [D, r]; r = A.numel / D
+    auto ash = w.shape_of("lora_A.weight");
+    auto bsh = w.shape_of("lora_B.weight");
+    if (ash.size() != 2 || bsh.size() != 2 || ash[0] != bsh[1] ||
+        ash[1] != static_cast<int64_t>(D) || bsh[0] != static_cast<int64_t>(D))
+      throw std::runtime_error("Model 'lora_A.weight'/'lora_B.weight' must be [r,D] and [D,r]");
+    m->lora_r_ = static_cast<int>(ash[0]);
+    m->lora_a_ = w.data_f32("lora_A.weight");
+    m->lora_b_ = w.data_f32("lora_B.weight");
+  }
   return m;
 }
 
@@ -277,6 +290,12 @@ std::vector<std::vector<std::vector<float>>> DecisionModel::encode(
     add_(X, Y);
   }
   Tensor h = layer_norm(X, final_norm_.get(), nullptr, cfg_.norm_eps);
+  if (lora_r_ > 0) {
+    // h [M, D] += (h @ A^T [M,r]) @ B^T [r,D]
+    Tensor z = gemm_nt(h, MatView::of(lora_a_.get(), lora_r_, D_).t, nullptr, 0);
+    Tensor delta = gemm_nt(z, MatView::of(lora_b_.get(), D_, lora_r_).t, nullptr, 0);
+    add_(h, delta);
+  }
   for (int64_t b = 0; b < B; ++b) {
     out[static_cast<size_t>(b)].resize(static_cast<size_t>(L));
     for (int64_t i = 0; i < L; ++i) {
@@ -379,6 +398,13 @@ void DecisionModel::forward(const std::vector<std::vector<int64_t>>& input_ids,
   }
   // final norm
   Tensor h = layer_norm(X, final_norm_.get(), nullptr, eps);  // [M, D]
+
+  if (lora_r_ > 0) {
+    // h [M, D] += (h @ A^T [M,r]) @ B^T [r,D]
+    Tensor z = gemm_nt(h, MatView::of(lora_a_.get(), lora_r_, D).t, nullptr, 0);
+    Tensor delta = gemm_nt(z, MatView::of(lora_b_.get(), D, lora_r_).t, nullptr, 0);
+    add_(h, delta);
+  }
 
   // h = h + type_emb[qtype]
   for (int64_t b = 0; b < B; ++b) {
