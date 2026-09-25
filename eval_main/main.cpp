@@ -14,6 +14,7 @@
 #include "snapjudge/common.hpp"
 #include "snapjudge/train.hpp"
 #include "snapjudge/metrics.hpp"
+#include "snapjudge/shortlist.hpp"
 
 using snapjudge::Agent;
 using snapjudge::TrainRow;
@@ -29,10 +30,14 @@ struct QPoint { double conf; double correct; std::string type; std::string label
                 std::string label_pred; std::string qid; std::string workflow;
                 std::vector<double> q, t; };
 
-RowResult eval_row(Agent& agent, const TrainRow& row, std::vector<QPoint>* points) {
+RowResult eval_row(Agent& agent, const TrainRow& row, std::vector<QPoint>* points,
+                   int shortlist_k, int shortlist_threshold) {
   ordered_json qs = ordered_json::object();
   for (size_t i = 0; i < row.qids.size(); ++i) qs[row.qids[i]] = row.qdefs[i];
-  ordered_json res = agent.system_one(row.state, qs);
+  ordered_json res = shortlist_k > 0
+                         ? agent.system_one_shortlist(row.state, qs, shortlist_k,
+                                                      shortlist_threshold)
+                         : agent.system_one(row.state, qs);
   RowResult rr{0, 0, 0, 0, {}, {}};
   for (size_t i = 0; i < row.qids.size(); ++i) {
     const auto& qid = row.qids[i];
@@ -98,14 +103,17 @@ RowResult eval_row(Agent& agent, const TrainRow& row, std::vector<QPoint>* point
 int main(int argc, char** argv) {
   std::string ckpt, data, json_out;
   int limit = 0;
+  int shortlist_k = 0, shortlist_threshold = 20;
   for (int i = 1; i < argc; ++i) {
     std::string t = argv[i];
     if (t == "--ckpt" && i + 1 < argc) ckpt = argv[++i];
     else if (t == "--data" && i + 1 < argc) data = argv[++i];
     else if (t == "--json" && i + 1 < argc) json_out = argv[++i];
     else if (t == "--n" && i + 1 < argc) limit = std::stoi(argv[++i]);
+    else if (t == "--shortlist-k" && i + 1 < argc) shortlist_k = std::stoi(argv[++i]);
+    else if (t == "--shortlist-threshold" && i + 1 < argc) shortlist_threshold = std::stoi(argv[++i]);
     else if (t == "--help" || t == "-h") {
-      std::puts("snapjudge-eval --ckpt <dir|hub-id> --data <val.jsonl> [--n N] [--json out.json]");
+      std::puts("snapjudge-eval --ckpt <dir|hub-id> --data <val.jsonl> [--n N] [--json out.json] [--shortlist-k K]");
       return 0;
     }
   }
@@ -126,7 +134,7 @@ int main(int argc, char** argv) {
 
   size_t i = 0;
   for (const auto& row : rows) {
-    auto rr = eval_row(agent, row, &points);
+    auto rr = eval_row(agent, row, &points, shortlist_k, shortlist_threshold);
     right += rr.right; total += rr.total;
     brier += rr.brier; soft += rr.soft;
     for (double c : rr.conf) conf.push_back(c);
