@@ -58,6 +58,11 @@ class TrainModel {
   void zero_grad();
   int64_t param_count() const { return n_params_; }
 
+  // Configure the proper-score loss weights + label smoothing before training.
+  // w_nll/w_sph/w_rps scale the log / spherical / ranked-probability terms;
+  // label_smoothing ∈ [0,1) mixes the gold distribution toward uniform.
+  void set_loss(double w_nll, double w_sph, double w_rps, double label_smoothing);
+
   // Eval forward over rows through the trained head: per-train-question logits,
   // target and qtype. Used by temperature fitting.
   void eval_logits(const std::vector<TrainRow>& rows,
