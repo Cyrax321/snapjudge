@@ -176,6 +176,49 @@ ordered_json predict_shortlist(
   return result;
 }
 
+ordered_json predict_shortlist_above(
+    const std::function<ordered_json(const ordered_json&, const ordered_json&)>& runner,
+    const ordered_json& state, const ordered_json& questions, const EmbedFn& embed_fn,
+    int k, int threshold) {
+  if (!questions.is_object())
+    throw std::invalid_argument("questions must be a dict of question id -> definition");
+  int checked = check_k(k);
+  ordered_json reduced = ordered_json::object();
+  ordered_json meta = ordered_json::object();
+  for (auto it = questions.begin(); it != questions.end(); ++it) {
+    const std::string& qid = it.key();
+    const ordered_json& qdef = it.value();
+    bool is_choice = qdef.is_object() && qdef.value("type", "") == "choice";
+    // Count options (dict or list), shortlisting only when it clears the bar.
+    size_t nopts = 0;
+    if (is_choice && qdef.contains("criteria") && !qdef["criteria"].is_null()) {
+      nopts = qdef["criteria"].is_object() ? qdef["criteria"].size()
+                                           : qdef["criteria"].size();
+    }
+    if (!is_choice || (int)nopts <= threshold) {
+      reduced[qid] = qdef;
+      continue;
+    }
+    Rank r = rank_impl(state, qdef["criteria"], embed_fn, checked,
+                       qdef.value("instructions", ""));
+    meta[qid] = {{"labels", r.labels},
+                 {"scores", r.passthrough ? ordered_json(nullptr) : ordered_json(r.scores)},
+                 {"k", checked},
+                 {"n", r.n},
+                 {"passthrough", r.passthrough}};
+    if (r.passthrough) {
+      reduced[qid] = qdef;
+      continue;
+    }
+    ordered_json updated = qdef;
+    updated["criteria"] = subset_criteria(qdef["criteria"], r.labels);
+    reduced[qid] = updated;
+  }
+  ordered_json result = runner(state, reduced);
+  if (!meta.empty()) result["shortlist"] = meta;
+  return result;
+}
+
 EmbedFn embed_fn_from_agent(const Agent& agent, int max_length, int batch_size) {
   const Agent* a = &agent;
   return [a, max_length, batch_size](const std::vector<std::string>& texts) {
