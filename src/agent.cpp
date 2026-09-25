@@ -13,6 +13,7 @@
 #include "snapjudge/hub.hpp"
 #include "snapjudge/model.hpp"
 #include "snapjudge/safetensors.hpp"
+#include "snapjudge/shortlist.hpp"
 #include "snapjudge/tokenizer.hpp"
 #if defined(SNAPJUDGE_WITH_CUDA)
 #include "snapjudge/fast.hpp"
@@ -296,6 +297,16 @@ std::vector<json> Agent::predict_batch(const std::vector<json>& states,
 
 json Agent::system_one(const json& state, const json& questions) const {
   return predict_batch({state}, questions, 0).front();
+}
+
+json Agent::system_one_shortlist(const json& state, const json& questions,
+                                 int k, int threshold) const {
+  if (k <= 0) return system_one(state, questions);
+  const Agent* self = this;
+  EmbedFn ef = embed_fn_from_agent(*self);
+  std::function<json(const json&, const json&)> runner =
+      [self](const json& s, const json& q) { return self->system_one(s, q); };
+  return predict_shortlist_above(runner, state, questions, ef, k, threshold);
 }
 
 // ---- embed: mean-pooled encoder hidden states over tokenized texts ----------

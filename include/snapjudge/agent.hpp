@@ -36,6 +36,14 @@ class Agent {
                                  const nlohmann::ordered_json& questions) const {
     return system_one(state, questions);
   }
+  // Coarse-to-fine choice: shortlist high-cardinality choice questions (option
+  // count > `threshold`) to `k` candidates by encoder-cosine before the single
+  // forward pass, so 50+ option questions don't starve their token budget.
+  // k=0/negative disables shortlisting (single-pass fallback). `threshold`
+  // controls the auto-trigger; 0 shortlists every choice question.
+  nlohmann::ordered_json system_one_shortlist(
+      const nlohmann::ordered_json& state, const nlohmann::ordered_json& questions,
+      int k = 20, int threshold = 20) const;
   // Throughput path: same questions over many states.
   std::vector<nlohmann::ordered_json> predict_batch(
       const std::vector<nlohmann::ordered_json>& states,
