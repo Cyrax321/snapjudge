@@ -677,13 +677,17 @@ void backward_row(TrainModel::Impl& im, RowCtx& ctx, const std::vector<double>& 
 // ----------------------------- public API -------------------------------------------
 namespace {
 
-// split one TrainRow into per-question RowCtx with ids+markers
+// split one TrainRow into per-question RowCtx with ids+markers.
+// The frozen encoder forward is BATCHED across all questions of the row (one
+// GEMM schedule instead of one per question) — mathematically identical to the
+// unbatched path, only the BLAS summation order differs (~fp rounding).
 std::vector<RowCtx> encode_row(const TrainRow& row, const std::vector<InternalQ>& internals,
                                Tokenizer& tok, int64_t max_len, int64_t head_max_len,
                                TrainModel::Impl& im) {
   std::vector<RowCtx> out;
-  // tokenize the whole state's questions
-  std::vector<std::vector<int64_t>> ids_b;
+  out.reserve(row.qids.size());
+  int64_t Lmax = 0;
+  // pass 1: build sequences + markers, remember each real length
   for (size_t i = 0; i < row.qids.size(); ++i) {
     auto [seq, markers] = build_sequence(tok, row.state, internals[i], max_len,
                                          head_max_len,
@@ -694,16 +698,31 @@ std::vector<RowCtx> encode_row(const TrainRow& row, const std::vector<InternalQ>
     ctx.markers = markers;
     ctx.L = (int64_t)ctx.ids.size();
     ctx.K = (int64_t)markers.size();
-    ids_b.push_back(ctx.ids);
-    // frozen encoder forward for this row
-    std::vector<std::vector<int64_t>> one{ctx.ids};
-    std::vector<std::vector<int64_t>> mask{std::vector<int64_t>((size_t)ctx.L, 1)};
-    auto h = im.frozen->encode(one, mask);   // [1, L, D]
-    ctx.h_encoder.assign((size_t)(ctx.L * im.D), 0.f);
-    for (int64_t p = 0; p < ctx.L; ++p)
-      for (int64_t d = 0; d < im.D; ++d)
-        ctx.h_encoder[(size_t)(p * im.D + d)] = h[0][(size_t)p][(size_t)d];
+    Lmax = std::max(Lmax, ctx.L);
     out.push_back(std::move(ctx));
+  }
+  if (out.empty()) return out;
+  // pass 2: pad to a common Lmax, run one batched encoder forward, slice out
+  // each question's hidden states at its real positions.
+  const int32_t pad_id = tok.pad_id;
+  std::vector<std::vector<int64_t>> batch_ids(out.size());
+  std::vector<std::vector<int64_t>> batch_mask(out.size());
+  for (size_t i = 0; i < out.size(); ++i) {
+    batch_ids[i].assign((size_t)Lmax, pad_id);
+    batch_mask[i].assign((size_t)Lmax, 0);
+    const auto& ids = out[i].ids;
+    for (size_t p = 0; p < ids.size(); ++p) {
+      batch_ids[i][p] = ids[p];
+      batch_mask[i][p] = 1;
+    }
+  }
+  auto h = im.frozen->encode(batch_ids, batch_mask);  // [B, Lmax, D]
+  for (size_t i = 0; i < out.size(); ++i) {
+    const int64_t L = out[i].L;
+    out[i].h_encoder.assign((size_t)(L * im.D), 0.f);
+    for (int64_t p = 0; p < L; ++p)
+      for (int64_t d = 0; d < im.D; ++d)
+        out[i].h_encoder[(size_t)(p * im.D + d)] = h[i][(size_t)p][(size_t)d];
   }
   return out;
 }
