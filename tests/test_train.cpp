@@ -65,6 +65,45 @@ TEST_CASE("loss + grad smoke") {
   CHECK(st.rows == 2);
 }
 
+TEST_CASE("batched encoder forward matches per-question forward") {
+  // Two questions with different sequence lengths: encoding them in one
+  // batched pass must reproduce the logits of encoding them one at a time.
+  TrainModel tm(CKPT);
+
+  TrainRow solo = make_row();   // qids: urgent (noul) + route (choice)
+  TrainRow just_route;
+  just_route.state = solo.state;
+  just_route.qids = {"route"};
+  just_route.qdefs = {solo.qdefs[1]};
+  just_route.targets = {solo.targets[1]};
+  just_route.workflow = "tiny";
+
+  // forward_loss_double on the 1-question row -> route logits via B=1
+  double l_solo = tm.forward_loss_double(just_route);
+  // forward_loss_double on the 2-question row -> route is index 1 via B=2 batch
+  double l_batch = tm.forward_loss_double(solo);
+  (void)l_solo;
+  (void)l_batch;
+
+  // Compare the actual logits: eval_logits flattens per-question logits.
+  std::vector<std::vector<float>> lg1, lg2;
+  std::vector<std::vector<double>> tg1, tg2;
+  std::vector<int> qt1, qt2;
+  tm.eval_logits({just_route}, &lg1, &tg1, &qt1);
+  tm.eval_logits({solo}, &lg2, &tg2, &qt2);
+  REQUIRE(lg1.size() == 1);
+  REQUIRE(lg2.size() == 2);
+  // route is question[0] in the solo row and question[1] in the batch row
+  const auto& a = lg1[0];           // B=1 route logits
+  const auto& b = lg2[1];           // B=2 route logits
+  REQUIRE(a.size() == b.size());
+  double worst = 0;
+  for (size_t j = 0; j < a.size(); ++j)
+    worst = std::max(worst, std::fabs((double)a[j] - (double)b[j]));
+  fprintf(stderr, "batch-parity route logits worst=%.4g\n", worst);
+  CHECK(worst < 1e-4);
+}
+
 TEST_CASE("finite-difference gradient check") {
   TrainModel tm(CKPT);
   TrainRow row = make_row();
