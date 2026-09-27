@@ -1,0 +1,49 @@
+{
+  "clean_cases": [
+    {
+      "in": "I was charged twice on my card ending 4242. Please refund.",
+      "out": "I was charged twice on my card ending 4242. Please refund.",
+      "state": {
+        "subject": "Re: Invoice #1042",
+        "body": "I was charged twice on my card ending 4242. Please refund.",
+        "from": "a@b.com"
+      }
+    },
+    {
+      "in": "Hi team, my invoice is wrong again.\n\nThanks,\nSarah\n\nOn Tue, Sep 3, 2024 at 2:15 PM Support <support@acme.com> wrote:\n> We have resolved your issue.\n> Please check.",
+      "out": "Hi team, my invoice is wrong again.",
+      "state": {
+        "subject": "Re: Invoice #1042",
+        "body": "Hi team, my invoice is wrong again.",
+        "from": "a@b.com"
+      }
+    },
+    {
+      "in": "Please help, the app crashes on launch.\n\nBest,\nKim",
+      "out": "Please help, the app crashes on launch.",
+      "state": {
+        "subject": "Re: Invoice #1042",
+        "body": "Please help, the app crashes on launch.",
+        "from": "a@b.com"
+      }
+    },
+    {
+      "in": "Hello, the link is broken.\n\nSent from my iPhone",
+      "out": "Hello, the link is broken.",
+      "state": {
+        "subject": "Re: Invoice #1042",
+        "body": "Hello, the link is broken.",
+        "from": "a@b.com"
+      }
+    },
+    {
+      "in": "Boa tarde, preciso da nota fiscal.\n\nAtenciosamente,\nMaria",
+      "out": "Boa tarde, preciso da nota fiscal.",
+      "state": {
+        "subject": "Re: Invoice #1042",
+        "body": "Boa tarde, preciso da nota fiscal.",
+        "from": "a@b.com"
+      }
+    }
+  ]
+}

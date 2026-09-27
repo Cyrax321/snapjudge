@@ -1,0 +1,164 @@
+{
+  "render_criterion": [
+    {
+      "in": "plain text",
+      "out": "plain text"
+    },
+    {
+      "in": {
+        "desc": "x",
+        "n": 3
+      },
+      "out": "{\"desc\": \"x\", \"n\": 3}"
+    },
+    {
+      "in": [
+        "a",
+        1,
+        true
+      ],
+      "out": "[\"a\", 1, true]"
+    },
+    {
+      "in": 0,
+      "out": "0"
+    },
+    {
+      "in": false,
+      "out": "false"
+    },
+    {
+      "in": "unicode naive",
+      "out": "unicode naive"
+    }
+  ],
+  "render_options": [
+    {
+      "q": {
+        "t": "choice",
+        "ins": "",
+        "crit": {
+          "a": null,
+          "b": "bee",
+          "c": {
+            "x": 1
+          }
+        }
+      },
+      "out": [
+        "a",
+        "b: bee",
+        "c: {\"x\": 1}"
+      ]
+    },
+    {
+      "q": {
+        "t": "score",
+        "ins": "",
+        "crit": [
+          "zero",
+          "one",
+          {
+            "d": 2
+          }
+        ]
+      },
+      "out": [
+        "level 0: zero",
+        "level 1: one",
+        "level 2: {\"d\": 2}"
+      ]
+    },
+    {
+      "q": {
+        "t": "noul",
+        "ins": "",
+        "crit": {}
+      },
+      "out": [
+        "false: no, the statement does not hold",
+        "true: yes, the statement holds"
+      ]
+    }
+  ],
+  "serialize_state": [
+    {
+      "in": "just text",
+      "out": "just text"
+    },
+    {
+      "in": {
+        "a": 1,
+        "b": [
+          "x",
+          "y"
+        ]
+      },
+      "out": "{\"a\": 1, \"b\": [\"x\", \"y\"]}"
+    }
+  ],
+  "clamp_temperature": [
+    {
+      "in": 3.0,
+      "out": 3.0
+    },
+    {
+      "in": 0.1,
+      "out": 0.5
+    },
+    {
+      "in": 7.0,
+      "out": 5.0
+    },
+    {
+      "in": "__NAN__",
+      "out": 1.0
+    },
+    {
+      "in": null,
+      "out": 1.0
+    },
+    {
+      "in": "2.5",
+      "out": 2.5
+    },
+    {
+      "in": "oops",
+      "out": 1.0
+    },
+    {
+      "in": -0.0,
+      "out": 0.5
+    }
+  ],
+  "temp_bucket": [
+    {
+      "in": [
+        0,
+        2
+      ],
+      "out": "choice:2"
+    },
+    {
+      "in": [
+        0,
+        11
+      ],
+      "out": "choice:11+"
+    },
+    {
+      "in": [
+        1,
+        5
+      ],
+      "out": "score:3-5"
+    },
+    {
+      "in": [
+        2,
+        3
+      ],
+      "out": "noul:3-5"
+    }
+  ]
+}

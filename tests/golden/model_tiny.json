@@ -1,0 +1,32 @@
+{
+  "system_one": {
+    "model": "snapjudge-rl-agent",
+    "answers": {
+      "urgent": {
+        "type": "noul",
+        "noul": 0.5001,
+        "confidence": 0.5001,
+        "action": {
+          "act_probability": 1.0
+        }
+      },
+      "route": {
+        "type": "choice",
+        "choice": "other",
+        "probabilities": {
+          "billing": 0.3333,
+          "tech": 0.3333,
+          "other": 0.3334
+        },
+        "confidence": 0.0,
+        "action": {
+          "act_probability": 1.0
+        }
+      }
+    },
+    "usage": {
+      "input_tokens": 184,
+      "output_tokens": 0
+    }
+  }
+}
