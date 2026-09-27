@@ -74,3 +74,27 @@ accuracy" (bigger fine-tuned LLMs win accuracy; we won't beat them on a T4).
 ## Direction decision (pending)
 Chose NOT to compete on accuracy (crowded, big-model game). Next question:
 what is the high-reward, genuinely-underserved angle we own?
+
+## Direction (locked 2026-09-28)
+Wedge = Edge/on-device (WASM + FFI). One-liner:
+"The System One decision model that runs where the data is — on-device,
+air-gapped, any language, no Python, no cloud — same interface as Jev/Laya,
+but as a ~5MB native library."
+
+Why people pick us (deployment, not accuracy):
+- data never leaves the machine (native)
+- runs where an LLM can't: phone/router/WASM/air-gapped
+- 5MB, no Python/torch install
+- native FFI into Go/Rust/Swift/Kotlin (microseconds, not an API round-trip)
+- same interface (choice/score/noul, calibrated confidence, routing, HTTP/MCP)
+
+Honest limits:
+- match Jev/Laya INTERFACE 100%; canNOT match their ACCURACY on a T4.
+- "no competitors" is abandoned — 20 clones exist. Goal is "why they pick us".
+
+Plan:
+1. C ABI + FFI header (extern "C": sj_load/sj_predict/sj_free) + Go/Rust smoke test
+2. WASM build (pure-C++ fp32 GEMM fallback, no BLAS; emscripten)
+3. Own small encoder (~10-20M) — forced by WASM memory; also gives "no Laya
+   fingerprint" + "independent"
+4. Demo + benchmark: "5ms CPU, 2MB, no Python" vs Laya "200ms CPU, 421M"
