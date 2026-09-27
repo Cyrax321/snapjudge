@@ -98,3 +98,12 @@ Plan:
 3. Own small encoder (~10-20M) — forced by WASM memory; also gives "no Laya
    fingerprint" + "independent"
 4. Demo + benchmark: "5ms CPU, 2MB, no Python" vs Laya "200ms CPU, 421M"
+
+## Progress log
+- 2026-09-28: C ABI (include/snapjudge/capi.h + src/capi.cpp) — sj_engine_new/
+  sj_load/sj_predict/sj_error_message/sj_string_free. Opaque handle, JSON in/out.
+- 2026-09-28: plain-C smoke test (tests/capi/test_capi.c) green — proves FFI-safe.
+- 2026-09-28: Go cgo smoke test (tests/capi/go/main.go) — links libsnapjudge.a,
+  3.5MB binary, real noul decision. FFI story proven C -> Go.
+- Next: WASM build (pure-C++ fp32 GEMM fallback, no BLAS; emscripten).
+- Next: own small encoder (~10-20M) to drop Laya weights + fit WASM memory.
