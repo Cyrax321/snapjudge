@@ -1,0 +1,132 @@
+#pragma once
+// snapjudge model.hpp: DecisionModel — ModernBERT/mmBERT encoder + typed
+// decision head. All compute in fp32 on CPU.
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <nlohmann/json.hpp>
+
+namespace snapjudge {
+
+struct ModelConfig {
+  // from rl_agent_config.json
+  std::string encoder;         // e.g. "answerdotai/ModernBERT-large"
+  int head_layers = 2;
+  int max_len = 512;
+  int head_max_len = 192;
+  int n_act = 2;               // len(act_costs) + 1
+
+  // from encoder/config.json
+  int hidden_size = 0;
+  int num_hidden_layers = 0;
+  int num_attention_heads = 0;
+  int intermediate_size = 0;
+  int max_position_embeddings = 0;
+  int vocab_size = 0;
+  float norm_eps = 1e-5f;
+  bool norm_bias = false;
+  int local_attention = 0;                    // window = local_attention / 2
+  std::vector<std::string> layer_types;       // "full_attention" | "sliding_attention"
+  double rope_theta_full = 10000.0;
+  double rope_theta_sliding = 10000.0;
+};
+
+struct LayerWeights {
+  bool has_attn_norm = false;                 // layer 0: no attn_norm (Identity)
+  // fp32 weights kept as shared arrays
+  struct W { std::vector<int64_t> shape; std::shared_ptr<float[]> d; };
+  W attn_norm, wqkv, wo, mlp_norm, wi, wo2;
+  std::string attention_type;                 // layer_types[i]
+  int window = 0;                             // sliding: local_attention//2, else 0
+};
+
+class DecisionModel {
+ public:
+  // Load from parsed configs + a safetensors handle. Strict compatibility
+  // checking: required tensor prefixes, required config keys, and shape
+  // mismatches are errors naming the offending tensors.
+  static std::unique_ptr<DecisionModel> load(const nlohmann::json& rl_cfg,
+                                             const nlohmann::json& enc_cfg,
+                                             const class SafeTensors& weights,
+                                             const std::string& model_id);
+
+  // Encoder-only forward: hidden states [B, L, D] after final_norm, WITHOUT
+  // the decision head. Feeds the coarse-to-fine shortlist (mean pooling over
+  // the encoder output).
+  std::vector<std::vector<std::vector<float>>> encode(
+      const std::vector<std::vector<int64_t>>& input_ids,
+      const std::vector<std::vector<int64_t>>& attention_mask) const;
+
+  // forward: one inference pass (detach_encoder=False).
+  void forward(const std::vector<std::vector<int64_t>>& input_ids,
+               const std::vector<std::vector<int64_t>>& attention_mask,
+               const std::vector<std::vector<int64_t>>& marker_pos,
+               const std::vector<std::vector<uint8_t>>& marker_mask,
+               const std::vector<int64_t>& qtype,
+               std::vector<std::vector<float>>& logits_out,
+               std::vector<std::vector<float>>& act_out) const;
+
+  const ModelConfig& cfg() const { return cfg_; }
+
+  // ---- read-only encoder accessors (trainer LoRA path references frozen
+  // weights + rope tables without copying them) ----
+  const std::shared_ptr<float[]>& emb_w() const { return emb_w_; }
+  const std::shared_ptr<float[]>& emb_norm() const { return emb_norm_; }
+  const std::shared_ptr<float[]>& final_norm() const { return final_norm_; }
+  const std::vector<LayerWeights>& layers() const { return layers_; }
+  const std::shared_ptr<float[]>& rope_cos_full() const { return rope_cos_full_; }
+  const std::shared_ptr<float[]>& rope_sin_full() const { return rope_sin_full_; }
+  const std::shared_ptr<float[]>& rope_cos_slide() const { return rope_cos_slide_; }
+  const std::shared_ptr<float[]>& rope_sin_slide() const { return rope_sin_slide_; }
+  int D() const { return D_; }
+  int H() const { return H_; }
+  int Dh() const { return Dh_; }
+  int F() const { return F_; }
+
+ private:
+  ModelConfig cfg_;
+  // encoder
+  std::shared_ptr<float[]> emb_w_;       // [V, D]
+  std::shared_ptr<float[]> emb_norm_;    // [D]
+  std::vector<LayerWeights> layers_;
+  std::shared_ptr<float[]> final_norm_;
+  // rope tables per layer type, [max_len, Dh/2]
+  std::shared_ptr<float[]> rope_cos_full_, rope_sin_full_;
+  std::shared_ptr<float[]> rope_cos_slide_, rope_sin_slide_;
+  // optional encoder-output LoRA adapter: h += (h @ A^T) @ B^T, A [r, D], B [D, r]
+  // (rank-r linear perturbation of the frozen encoder's final hidden states).
+  int lora_r_ = 0;
+  std::shared_ptr<float[]> lora_a_;   // [r, D]
+  std::shared_ptr<float[]> lora_b_;   // [D, r]
+  // type embedding [3, D]
+  std::shared_ptr<float[]> type_emb_;
+  // head layers (nn.TransformerEncoderLayer, norm_first, relu ffn, biases)
+  struct HeadLayer {
+    std::shared_ptr<float[]> n1w, n1b, n2w, n2b;
+    std::shared_ptr<float[]> in_w, in_b, out_w, out_b;  // in_w [3D, D]
+    std::shared_ptr<float[]> l1w, l1b, l2w, l2b;        // l1 [4D, D]
+  };
+  std::vector<HeadLayer> head_;
+  // scorer: LayerNorm + Linear(d,d) + GELU + Linear(d,1)
+  std::shared_ptr<float[]> scorer_ln_w_;  // [D]
+  std::shared_ptr<float[]> scorer_ln_b_;  // [D]
+  std::shared_ptr<float[]> scorer_w1_;    // [D, D]
+  std::shared_ptr<float[]> scorer_b1_;    // [D]
+  std::shared_ptr<float[]> scorer_w2_;    // [1, D]
+  std::shared_ptr<float[]> scorer_b2_;    // [1]
+  // act_head: Linear(d+4, 256) + GELU + Linear(256, n_act)
+  std::shared_ptr<float[]> act_w1_;      // [256, D+4]
+  std::shared_ptr<float[]> act_b1_;      // [256]
+  std::shared_ptr<float[]> act_w2_;      // [n_act, 256]
+  std::shared_ptr<float[]> act_b2_;      // [n_act]
+
+  int D_ = 0, H_ = 0, Dh_ = 0, F_ = 0;
+
+  // The CUDA fast path (cuda/fast.cpp) reads these member fields directly.
+  friend class FastSnapjudge;
+};
+
+}  // namespace snapjudge
