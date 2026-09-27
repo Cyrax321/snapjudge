@@ -10,13 +10,13 @@ state ──▶ typed questions (choice / score / noul) ──▶ one forward pa
 
 You give the model a state (text, email, ticket, or JSON) and typed questions;
 snapjudge answers every question in a single bidirectional encoder forward
-pass with mathematically calibrated probabilities. It never generates text —
+pass with mathematically calibrated probabilities. It never generates text -
 so nothing to parse and nothing to hallucinate.
 
 ## Why C++?
 
-The entire engine — tokenizer, transformer encoder, typed decision head,
-routing, HTTP serving, training — is C++17 with zero ML runtime dependencies
+The entire engine - tokenizer, transformer encoder, typed decision head,
+routing, HTTP serving, training - is C++17 with zero ML runtime dependencies
 (no Python, no torch, no ONNX Runtime). It links against system BLAS
 (Apple Accelerate / OpenBLAS) and PCRE2. That shape fits environments where a
 Python/ML runtime is too heavy or unavailable: edge binaries, embedded
@@ -24,19 +24,19 @@ services, FFI into Go/Rust/Swift, hardened sandboxes.
 
 ## Features
 
-- **Typed decisions in one forward pass** — choice (finite labels), score
+- **Typed decisions in one forward pass** - choice (finite labels), score
   (ordinal rubric), noul (calibrated yes/no probability)
-- **Calibrated confidence** — the training loss rewards honest probabilities
+- **Calibrated confidence** - the training loss rewards honest probabilities
   (a proper scoring rule); post-hoc temperature fitting brings ECE down
-- **Routing across checkpoints** — script- and language-aware routing to the
+- **Routing across checkpoints** - script- and language-aware routing to the
   right checkpoint (english / multilingual / typed-decisions) in microseconds
-- **Training in C++** — full backprop through the decision head, AdamW,
+- **Training in C++** - full backprop through the decision head, AdamW,
   gradient-checked by finite differences (`ctest`)
-- **Evals and figures** — reliability diagrams, ROC, PR, confusion matrices,
+- **Evals and figures** - reliability diagrams, ROC, PR, confusion matrices,
   spread plots, LaTeX metric tables
-- **Serving** — `POST /v1/decide` HTTP server and an MCP
+- **Serving** - `POST /v1/decide` HTTP server and an MCP
   stdio server (`snapjudge-serve`, `snapjudge-mcp`)
-- **HF-hub loading** — checkpoints resolve from the HF hub or local dirs,
+- **HF-hub loading** - checkpoints resolve from the HF hub or local dirs,
   cached in an HF-compatible layout
 
 ## Quick start
@@ -109,7 +109,7 @@ Details and the loss definition: [TRAINING.md](TRAINING.md).
 
 ```bash
 SNAPJUDGE_MODELS=english,multilingual ./build/snapjudge-serve
-# POST /v1/decide — typed-decision wire format
+# POST /v1/decide - typed-decision wire format
 ```
 
 ```bash
@@ -132,7 +132,7 @@ snapjudge/
 
 ## Testing
 
-Ten doctest suites pin behavior with committed fixtures — including a
+Ten doctest suites pin behavior with committed fixtures - including a
 finite-difference gradcheck of every trainable tensor on a synthetic tiny
 checkpoint (built at configure time) and an end-to-end training → checkpoint →
 reload roundtrip.
