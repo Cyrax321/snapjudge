@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(snapjudge VERSION 0.1.0 LANGUAGES CXX)
+project(snapjudge VERSION 0.1.0 LANGUAGES C CXX)
 
 # snapjudge: a C++17 decision engine.
 # Self-contained: system BLAS only (Apple Accelerate / OpenBLAS), no ONNX, no libtorch.
@@ -198,6 +198,15 @@ if(SNAPJUDGE_BUILD_TESTS)
       target_compile_definitions(${t} PRIVATE SNAPJUDGE_TINY_CKPT="${TINY_CKPT}")
     endif()
   endforeach()
+
+  # ---- C API smoke test (plain C file, proves the ABI is FFI-safe) ----------
+  add_executable(test_capi tests/capi/test_capi.c)
+  target_link_libraries(test_capi PRIVATE snapjudge)
+  add_dependencies(test_capi snapjudge_tiny_ckpt)
+  add_test(NAME test_capi COMMAND test_capi)
+  set_tests_properties(test_capi PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    ENVIRONMENT "SNAPJUDGE_TINY_CKPT=${TINY_CKPT}")
 endif()
 
 install(TARGETS snapjudge ARCHIVE DESTINATION lib)
