@@ -4,13 +4,16 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "snapjudge/unicode.hpp"
+
+#ifdef SNAPJUDGE_HAVE_PCRE2
 #define PCRE2_CODE_UNIT_WIDTH 8
 #include <pcre2.h>
-
-#include "snapjudge/unicode.hpp"
+#endif
 
 namespace snapjudge {
 
@@ -19,6 +22,11 @@ namespace {
 // Thin PCRE2 wrapper. Compiles once with UTF+UCP (the Python `re.UNICODE`
 // equivalent); `search` matches anywhere, `match_span` returns the group-0 span.
 // The code handle is shared so `Re` is safely copyable into the static tables.
+//
+// When PCRE2 is unavailable (SNAPJUDGE_HAVE_PCRE2 unset — the WASM / no-deps
+// build), `Re` is a no-op that never matches: clean_email_body still runs, but
+// skips the regex-based history/signature/disclaimer stripping.
+#ifdef SNAPJUDGE_HAVE_PCRE2
 struct Re {
   std::shared_ptr<pcre2_code> code;
   Re(const char* pattern, bool caseless = false) {
@@ -56,6 +64,15 @@ struct Re {
     return out;
   }
 };
+#else
+struct Re {
+  Re(const char*, bool = false) {}
+  bool search(const std::string&) const { return false; }
+  std::pair<size_t, size_t> match_span(const std::string&, size_t = 0) const {
+    return {std::string::npos, std::string::npos};
+  }
+};
+#endif
 
 // ---------------------------------------------------------------------------
 // Quoted-history markers. A reply header ("On Tue, ... wrote:") or a forwarded-

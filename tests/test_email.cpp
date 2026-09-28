@@ -18,6 +18,7 @@ static std::string golden_dir() {
 }
 
 TEST_CASE("email cleaning pinned to committed fixtures") {
+#ifdef SNAPJUDGE_HAVE_PCRE2
   std::ifstream f(golden_dir() + "/email.json");
   REQUIRE(f.good());
   ordered_json g;
@@ -34,6 +35,14 @@ TEST_CASE("email cleaning pinned to committed fixtures") {
                                   ordered_json::object(), "a@b.com");
     CHECK(st == c["state"]);
   }
+#else
+  // No PCRE2: clean_email_body runs in no-op mode. Verify it is still callable
+  // and returns the input unchanged (minus whitespace normalization).
+  CHECK(clean_email_body("plain body") == "plain body");
+  ordered_json st = email_state("s", "b", ordered_json::object(), "a@b.com");
+  CHECK(st["subject"] == "s");
+  CHECK(st["body"] == "b");
+#endif
 }
 
 TEST_CASE("presets are structurally complete") {

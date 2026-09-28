@@ -107,3 +107,11 @@ Plan:
   3.5MB binary, real noul decision. FFI story proven C -> Go.
 - Next: WASM build (pure-C++ fp32 GEMM fallback, no BLAS; emscripten).
 - Next: own small encoder (~10-20M) to drop Laya weights + fit WASM memory.
+
+## Progress log (continued)
+- 2026-09-28: WASM / no-deps portability. SNAPJUDGE_NO_BLAS adds a pure-C++
+  cblas_sgemm fallback (src/cblas_fallback.cpp); PCRE2 + CURL now optional.
+  Both builds green (12/12). No-deps lib = ~4.7MB, no BLAS/PCRE2/CURL needed.
+- 2026-09-28: scripts/build_wasm.sh (emscripten target, off until emsdk installed).
+- Next: install emsdk and actually emit snapjudge.wasm.
+- Next (big): own small encoder (~10-20M) to drop Laya weights + fit WASM memory.

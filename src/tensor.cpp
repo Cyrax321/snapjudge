@@ -7,7 +7,8 @@
 #include <stdexcept>
 #include <thread>
 
-// cblas: Apple Accelerate or OpenBLAS both export C symbol names.
+// cblas: Apple Accelerate or OpenBLAS both export C symbol names. In the
+// no-BLAS build the same symbol is provided by src/cblas_fallback.cpp.
 extern "C" {
 void cblas_sgemm(int Order, int TransA, int TransB, int M, int N, int K,
                  float alpha, const float* A, int lda, const float* B, int ldb,
