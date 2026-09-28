@@ -42,6 +42,16 @@ class Tokenizer {
   // Falls back to a fresh parse when the mtime cannot be read.
   static std::shared_ptr<Tokenizer> cached_from_dir(const std::string& dir);
 
+  // GPT-2 byte -> unicode code-point table for the ByteLevel path (single
+  // shared table, built once). Public so the BPE trainer (bpe_train.hpp) uses
+  // the exact same table the encoder uses.
+  static const std::u32string& byte_unicode();
+
+  // Scanner for the GPT-2 byte-level split rule:
+  //   's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+
+  // Public so the BPE trainer splits text exactly as the encoder does.
+  static std::vector<std::u32string> gpt2_split(const std::u32string& text);
+
  private:
   enum class Kind { ByteLevel, Metaspace };
   Kind kind_ = Kind::ByteLevel;
@@ -72,10 +82,6 @@ class Tokenizer {
   // Normalizer "Replace" rules, applied in order (pattern, content).
   std::vector<std::pair<std::string, std::string>> replaces_;
 
-  // GPT-2 byte -> unicode code-point table for the ByteLevel path (single
-  // shared table, built once).
-  static const std::u32string& byte_unicode();
-
   int32_t vocab_lookup(const std::string& tok) const;
   std::vector<std::u32string> bpe_word(std::vector<char32_t> word) const;
 
@@ -88,10 +94,6 @@ class Tokenizer {
 
   std::vector<int32_t> encode_bytelevel_gap(const std::u32string& nfc_cps) const;
   std::vector<int32_t> encode_metaspace_gap(const std::string& text) const;
-
-  // Scanner for the GPT-2 byte-level split rule:
-  //   's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+
-  static std::vector<std::u32string> gpt2_split(const std::u32string& text);
 };
 
 }  // namespace snapjudge
