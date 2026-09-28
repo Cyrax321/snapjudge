@@ -208,6 +208,21 @@ if(SNAPJUDGE_BUILD_TESTS)
     endif()
   endforeach()
 
+  # ---- native SjModel checkpoint fixture -------------------------------------
+  set(SJ_CKPT ${CMAKE_CURRENT_BINARY_DIR}/sj-tiny-ckpt)
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  add_custom_command(
+    OUTPUT ${SJ_CKPT}/model.safetensors
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/python/make_sj_tiny_ckpt.py ${SJ_CKPT}
+    DEPENDS python/make_sj_tiny_ckpt.py
+    COMMENT "snapjudge: synthesizing tiny native SjModel checkpoint"
+  )
+  add_custom_target(snapjudge_sj_ckpt DEPENDS ${SJ_CKPT}/model.safetensors)
+  if(TARGET test_sj_model)
+    add_dependencies(test_sj_model snapjudge_sj_ckpt)
+    target_compile_definitions(test_sj_model PRIVATE SNAPJUDGE_SJ_CKPT="${SJ_CKPT}")
+  endif()
+
   # ---- C API smoke test (plain C file, proves the ABI is FFI-safe) ----------
   add_executable(test_capi tests/capi/test_capi.c)
   target_link_libraries(test_capi PRIVATE snapjudge)

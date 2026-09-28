@@ -123,3 +123,14 @@ Plan:
   no network/filesystem/Python. Single-thread attention via __EMSCRIPTEN__ guard.
 - C ABI + no-BLAS/no-PCRE2 portability = the WASM prerequisites, now proven.
 - Remaining: own small encoder (~10-20M) to drop Laya weights + fit WASM memory.
+
+## Progress log (continued)
+- 2026-09-28: OWN MODEL STARTED. bpe_train (own byte-level BPE trainer) done.
+- 2026-09-28: SjModel (sj_model.hpp/.cpp) — snapjudge's native model. Classic
+  BERT-style encoder (learned absolute positions, GELU, biases, full attention,
+  separate q/k/v/o) + own head, `sj.*` tensor namespace. Deliberately NOT
+  ModernBERT (RoPE/GeGLU/no-bias/sliding) so zero fingerprint.
+- 2026-09-28: python/make_sj_tiny_ckpt.py synthesizes a tiny SjModel checkpoint;
+  test_sj_model loads + runs a real forward. 14/14 green.
+- Next: SjTrainModel (own trainer over SjModel weights) + own checkpoint I/O.
+- Next: pretrain the encoder (MLM) then fine-tune the head on data/train.jsonl.
