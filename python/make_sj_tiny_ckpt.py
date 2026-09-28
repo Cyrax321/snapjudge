@@ -15,7 +15,7 @@ import sys
 import numpy as np
 
 OUT = sys.argv[1] if len(sys.argv) > 1 else "/tmp/snapjudge-sj-tiny"
-V, D, H, F, L, LAYERS = 64, 16, 2, 32, 64, 2
+V, D, H, F, L, LAYERS = 512, 16, 2, 32, 64, 2
 HEAD_LAYERS = 1
 N_TYPES = 3
 HEAD_INTER = 32
@@ -115,5 +115,39 @@ cfg = {
 }
 with open(os.path.join(OUT, "sj_config.json"), "w") as f:
     json.dump(cfg, f, indent=1)
+
+# toy byte-level tokenizer, matching the vocab_size above (512 entries: 256
+# byte-symbols in the GPT-2 space plus the specials + a few extra slots).
+def _b2u(b):
+    if (0x21 <= b <= 0x7E) or (0xA1 <= b <= 0xAC) or (0xAE <= b <= 0xFF):
+        return chr(b)
+    return chr(0x100 + b)
+
+vocab = {"[UNK]": 0, "[CLS]": 1, "[SEP]": 2, "[PAD]": 3, "[MASK]": 4}
+for b in range(256):
+    u = _b2u(b)
+    if u not in vocab:
+        vocab[u] = len(vocab)
+# ensure vocab size == V
+while len(vocab) < V:
+    vocab["\u0100extra" + str(len(vocab))] = len(vocab)
+tok = {
+    "model": {"type": "BPE", "vocab": vocab, "merges": []},
+    "normalizer": {"type": "NFC"},
+    "pre_tokenizer": {"type": "ByteLevel", "add_prefix_space": False,
+                      "trim_offsets": True, "use_regex": True},
+    "added_tokens": [
+        {"id": 0, "content": "[UNK]", "special": True, "normalized": False},
+        {"id": 1, "content": "[CLS]", "special": True, "normalized": False},
+        {"id": 2, "content": "[SEP]", "special": True, "normalized": False},
+        {"id": 3, "content": "[PAD]", "special": True, "normalized": False},
+        {"id": 4, "content": "[MASK]", "special": True, "normalized": False},
+    ],
+}
+os.makedirs(os.path.join(OUT, "tokenizer"), exist_ok=True)
+with open(os.path.join(OUT, "tokenizer", "tokenizer.json"), "w") as f:
+    json.dump(tok, f)
+with open(os.path.join(OUT, "tokenizer", "tokenizer_config.json"), "w") as f:
+    json.dump({"tokenizer_class": "TokenizersBackend"}, f)
 
 print("wrote", OUT)

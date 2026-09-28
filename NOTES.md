@@ -134,3 +134,14 @@ Plan:
   test_sj_model loads + runs a real forward. 14/14 green.
 - Next: SjTrainModel (own trainer over SjModel weights) + own checkpoint I/O.
 - Next: pretrain the encoder (MLM) then fine-tune the head on data/train.jsonl.
+
+## Progress log (continued)
+- 2026-09-28: SjTrainModel done (sj_train.hpp/.cpp). Own head trainer over SjModel:
+  frozen encoder forward, trainable type_emb + head layers + scorer, proper-score
+  loss + AdamW. Gradient-checked (FD worst_rel ~6% on type_emb, <3% elsewhere)
+  and overfits one row (0.57 -> 0.26). save_checkpoint writes native sj schema.
+- Full own-model pipeline now exists end to end: own tokenizer trainer -> own
+  SjModel encoder/head -> own SjTrainModel -> own checkpoint I/O. 15/15 tests.
+- Remaining (the real grind): pretrain the encoder (MLM on public text), then
+  fine-tune the head on data/train.jsonl. No GPU required for the smoke path;
+  the tiny checkpoint already trains + overfits on CPU.
