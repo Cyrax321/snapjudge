@@ -215,8 +215,15 @@ Tensor attention(const Tensor& q, const Tensor& k, const Tensor& v,
       }
     }
   };
+
+#ifdef __EMSCRIPTEN__
+  // Single-threaded WASM has no working std::thread; run the work inline on the
+  // main (and only) thread.
+  worker();
+#else
   for (unsigned t = 0; t < nthreads; ++t) pool.emplace_back(worker);
   for (auto& th : pool) th.join();
+#endif
   return out;
 }
 

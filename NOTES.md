@@ -115,3 +115,11 @@ Plan:
 - 2026-09-28: scripts/build_wasm.sh (emscripten target, off until emsdk installed).
 - Next: install emsdk and actually emit snapjudge.wasm.
 - Next (big): own small encoder (~10-20M) to drop Laya weights + fit WASM memory.
+
+## Progress log (continued)
+- 2026-09-28: WASM BUILT AND RUNNING. emsdk 6.0.10 installed; snapjudge compiles to
+  wasm32. scripts/build_wasm_demo.sh embeds the checkpoint into the module.
+  snapjudge-demo.wasm = ~762KB self-contained, runs a real noul decision in Node,
+  no network/filesystem/Python. Single-thread attention via __EMSCRIPTEN__ guard.
+- C ABI + no-BLAS/no-PCRE2 portability = the WASM prerequisites, now proven.
+- Remaining: own small encoder (~10-20M) to drop Laya weights + fit WASM memory.
