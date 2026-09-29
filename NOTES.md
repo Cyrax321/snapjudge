@@ -157,3 +157,15 @@ Plan:
 - Remaining to be a USABLE model: run the pretrain + fine-tune on real data
   (public text for MLM; data/train.jsonl for the head). That is data + compute,
   not code. A CLI driver (train_main) wiring the three stages is the last code piece.
+
+## Progress log (continued)
+- 2026-09-28: own-model CLI done (own_main/main.cpp + sj_init). Three-stage driver:
+    snapjudge-own init      --out DIR [--hidden/--layers/--heads/...]
+    snapjudge-own pretrain  --out DIR --corpus FILE [--steps --lr]
+    snapjudge-own finetune  --out DIR --data train.jsonl
+  Fully self-contained C++ (sj_init writes a fresh checkpoint + byte-level
+  tokenizer, no Python). Verified end-to-end: init -> pretrain (loss 5.93->0.92
+  on a 4-line corpus) -> finetune -> saved checkpoint loads + runs forward.
+- The own-model build/train pipeline is COMPLETE. The only remaining work to make
+  a USABLE model is running pretrain + finetune on real data (public text + the
+  full data/train.jsonl), which is compute, not code.
