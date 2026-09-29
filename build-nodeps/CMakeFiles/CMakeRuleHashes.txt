@@ -1,4 +1,0 @@
-# Hashes of file build rules.
-d01a41f4740e0f2e4a9aba7badd1f0d1 CMakeFiles/snapjudge_tiny_ckpt
-71b38a04d8617ebe78200131ecda900b CMakeFiles/snapjudge_unicode_tables
-0b332d1b70128705e85e5343511d3247 generated/unicode_tables.inc
