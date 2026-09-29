@@ -145,3 +145,15 @@ Plan:
 - Remaining (the real grind): pretrain the encoder (MLM on public text), then
   fine-tune the head on data/train.jsonl. No GPU required for the smoke path;
   the tiny checkpoint already trains + overfits on CPU.
+
+## Progress log (continued)
+- 2026-09-28: SjPretrain (MLM) done (sj_pretrain.hpp/.cpp). Full encoder pretraining
+  (embeddings + every layer + final norm + MLM head) with masked-language-modeling,
+  AdamW. Deterministic mask (hash of ids) so gradcheck is exact: worst_rel 2.3%,
+  MLM overfits 6.27 -> 0.0076. save_checkpoint writes native sj schema.
+- Own-model pipeline is now COMPLETE end to end: train tokenizer -> pretrain
+  encoder (MLM) -> fine-tune head -> save native checkpoint -> load via FFI/WASM.
+  16/16 tests green, zero external model/tokenizer dependency.
+- Remaining to be a USABLE model: run the pretrain + fine-tune on real data
+  (public text for MLM; data/train.jsonl for the head). That is data + compute,
+  not code. A CLI driver (train_main) wiring the three stages is the last code piece.
