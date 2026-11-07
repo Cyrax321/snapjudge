@@ -5,7 +5,7 @@
 //   pretrain  masked-language-model the encoder on a raw text corpus
 //   finetune  train the decision head on typed-decisions JSONL
 //
-// This is the OWN pipeline: no external tokenizer, no ModernBERT, no Laya.
+// This is the OWN pipeline: no external tokenizer, no external backbone, 100% native.
 // Everything runs in C++ over the native sj_* checkpoint schema.
 
 #include <cmath>
