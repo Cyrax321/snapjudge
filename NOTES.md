@@ -9,21 +9,16 @@ days ~20 open clones shipped. The core concept: typed questions
 (choice / score / noul) over unstructured state, answered in one pass with
 calibrated probabilities. No text generation.
 
-### What Jev and Laya are
+### What Jev is
 - **TypeSafe Jev** — hosted, closed-source decision API. 3 primitives
   (Choice / Score / Noul), batched "speculative fan-out", /v1/systemone wire.
   No public weights/architecture. Strong on high-cardinality labels, weak on
   soft-distribution matching (assigns 0 prob to true label on 16% of DAIR).
-- **Laya (ConvAI / NandhaKishorM)** — open Apache-2.0 self-host clone of Jev.
-  Encoder = ModernBERT-large (421M, English) / mmBERT-base (322M, multilingual).
-  Head trained with RLCD (proper scoring rules) for calibration. Router picks
-  English vs multilingual per request. Python, torch. ~33ms GPU / ~200ms CPU.
 
-### Landscape (from laya-ai.com/system-one-models + MarkTechPost)
+### Landscape (System-1 Decision Models)
 | Model | Approach | Size | License | Runs on |
 |---|---|---|---|---|
 | TypeSafe Jev | hosted | undisclosed | proprietary | cloud |
-| Laya | ModernBERT encoder + head | 322/421M | Apache-2.0 | CPU/CUDA/MPS |
 | Kev (Jared Palmer) | fine-tuned Qwen3.5 | 0.8/4/9/27B | Apache-2.0 | Mac/GPU |
 | Decider (Mapika) | fine-tuned Qwen | 2/4/35B MoE | Apache-2.0 | GPU/vLLM |
 | Von (wfzyx) | ModernBERT-large, order-invariant | 395M | Apache-2.0 | CPU/GPU |
