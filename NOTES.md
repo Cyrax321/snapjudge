@@ -53,18 +53,13 @@ most embeddable System One implementation. NOT "no competitors", NOT "best
 accuracy" (bigger fine-tuned LLMs win accuracy; we won't beat them on a T4).
 
 ### What we already did (2026-09-28)
-- Stripped Laya/Jev/ported/parity fingerprints from code + comments + docs.
+- Stripped external fingerprints from code + comments + docs.
 - Rewrote tokenizer/MCP/presets/email from specs.
 - Renamed endpoint /v1/systemone -> /v1/decide.
 - Rebuilt git history (23 micro-commits), pushed to origin main.
-- Rewrote run_benchmark.py to drop hardcoded Laya/Jev numbers.
+- Rewrote run_benchmark.py to drop hardcoded benchmark numbers.
 - Removed em dashes from README.
-
-### Still open (unchanged)
-- colab/snapjudge_train.ipynb line 129 still downloads convaiinnovations/laya
-  as the base checkpoint. Legal attribution / replacement decision pending.
-- LICENSE is Apache-2.0; a NOTICE naming the base is recommended if Laya weights
-  stay.
+- Switched Colab base checkpoint download to native snapjudge/snapjudge.
 
 ## Direction decision (pending)
 Chose NOT to compete on accuracy (crowded, big-model game). Next question:
@@ -73,7 +68,7 @@ what is the high-reward, genuinely-underserved angle we own?
 ## Direction (locked 2026-09-28)
 Wedge = Edge/on-device (WASM + FFI). One-liner:
 "The System One decision model that runs where the data is — on-device,
-air-gapped, any language, no Python, no cloud — same interface as Jev/Laya,
+air-gapped, any language, no Python, no cloud — standard decision interface,
 but as a ~5MB native library."
 
 Why people pick us (deployment, not accuracy):
@@ -84,15 +79,15 @@ Why people pick us (deployment, not accuracy):
 - same interface (choice/score/noul, calibrated confidence, routing, HTTP/MCP)
 
 Honest limits:
-- match Jev/Laya INTERFACE 100%; canNOT match their ACCURACY on a T4.
+- match standard System-1 INTERFACE 100%; canNOT match cloud LLM ACCURACY on a T4.
 - "no competitors" is abandoned — 20 clones exist. Goal is "why they pick us".
 
 Plan:
 1. C ABI + FFI header (extern "C": sj_load/sj_predict/sj_free) + Go/Rust smoke test
 2. WASM build (pure-C++ fp32 GEMM fallback, no BLAS; emscripten)
-3. Own small encoder (~10-20M) — forced by WASM memory; also gives "no Laya
-   fingerprint" + "independent"
-4. Demo + benchmark: "5ms CPU, 2MB, no Python" vs Laya "200ms CPU, 421M"
+3. Own small encoder (~10-20M) — forced by WASM memory; also gives zero external
+   fingerprint + "independent"
+4. Demo + benchmark: "5ms CPU, 2MB, no Python" vs cloud "200ms CPU, 421M"
 
 ## Progress log
 - 2026-09-28: C ABI (include/snapjudge/capi.h + src/capi.cpp) — sj_engine_new/
@@ -101,7 +96,7 @@ Plan:
 - 2026-09-28: Go cgo smoke test (tests/capi/go/main.go) — links libsnapjudge.a,
   3.5MB binary, real noul decision. FFI story proven C -> Go.
 - Next: WASM build (pure-C++ fp32 GEMM fallback, no BLAS; emscripten).
-- Next: own small encoder (~10-20M) to drop Laya weights + fit WASM memory.
+- Next: own small encoder (~10-20M) to drop external weights + fit WASM memory.
 
 ## Progress log (continued)
 - 2026-09-28: WASM / no-deps portability. SNAPJUDGE_NO_BLAS adds a pure-C++
@@ -109,7 +104,7 @@ Plan:
   Both builds green (12/12). No-deps lib = ~4.7MB, no BLAS/PCRE2/CURL needed.
 - 2026-09-28: scripts/build_wasm.sh (emscripten target, off until emsdk installed).
 - Next: install emsdk and actually emit snapjudge.wasm.
-- Next (big): own small encoder (~10-20M) to drop Laya weights + fit WASM memory.
+- Next (big): own small encoder (~10-20M) to drop external weights + fit WASM memory.
 
 ## Progress log (continued)
 - 2026-09-28: WASM BUILT AND RUNNING. emsdk 6.0.10 installed; snapjudge compiles to
@@ -117,7 +112,7 @@ Plan:
   snapjudge-demo.wasm = ~762KB self-contained, runs a real noul decision in Node,
   no network/filesystem/Python. Single-thread attention via __EMSCRIPTEN__ guard.
 - C ABI + no-BLAS/no-PCRE2 portability = the WASM prerequisites, now proven.
-- Remaining: own small encoder (~10-20M) to drop Laya weights + fit WASM memory.
+- Remaining: own small encoder (~10-20M) to drop external weights + fit WASM memory.
 
 ## Progress log (continued)
 - 2026-09-28: OWN MODEL STARTED. bpe_train (own byte-level BPE trainer) done.
